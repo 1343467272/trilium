@@ -68,6 +68,12 @@ jobs:
           # 3. 最后执行同步
           pnpm --filter @triliumnext/mobile exec cap sync ios
 
+      # 新增这一步：用PlistBuddy工具直接向源码的Info.plist注入配置
+      - name: Add AppBoundDomains to Info.plist
+        run: |
+          /usr/libexec/PlistBuddy -c "Add :WKAppBoundDomains array" apps/mobile/ios/App/App/Info.plist
+          /usr/libexec/PlistBuddy -c "Add :WKAppBoundDomains:0 string localhost" apps/mobile/ios/App/App/Info.plist
+
       # 1. 更改为构建真机架构的未签名 App
       - name: Build iOS app for Device (unsigned)
         working-directory: apps/mobile/ios/App
