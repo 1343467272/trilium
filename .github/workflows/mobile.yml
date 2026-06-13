@@ -57,7 +57,12 @@ jobs:
         run: pnpm --filter @triliumnext/mobile build
 
       - name: Sync Capacitor iOS project
-        run: pnpm --filter @triliumnext/mobile exec cap sync ios
+        run: |
+          if [ ! -d "apps/mobile/ios" ]; then
+            echo "iOS platform folder not found, adding it now..."
+            pnpm --filter @triliumnext/mobile exec cap add ios
+          fi
+          pnpm --filter @triliumnext/mobile exec cap sync ios
 
       # 1. 更改为构建真机架构的未签名 App
       - name: Build iOS app for Device (unsigned)
