@@ -60,8 +60,12 @@ jobs:
         run: |
           if [ ! -d "apps/mobile/ios" ]; then
             echo "iOS platform folder not found, adding it now..."
+            # 1. 先为该模块安装 @capacitor/ios 依赖
+            pnpm --filter @triliumnext/mobile add @capacitor/ios
+            # 2. 然后再添加 iOS 平台目录
             pnpm --filter @triliumnext/mobile exec cap add ios
           fi
+          # 3. 最后执行同步
           pnpm --filter @triliumnext/mobile exec cap sync ios
 
       # 1. 更改为构建真机架构的未签名 App
