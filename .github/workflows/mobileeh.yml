@@ -59,14 +59,13 @@ jobs:
       - name: Sync Capacitor iOS project
         run: |
           if [ ! -d "apps/mobile/ios" ]; then
-            echo "iOS platform folder not found, adding it now..."
-            # 1. 先为该模块安装 @capacitor/ios 依赖
             pnpm --filter @triliumnext/mobile add @capacitor/ios
-            # 2. 然后再添加 iOS 平台目录
+            # 关键步骤：安装这个插件来强制启用本地服务器
+            pnpm --filter @triliumnext/mobile add cordova-plugin-ionic-webview
             pnpm --filter @triliumnext/mobile exec cap add ios
           fi
-          # 3. 最后执行同步
           pnpm --filter @triliumnext/mobile exec cap sync ios
+
 
       # 新增这一步：用PlistBuddy工具直接向源码的Info.plist注入配置
       - name: Add AppBoundDomains to Info.plist
