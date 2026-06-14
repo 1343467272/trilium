@@ -33,12 +33,6 @@ jobs:
     # iOS builds require Xcode, which is only available on macOS runners.
     runs-on: macos-latest
     steps:
-      - name: Clean build
-        working-directory: apps/mobile/ios/App
-        run: |
-          # 这一步是为了确保没有旧的缓存导致插件配置未生效
-          rm -rf build
-
       - name: Checkout the repository
         uses: actions/checkout@v6
 
