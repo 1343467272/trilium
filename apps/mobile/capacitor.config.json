@@ -18,6 +18,9 @@
       "launchAutoHide": true,
       "launchShowDuration": 2000,
       "launchFadeOutDuration": 300
-    }
+    },
+    "IonicWebView": {
+      "iosScheme": "https"
+    }    
   }
 }
