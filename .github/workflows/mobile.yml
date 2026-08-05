@@ -89,3 +89,38 @@ jobs:
           name: trilium-mobile-ios-simulator-app
           path: apps/mobile/ios/App/build/Build/Products/Debug-iphonesimulator/App.app.zip
           retention-days: 14
+
+      # Build an unsigned .ipa for real iOS devices (arm64). No Apple Developer
+      # signing is involved, so a stock iOS device refuses to install it — it
+      # requires a jailbroken device with AppSync Unified (or similar). The
+      # deployment target (IPHONEOS_DEPLOYMENT_TARGET = 15.0) keeps the app
+      # installable on iOS 16 and newer.
+      - name: Build unsigned iOS app for device
+        working-directory: apps/mobile/ios/App
+        run: |
+          xcodebuild \
+            -project App.xcodeproj \
+            -scheme App \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build-device \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package unsigned .ipa
+        working-directory: apps/mobile/ios/App/build-device/Build/Products/Release-iphoneos
+        run: |
+          rm -rf Payload
+          mkdir Payload
+          cp -R App.app Payload/
+          zip -ry TriliumNotes-unsigned-ios.ipa Payload
+
+      - name: Upload unsigned iOS device .ipa
+        uses: actions/upload-artifact@v7
+        with:
+          name: trilium-mobile-ios-device-unsigned-ipa
+          path: apps/mobile/ios/App/build-device/Build/Products/Release-iphoneos/TriliumNotes-unsigned-ios.ipa
+          retention-days: 14
