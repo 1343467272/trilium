@@ -5,6 +5,7 @@ import { ComponentChildren, createContext, RefObject } from "preact";
 import { useEffect, useImperativeHandle, useRef, useState } from "preact/hooks";
 
 import { t } from "../../../services/i18n";
+import { isMobile } from "../../../services/utils";
 import { getMeasurementSystem } from "../../../utils/formatters";
 import { useElementSize, useSyncedRef, useTriliumOption } from "../../react/hooks";
 import NoItems from "../../react/NoItems";
@@ -18,6 +19,9 @@ export interface GeoMouseEvent {
 }
 
 export const ParentMap = createContext<MapLibreGLMap | null>(null);
+
+/** The zoom a map opens at where no view has been saved: far enough out to see the whole world. */
+export const DEFAULT_ZOOM = 2;
 
 /**
  * Whether the map's style has finished loading, and so whether a source or a layer can be added to it.
@@ -139,6 +143,36 @@ export default function Map({ coordinates, zoom, layerData, viewportChanged, chi
     const [ unsupported, setUnsupported ] = useState(false);
     // See MapStyleLoaded.
     const [ styleLoaded, setStyleLoaded ] = useState(false);
+    // The same answer again as a ref, so applyStyle can read it from whichever closure it is
+    // called in, and the style applyStyle is holding until it turns true.
+    const styleLoadedRef = useRef(false);
+    const pendingStyle = useRef<StyleSpecification | string | null>(null);
+
+    /**
+     * Puts a style on the map, carrying what the children added to the last one across — or, while
+     * the style already there has not finished loading, holds it instead.
+     *
+     * MapLibre swaps styles by diffing the new one against the current one, which is what keeps the
+     * painted map on screen through the switch. But it cannot diff against a style that is still
+     * loading — and every style still is for at least a frame, since even one handed over as plain
+     * JSON is only taken up on the next animation frame. Rather than wait that frame out, MapLibre
+     * gives up: "Unable to perform style diff" on the console, the whole style torn down, and the
+     * map blinking blank until the replacement and its tiles arrive. The vector styles here import
+     * asynchronously and routinely resolve inside that first frame, so the blink was a matter of
+     * which of the two won.
+     *
+     * Held styles are applied by the `style.load` listener below, where the diff cannot lose the
+     * race. Only the latest is kept — a style overtaken before it was ever applied is a style
+     * nobody asked to see.
+     */
+    function applyStyle(mapInstance: MapLibreGLMap, style: StyleSpecification | string) {
+        if (!styleLoadedRef.current) {
+            pendingStyle.current = style;
+            return;
+        }
+        mapInstance.setStyle(style, { transformStyle: keepAdditions(appliedStyle.current) });
+        appliedStyle.current = typeof style === "string" ? undefined : styleContents(style);
+    }
 
     // Initialize the map.
     useEffect(() => {
@@ -167,12 +201,24 @@ export default function Map({ coordinates, zoom, layerData, viewportChanged, chi
         // own: a style begins loading inside the constructor and `style.load` fires once, so a
         // listener attached even one render later can already be too late. Never unlatched — a style
         // that has loaded is followed only by another style loading, and each of those fires again.
-        mapInstance.on("style.load", () => setStyleLoaded(true));
+        // Also where a style that arrived too early to be applied gets its turn — see applyStyle.
+        mapInstance.on("style.load", () => {
+            styleLoadedRef.current = true;
+            setStyleLoaded(true);
+
+            const held = pendingStyle.current;
+            if (held) {
+                pendingStyle.current = null;
+                applyStyle(mapInstance, held);
+            }
+        });
 
         // The attribution stands at the foot of the map beside its scale, rather than in the corner
         // where the zoom buttons now are (see MapToolbar): a bar of buttons is reached for, and it
-        // would otherwise sit on top of a line of small print that is itself made of links.
-        mapInstance.addControl(new AttributionControl(), "bottom-left");
+        // would otherwise sit on top of a line of small print that is itself made of links. On
+        // mobile the foot is fully spoken for, so it stands at the head instead — in the leading
+        // corner, the trailing one being the detail pane's whenever a marker is open.
+        mapInstance.addControl(new AttributionControl(), isMobile() ? "top-left" : "bottom-left");
 
         // An error MapLibre finds no listener for goes to `console.error` with the stack of the
         // fetch that failed, and a tile server answering 403 fails once per tile: a screenful of
@@ -187,7 +233,7 @@ export default function Map({ coordinates, zoom, layerData, viewportChanged, chi
         });
 
         // No navigation control of MapLibre's own: the zoom buttons are Trilium's (see MapToolbar),
-        // dressed as every other bar standing over a canvas in the app. No compass either — nothing
+        // dressed as the image viewer's zoom controls are. No compass either — nothing
         // here persists a bearing, so the button would offer to undo a rotation the map never
         // remembers.
         setMap(mapInstance);
@@ -196,36 +242,34 @@ export default function Map({ coordinates, zoom, layerData, viewportChanged, chi
             mapInstance.remove();
             setMap(null);
             setStyleLoaded(false);
+            styleLoadedRef.current = false;
+            pendingStyle.current = null;
         };
     }, []);
 
-    // React to layer changes. Also runs after the initial map creation, which is a no-op for the
-    // synchronous styles (setStyle diffs against the current style) but loads the asynchronous
-    // vector styles for the first time.
+    // React to layer changes. Also runs after the initial map creation, which for the synchronous
+    // styles re-applies the style the map was built with (a diff with nothing in it) but loads the
+    // asynchronous vector styles for the first time.
     useEffect(() => {
         if (!map) return;
 
         let cancelled = false;
-
-        /** Puts a style on the map, carrying what the children added to the last one across. */
-        function apply(style: StyleSpecification | string) {
-            map?.setStyle(style, { transformStyle: keepAdditions(appliedStyle.current) });
-            appliedStyle.current = typeof style === "string" ? undefined : styleContents(style);
-        }
 
         if (layerData.type === "vector" && typeof layerData.style !== "string") {
             layerData.style().then(asyncStyle => {
                 // Guard against the layer changing again or the map being torn down while the
                 // style was still loading.
                 if (cancelled) return;
-                apply(asyncStyle);
+                applyStyle(map, asyncStyle);
             });
         } else {
-            apply(buildSyncStyle(layerData));
+            applyStyle(map, buildSyncStyle(layerData));
         }
 
         return () => {
             cancelled = true;
+            // A style still being held is this run's; the run for the next layer brings its own.
+            pendingStyle.current = null;
         };
     }, [ map, layerData ]);
 
@@ -305,6 +349,31 @@ export default function Map({ coordinates, zoom, layerData, viewportChanged, chi
                 )}
         </div>
     );
+}
+
+/**
+ * How far the view is leaned over, followed as it changes — by the tilt button, or by Ctrl and a
+ * drag, which MapLibre honours without being asked.
+ *
+ * Read by anything whose answer differs between a flat map and a leaned-over one: which view the
+ * tilt button should offer (see {@link MapToolbar} — a tilt entered by hand is as much a 3D view as
+ * one the button gave), and whether the buildings are worth standing up (see {@link Buildings}).
+ */
+export function useMapPitch(map: MapLibreGLMap | null) {
+    const [ pitch, setPitch ] = useState<number | null>(null);
+
+    useEffect(() => {
+        if (!map) return;
+
+        const report = () => setPitch(map.getPitch());
+        // The map may have been tilted between being built and being listened to.
+        report();
+
+        map.on("pitch", report);
+        return () => { map.off("pitch", report); };
+    }, [ map ]);
+
+    return pitch;
 }
 
 /**
@@ -427,6 +496,9 @@ export function styleContents(style: StyleSpecification): StyleContents {
  * that over would leave it drawn on top of the new one. The additions go last, so they stay above
  * the map rather than under it.
  *
+ * An addition that drew from the outgoing style's *own* source is the exception, and is dropped
+ * rather than handed on: there is nothing to hand it: see the note where that is decided below.
+ *
  * Note that the images a layer draws with are not part of a style and do not come across (see
  * `Markers`, which puts them back on `style.load`) — and that MapLibre applies this whether it can
  * turn one style into the other or has to build the new one from scratch, so nothing here depends on
@@ -450,9 +522,17 @@ export function keepAdditions(applied: StyleContents | undefined): TransformStyl
         const nextLayers = new Set(next.layers.map((layer) => layer.id));
         const layers = [ ...next.layers ];
         for (const layer of previous.layers) {
-            if (!applied.layers.has(layer.id) && !nextLayers.has(layer.id)) {
-                layers.push(layer);
-            }
+            if (applied.layers.has(layer.id) || nextLayers.has(layer.id)) continue;
+            // An addition drawing from a source that is not in the incoming style and was not
+            // carried across either — which means it drew from the outgoing style's own, as the 3D
+            // buildings do (see Buildings). Nothing can be done for it here: the source is the map
+            // that has just gone, and carrying that over would leave the old map drawn on top of
+            // the new one. It has to be left behind rather than handed on broken, because MapLibre
+            // validates the whole style before applying any of it — one layer naming a source that
+            // is not there and the switch is refused outright, leaving the map on the style the
+            // reader has just asked to leave.
+            if ("source" in layer && layer.source && !(layer.source in sources)) continue;
+            layers.push(layer);
         }
 
         return { ...next, sources, layers };

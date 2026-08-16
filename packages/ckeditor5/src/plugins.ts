@@ -33,7 +33,10 @@ import AutoformatMath from "./plugins/math/autoformat_math.js";
 import CopyAnchorLinkButton from "./plugins/copy_anchor_link.js";
 import CopyLinkUrlButton from "./plugins/copy_link_url.js";
 import ImageActions from "./plugins/image_actions.js";
+import ClipboardBareImage from "./plugins/clipboard_bare_image.js";
+import ClipboardImageEmbed from "./plugins/clipboard_image_embed.js";
 import TriliumSnippets from "./plugins/snippets/snippets.js";
+import TriliumAiAssistant from "./plugins/ai_assistant/ai_assistant.js";
 
 import CodeBlockToolbar from "./plugins/code_block_toolbar.js";
 import CodeBlockLanguageDropdown from "./plugins/code_block_language_dropdown.js";
@@ -89,7 +92,10 @@ const TRILIUM_PLUGINS: typeof Plugin[] = [
     CopyAnchorLinkButton,
     CopyLinkUrlButton,
     ImageActions,
+    ClipboardImageEmbed,
+    ClipboardBareImage,
     TriliumSnippets,
+    TriliumAiAssistant,
 ];
 
 /**

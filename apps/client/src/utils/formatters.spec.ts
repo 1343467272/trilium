@@ -3,14 +3,20 @@ import { describe, expect, it, vi } from "vitest";
 // i18next is not initialised here, so have t() echo the key and the interpolated count. That lets the
 // tests assert exactly which unit was chosen and what count was computed — the real logic — while
 // leaving the plural rendering itself to i18next.
-vi.mock("../services/i18n", () => ({
-    t: (key: string, opts?: { count?: number }) => `${key}|${opts?.count}`
-}));
+// `getLocaleById` is the real lookup rather than a stub — it is a find over the shared catalog, so
+// mocking it would only risk disagreeing with the locales the assertions name.
+vi.mock("../services/i18n", async () => {
+    const { LOCALES } = await import("@triliumnext/commons");
+    return {
+        t: (key: string, opts?: { count?: number }) => `${key}|${opts?.count}`,
+        getLocaleById: (id: string | null | undefined) => LOCALES.find((l) => l.id === id) ?? null
+    };
+});
 
 import { LOCALES } from "@triliumnext/commons";
 
 import options from "../services/options";
-import { formatDateNumeric, formatDateTime, formatDuration, getMeasurementSystem, normalizeLocale } from "./formatters";
+import { formatDateNumeric, formatDateTime, formatDuration, getMeasurementSystem, isContentRightToLeft, normalizeLocale, resolveContentLanguage } from "./formatters";
 
 describe("formatters", () => {
     it("tolerates incorrect locale", () => {
@@ -94,6 +100,29 @@ describe("formatters", () => {
         // With both dateStyle and timeStyle "none", every formatting branch is
         // skipped and execution reaches the final guard.
         expect(() => formatDateTime(new Date(), "none", "none")).toThrow("Incorrect state.");
+    });
+
+    it("follows a locale change rather than reusing the formatter memoized for the previous one", () => {
+        // Formatters are cached to keep collection views from rebuilding one per row. The cache is
+        // keyed on locale as well as style precisely so this keeps working: keyed on style alone, it
+        // would go on rendering the first locale's pattern after the setting changed.
+        const date = new Date(Date.UTC(2026, 0, 25, 13, 30));
+
+        options.set("formattingLocale", "en-US");
+        const american = formatDateTime(date, "short", "none");
+
+        options.set("formattingLocale", "de");
+        const german = formatDateTime(date, "short", "none");
+
+        // Compared against a formatter built on the spot, so the assertion tracks whatever patterns
+        // the environment's ICU actually carries.
+        expect(american).toBe(new Intl.DateTimeFormat("en-US", { dateStyle: "short" }).format(date));
+        expect(german).toBe(new Intl.DateTimeFormat("de", { dateStyle: "short" }).format(date));
+        expect(german).not.toBe(american);
+
+        // Back again: the first entry has to still be right, not overwritten by the second locale.
+        options.set("formattingLocale", "en-US");
+        expect(formatDateTime(date, "short", "none")).toBe(american);
     });
 
     describe("formatDateNumeric", () => {
@@ -254,5 +283,49 @@ describe("formatters", () => {
             // 7 is not one of the offered scales, so the unit cannot be named from it.
             expect(formatDuration(604800, 7)).toBe("time_interval.days|7");
         });
+    });
+});
+
+describe("resolveContentLanguage", () => {
+    it("prefers the note's own language over the configured default", () => {
+        options.set("defaultContentLanguage", "fr");
+        options.set("locale", "ru");
+
+        expect(resolveContentLanguage("de")).toBe("de");
+    });
+
+    it("falls back to the default content language, then to the application's language", () => {
+        options.set("defaultContentLanguage", "fr");
+        options.set("locale", "ru");
+
+        expect(resolveContentLanguage(null)).toBe("fr");
+        expect(resolveContentLanguage(undefined)).toBe("fr");
+        expect(resolveContentLanguage("")).toBe("fr");
+
+        // An empty default is the "auto" entry, meaning follow the application's language rather
+        // than meaning no language at all.
+        options.set("defaultContentLanguage", "");
+        expect(resolveContentLanguage(null)).toBe("ru");
+    });
+});
+
+describe("isContentRightToLeft", () => {
+    it("follows the note's own language", () => {
+        expect(isContentRightToLeft("he")).toBe(true);
+        expect(isContentRightToLeft("de")).toBe(false);
+    });
+
+    it("applies the default to a note that has no language of its own", () => {
+        options.set("defaultContentLanguage", "ar");
+        expect(isContentRightToLeft(null)).toBe(true);
+
+        // ...and a note that does have one is not dragged along by it.
+        expect(isContentRightToLeft("de")).toBe(false);
+    });
+
+    it("treats an unrecognized language as left-to-right", () => {
+        options.set("defaultContentLanguage", "not-a-locale");
+        expect(isContentRightToLeft(null)).toBe(false);
+        expect(isContentRightToLeft("also-not-a-locale")).toBe(false);
     });
 });

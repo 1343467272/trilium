@@ -1,19 +1,25 @@
-import { type EditorConfig, getCkLocale, SnippetDefinition } from "@triliumnext/ckeditor5";
+import { type EditorConfig, getCkLocale, SnippetDefinition, type TextTransformationConfig } from "@triliumnext/ckeditor5";
 import emojiDefinitionsUrl from "@triliumnext/ckeditor5/src/emoji_definitions/en.json?url";
 import { ALLOWED_PROTOCOLS, DISPLAYABLE_LOCALE_IDS, formatShortcut, IMAGE_UPLOAD_SUBTYPES, joinShortcut, KATEX_MACROS, MIME_TYPE_AUTO, normalizeMimeTypeForCKEditor } from "@triliumnext/commons";
 import i18next from "i18next";
 
-import { copyTextWithToast } from "../../../services/clipboard_ext.js";
+import { copyHtmlWithToast, copyTextWithToast } from "../../../services/clipboard_ext.js";
 import { t } from "../../../services/i18n.js";
 import imageService from "../../../services/image.js";
 import { getMermaidConfig } from "../../../services/mermaid.js";
 import { default as mimeTypesService, getHighlightJsNameForMime } from "../../../services/mime_types.js";
 import noteAutocompleteService, { type Suggestion } from "../../../services/note_autocomplete.js";
 import options from "../../../services/options.js";
+import { sanitizeNoteContentHtml } from "../../../services/sanitize_content.js";
 import { ensureMimeTypesForHighlighting, isSyntaxHighlightEnabled } from "../../../services/syntax_highlight.js";
-import { isMac } from "../../../services/utils.js";
 import { getTaskStateDefinitions, openCustomTaskStateConfig } from "../../../services/task_states.js";
+import { isMac } from "../../../services/utils.js";
+import { resolveContentLanguage } from "../../../utils/formatters.js";
 import SAMPLE_DIAGRAMS from "../mermaid/sample_diagrams.js";
+import buildAiAssistantStream, { type AiNoteLocationProvider, buildAiAssistantQuickActions } from "./ai_assistant_stream.js";
+import diffAiResponse from "./ai_diff.js";
+import { buildQuoteTransformation, resolveQuoteSetting } from "./quotes.js";
+import { buildCustomTransformations, parseCustomReplacements } from "./replacements.js";
 import { buildToolbarConfig } from "./toolbar.js";
 
 /**
@@ -27,9 +33,18 @@ export interface BuildEditorOptions {
     uiLanguage: DISPLAYABLE_LOCALE_IDS;
     contentLanguage: string | null;
     templates: SnippetDefinition[];
+    /**
+     * Names the note the editor is open on, for the AI assistant to say where a run is writing.
+     * A getter rather than the note itself: switching notes reuses the editor, so anything captured
+     * here would name the note that happened to be open when it was built.
+     */
+    getNoteLocation?: AiNoteLocationProvider;
 }
 
 export async function buildConfig(opts: BuildEditorOptions): Promise<EditorConfig> {
+    // `undefined` when the AI features are off or no LLM provider is configured. Decided once:
+    // it both disables the assistant's command and keeps its entries off the toolbar.
+    const aiAssistantStream = buildAiAssistantStream(opts.getNoteLocation);
     const config: EditorConfig = {
         licenseKey: OPEN_SOURCE_LICENSE_KEY,
         placeholder: t("editable_text.placeholder"),
@@ -172,7 +187,8 @@ export async function buildConfig(opts: BuildEditorOptions): Promise<EditorConfi
             enabled: isSyntaxHighlightEnabled()
         },
         clipboard: {
-            copy: copyTextWithToast
+            copy: copyTextWithToast,
+            copyHtml: copyHtmlWithToast
         },
         slashCommand: {
             // Drop CKEditor's built-in slash commands whose title/icon the palette re-defines: the
@@ -184,9 +200,23 @@ export async function buildConfig(opts: BuildEditorOptions): Promise<EditorConfi
         snippets: {
             definitions: opts.templates
         },
-        htmlSupport: {
-            allow: JSON.parse(options.get("allowedHtmlTags"))
+        aiAssistant: {
+            stream: aiAssistantStream,
+            // The "Changes" review view: a block-aware inline diff, so that a response which
+            // rewrote a paragraph rather than editing it reads as a replacement instead of as
+            // shredded `<ins>`/`<del>` pairs.
+            diff: diffAiResponse,
+            quickActions: buildAiAssistantQuickActions(),
+            // The glyph the context menu gives the same row, so the two ways into a typed prompt
+            // look alike.
+            askIconClass: "bx bx-message-square-dots",
+            // The model's HTML reaches the preview through `innerHTML`, so it gets the same
+            // DOMPurify pass as any other untrusted content rendered outside the editor's
+            // data pipeline. CKEditor ships no sanitizer of its own — like `htmlEmbed`, the
+            // feature takes one from the integrator.
+            sanitizeHtml: sanitizeNoteContentHtml
         },
+        htmlSupport: buildHtmlSupportConfig(),
         removePlugins: getDisabledPlugins(),
         // The locale's CKEditor translations, plus the dictionary of Trilium-authored editor
         // strings resolved through the app's i18n (see `messages.ts` in the ckeditor5 package).
@@ -226,14 +256,39 @@ export async function buildConfig(opts: BuildEditorOptions): Promise<EditorConfi
     const imageToolbar = (config.image as { toolbar: (string | object)[] }).toolbar;
     imageToolbar.push("|", ...(imageService.isImageCopySupported() ? ["copyImageToClipboard"] : []), "downloadImage");
 
-    // Set up content language.
-    const { contentLanguage } = opts;
+    // Embed internal images as data: URIs when content is copied out to external apps, while
+    // keeping internal Trilium paste reference-based (see the ClipboardImageEmbed plugin). The
+    // resolver does the synchronous canvas encoding; the hidden option is a kill-switch.
+    // `enabled` is a getter for the same reason as `autoLinkPreviewsEnabled` above, and because the
+    // application-level handler covering read-only surfaces reads the option per copy — a baked-in
+    // boolean would leave an open editor still embedding after the switch was flipped.
+    config.clipboardImageEmbed = {
+        enabled: () => options.get("clipboardImageEmbedEnabled") === "true",
+        embedImage: (src: string) => imageService.embedReferenceImageAsDataUrl(src)
+    };
+
+    // The language this note is written in, which governs both its text direction and which
+    // typographic quotes typing produces.
+    //
+    // The note's own `#language` label wins, being the only per-note signal and the one a
+    // multilingual writer sets deliberately. Almost no note carries one though — the label is
+    // opt-in, and the picker that sets it is empty until content languages are enabled — so the
+    // `defaultContentLanguage` option is what answers in practice. It defaults to English, which is
+    // what every note was implicitly treated as before the option existed; setting it to the empty
+    // "auto" entry follows the application's language instead.
+    //
+    // Deliberately not `formattingLocale`: that one is presented as "Date & number format", so
+    // someone who sets it for unambiguous dates would not expect it to restyle their prose.
+    const contentLanguage = resolveContentLanguage(opts.contentLanguage);
+
     if (contentLanguage) {
         config.language = {
             ui: (typeof config.language === "string" ? config.language : "en"),
             content: contentLanguage
         };
     }
+
+    config.typing = { transformations: buildTransformationsConfig(contentLanguage) };
 
     // Mention customisation.
     if (options.get("textNoteCompletionEnabled") === "true") {
@@ -275,8 +330,48 @@ export async function buildConfig(opts: BuildEditorOptions): Promise<EditorConfi
 
     return {
         ...config,
-        ...buildToolbarConfig(opts.isClassicEditor)
+        ...buildToolbarConfig(opts.isClassicEditor, !!aiAssistantStream)
     };
+}
+
+/**
+ * Which as-you-type replacements the editor runs, expressed as deltas against CKEditor's own default
+ * set rather than by restating it.
+ *
+ * That is deliberate: the dashes and the fractions are boundary-sensitive regexes upstream — ` -- `
+ * needs its surrounding spaces, and `1/2` needs the guards that stop `11/2` becoming `1½` — and
+ * those are exactly the definitions that break subtly when copied by hand. Naming a group in
+ * `remove` disables it without us ever holding its pattern.
+ *
+ * Quotes are the one exception we do own, because which marks they produce depends on the note's
+ * language and upstream has data for three locales. They are removed and re-supplied — but only when
+ * we actually have a pair for the language, so an unmapped locale keeps falling through to
+ * CKEditor's default rather than losing quote replacement altogether.
+ */
+function buildTransformationsConfig(contentLanguage: string | null): TextTransformationConfig {
+    const remove: string[] = [];
+    if (options.get("textNotePunctuationReplacementsEnabled") !== "true") remove.push("typography");
+    if (options.get("textNoteMathReplacementsEnabled") !== "true") remove.push("mathematical");
+    if (options.get("textNoteSymbolReplacementsEnabled") !== "true") remove.push("symbols");
+
+    // The two keys are settled apart, so each is taken over from upstream only when we have
+    // something to put in its place — naming the individual transformations rather than the `quotes`
+    // group, which would take both away together.
+    const double = resolveQuoteSetting(options.get("textNoteDoubleQuoteStyle"), "primary", contentLanguage);
+    const single = resolveQuoteSetting(options.get("textNoteSingleQuoteStyle"), "secondary", contentLanguage);
+    if (double.overridesUpstream) remove.push("quotesPrimary");
+    if (single.overridesUpstream) remove.push("quotesSecondary");
+
+    const extra = [
+        ...(double.marks ? [buildQuoteTransformation("\"", double.marks)] : []),
+        ...(single.marks ? [buildQuoteTransformation("'", single.marks)] : []),
+        ...buildCustomTransformations(parseCustomReplacements(options.get("textNoteCustomReplacements")))
+    ];
+
+    // `include` is typed as required even though upstream's own documented examples pass `remove`
+    // alone, and the plugin defines the default set in its constructor. Narrowed here rather than
+    // restating the default groups, so that a group upstream adds later keeps working.
+    return { remove, extra } as TextTransformationConfig;
 }
 
 /**
@@ -318,6 +413,49 @@ function buildListOfLanguages() {
         ...userLanguages
     ];
 }
+
+/**
+ * Turns the `allowedHtmlTags` option — a flat list of tag names, shared with the server-side
+ * sanitizer — into the General HTML Support allow-list.
+ *
+ * Gated on `textNoteHtmlSupportEnabled`, which ships off, so the default install runs with GHS
+ * allowing nothing and the editor keeps only what its own features model. Everything below applies
+ * once the user turns it on.
+ *
+ * The wrapping is not cosmetic. `DataFilter#loadAllowedConfig` reads each entry's `name` and falls
+ * back to a match-everything pattern without one, so bare strings allowed *every* element, including
+ * GHS's `$customElement` catch-all: unknown tags round-tripped as opaque blobs that the editing view
+ * drew as an empty `<span data-ck-unsafe-element>` — visible in read mode and search, invisible and
+ * un-navigable while editing (#10989). `attributes`/`classes`/`styles` are the per-element rules
+ * `splitRules` looks for; without them GHS strips every attribute off what it does preserve.
+ */
+function buildHtmlSupportConfig(): EditorConfig["htmlSupport"] {
+    // GHS decides per element, so switching it off is an empty allow-list rather than a narrower
+    // one — there is no subset of the option that stays meaningful here.
+    if (options.get("textNoteHtmlSupportEnabled") !== "true") {
+        return { allow: [] };
+    }
+
+    const allowedTags: string[] = JSON.parse(options.get("allowedHtmlTags"));
+
+    return {
+        allow: allowedTags
+            .filter((name) => !EDITOR_ONLY_DISALLOWED_TAGS.has(name))
+            .map((name) => ({ name, attributes: true, classes: true, styles: true }))
+    };
+}
+
+/**
+ * Withheld from the editor even when the option lists them, and only from the editor — the
+ * sanitizer reads the same option and still accepts them on import.
+ *
+ * `div` earns its place through GHS's dual content model: with inline content it becomes an
+ * `htmlDivParagraph` that every paragraph-keyed feature mistreats, and around a block it becomes a
+ * bare `htmlDiv` with no type-around, so a wrapped code block has nothing after it to escape into.
+ * Unwrapping loses nothing — no in-tree feature needs GHS to handle a div, footnotes claim their own
+ * by attribute — and it flattens the nested-div cruft that pasting from a web page drags in.
+ */
+const EDITOR_ONLY_DISALLOWED_TAGS = new Set(["div"]);
 
 function getDisabledPlugins() {
     const disabledPlugins: string[] = [];

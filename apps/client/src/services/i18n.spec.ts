@@ -1,8 +1,9 @@
 import { MESSAGE_KEY_PREFIX, MESSAGE_OVERRIDES, slugify } from "@triliumnext/ckeditor5";
-import { dayjs, findDuplicateJsonKeys, findPluralKeyConflicts, LOCALES } from "@triliumnext/commons";
+import { dayjs, findDuplicateJsonKeys, findMalformedPluralGroups, findPluralKeyConflicts, LOCALES } from "@triliumnext/commons";
 import { readdirSync, readFileSync } from "fs";
+import i18next from "i18next";
 import { join } from "path";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 // Mock the http backend so i18next.init() never hits the network. The real
 // backend would try to fetch translation JSON over HTTP and the awaited init()
@@ -61,6 +62,53 @@ describe("i18n", () => {
                     pluralConflicts.map((c) => `  - "${c.path}" (plural form '_${c.suffix}')`).join("\n")}`
             ).toEqual([]);
         }
+    });
+
+    // A `_one`/`_many`/… suffix is not part of a key: it is a plural form of the key before it,
+    // to both i18next and Weblate. A key that merely reads that way — `open_all_too_many` for
+    // "too many notes to open" — silently becomes one form of a plural whose other forms nobody
+    // wrote, which Weblate counts as untranslated in the *source* language and then propagates,
+    // empty, to every locale it manages.
+    //
+    // Only the English catalogs are checked, since they are the source Weblate imports: a
+    // translation is free to leave a form empty until someone writes it, and several do.
+    it("declares the plural forms English uses, and no others", () => {
+        // Everything the setup wizard and login page need is in a catalog of its own, and the
+        // server catalog is the one every non-browser runtime reads — Weblate imports all three.
+        const catalogs = [
+            join(__dirname, "..", "translations", "en", "translation.json"),
+            join(__dirname, "..", "translations", "en", "entry.json"),
+            join(__dirname, "..", "..", "..", "..", "apps", "server", "src", "assets", "translations", "en", "server.json")
+        ];
+        const categories = new Intl.PluralRules("en").resolvedOptions().pluralCategories;
+
+        for (const catalogPath of catalogs) {
+            const malformed = findMalformedPluralGroups(
+                JSON.parse(readFileSync(catalogPath, { encoding: "utf-8" })), categories);
+
+            expect(
+                malformed,
+                `Plural groups in "${catalogPath}" that do not match English's ${categories.join("/")} forms — a key that is not a plural must not end in one of those:\n${
+                    malformed.map((g) => `  - "${g.path}" declares ${g.present.map((f) => `_${f}`).join(", ")}${
+                        g.missing.length ? `, missing ${g.missing.map((f) => `_${f}`).join(", ")}` : ""}${
+                        g.unexpected.length ? `, unexpected ${g.unexpected.map((f) => `_${f}`).join(", ")}` : ""}`).join("\n")}`
+            ).toEqual([]);
+        }
+    });
+
+    // i18next HTML-escapes interpolated values by default, so a value carrying a slash, an
+    // apostrophe or a quote reaches the user as `blobs&#x2F;9`. Almost everything we interpolate is
+    // rendered as text (a Preact child, a title attribute), where that escaping only produces
+    // gibberish, which is what the unescaped `{{- value}}` form is for. There is no way to tell
+    // from a catalog entry alone which one it should use, so this only covers the messages whose
+    // values are known to carry such characters.
+    it("interpolates values carrying special characters unescaped", async () => {
+        const catalog = JSON.parse(readFileSync(join(__dirname, "..", "translations", "en", "translation.json"), { encoding: "utf-8" }));
+        const i18n = i18next.createInstance();
+        await i18n.init({ lng: "en", resources: { en: { translation: catalog } } });
+
+        // Diverged sync sectors are formatted `entityName/sector`.
+        expect(i18n.t("ws.sync-hash-check-failed", { sectors: "blobs/9" })).toContain("blobs/9");
     });
 
     // The text editor localizes by passing the English text itself to the editor's translation
@@ -222,8 +270,88 @@ describe("i18n", () => {
     });
 
     describe("getAvailableLocales", () => {
+        function setDevBuild(isDev: boolean) {
+            (window as unknown as { glob: { isDev: boolean } }).glob.isDev = isDev;
+        }
+
+        /**
+         * Stands in for the name table `Intl` brings, so the answers it can give for a tag it cannot
+         * name — a throw, or nothing at all — can be had from the locales we actually ship. No entry
+         * in `LOCALES` draws either today: `en_rtl`, the one malformed tag among them, is turned away
+         * by the English check before `Intl` ever sees it.
+         */
+        function stubDisplayNames(of: () => string | undefined) {
+            vi.spyOn(Intl, "DisplayNames").mockImplementation(
+                // A plain function rather than an arrow: this stands in for a constructor, and is
+                // reached through `new`. Returning an object from one is what makes it the result.
+                function () {
+                    return { of };
+                } as unknown as typeof Intl.DisplayNames
+            );
+        }
+
+        afterEach(() => {
+            setDevBuild(false);
+            vi.restoreAllMocks();
+        });
+
         it("returns the full LOCALES list", () => {
             expect(getAvailableLocales()).toBe(LOCALES);
+        });
+
+        it("annotates the names with their English equivalent in a development build", () => {
+            setDevBuild(true);
+            const names = Object.fromEntries(getAvailableLocales().map((l) => [ l.id, l.name ]));
+
+            expect(names).toMatchObject({
+                de: "Deutsch (German)",
+                ko: "한국어 (Korean)",
+                pt_br: "Português (Brasil) (Brazilian Portuguese)",
+                // Resolved through `zh-Hans`/`zh-Hant`, so the script — the thing that separates the
+                // two entries — is what the annotation states.
+                cn: "简体中文 (Simplified Chinese)",
+                tw: "繁體中文 (Traditional Chinese)"
+            });
+        });
+
+        it("leaves the English entries alone, including the malformed dev-only tag", () => {
+            setDevBuild(true);
+            const names = Object.fromEntries(getAvailableLocales().map((l) => [ l.id, l.name ]));
+
+            expect(names).toMatchObject({
+                en: "English (United States)",
+                "en-GB": "English (United Kingdom)",
+                en_rtl: "English RTL"
+            });
+        });
+
+        it("shows the native name alone for a tag Intl refuses", () => {
+            // A tag `Intl` cannot parse is a RangeError rather than an empty answer, and a locale
+            // added later with an id like `en_rtl`'s would be one. The list has to survive it.
+            setDevBuild(true);
+            stubDisplayNames(() => { throw new RangeError("malformed tag"); });
+
+            const names = Object.fromEntries(getAvailableLocales().map((l) => [ l.id, l.name ]));
+
+            expect(names.de).toBe("Deutsch");
+            expect(names.ko).toBe("한국어");
+        });
+
+        it("shows the native name alone where Intl has no name to give", () => {
+            setDevBuild(true);
+            stubDisplayNames(() => undefined);
+
+            const names = Object.fromEntries(getAvailableLocales().map((l) => [ l.id, l.name ]));
+
+            expect(names.de).toBe("Deutsch");
+        });
+
+        it("does not mutate the shared LOCALES entries", () => {
+            const before = LOCALES.map((l) => l.name);
+            setDevBuild(true);
+            getAvailableLocales();
+
+            expect(LOCALES.map((l) => l.name)).toEqual(before);
         });
     });
 

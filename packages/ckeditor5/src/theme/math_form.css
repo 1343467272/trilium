@@ -8,12 +8,13 @@
 .mathlive-suggestions-popover, [data-ml-tooltip], .ML__base {
     z-index: calc(var(--ck-z-panel) + 1000) !important;
 }
-.ML__tooltip, [role="tooltip"], .ML__popover[role="tooltip"], .popover, [data-ml-tooltip] {
+/* MathLive's own floating UI only — never a bare [role="tooltip"] or .popover, which would reach
+   every tooltip and popover in the whole app the moment the editor's CSS loads. The forced
+   `position: fixed` once collapsed the geo map's marker preview (a MapLibre popup wrapping the
+   app's note tooltip, role and all) to a zero-size box that spilled its content across the map. */
+.ML__tooltip, .ML__popover[role="tooltip"], [data-ml-tooltip] {
     z-index: calc(var(--ck-z-panel) + 2000) !important;
     position: fixed !important;
-}
-.ck.ck-balloon-panel, .ck.ck-balloon-panel .ck-balloon-panel__content {
-    overflow: visible !important;
 }
 
 /* === MAIN DIALOG === */
@@ -205,12 +206,3 @@
 .ck-button-save:hover { opacity: 0.9; }
 .ck-button-cancel:hover { background: var(--ck-color-base-background); }
 
-/* === OVERFLOW FIX: Allow tooltips to escape === */
-.ck.ck-balloon-panel,
-.ck.ck-balloon-panel .ck-balloon-panel__content,
-.ck.ck-math-form,
-.ck-math-view,
-.ck.ck-math-input {
-    overflow: visible !important;
-    clip-path: none !important;
-}
