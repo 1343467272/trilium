@@ -21,6 +21,8 @@ jobs:
   build_android:
     name: Build Android APK
     runs-on: ubuntu-latest
+    env:
+      TRILIUM_SECURITY_BACKEND_SCRIPTING_ENABLED: "true"
     steps:
       - name: Checkout the repository
         uses: actions/checkout@v7
