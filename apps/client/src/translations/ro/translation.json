@@ -2217,8 +2217,6 @@
     "zoom-out": "Micșorează",
     "enter-3d": "Înclină harta într-o vizualizare 3D\nȚineți apăsat Ctrl și trageți pentru a înclina harta liber",
     "exit-3d": "Readu harta în plan",
-    "fullscreen": "Pe tot ecranul",
-    "exit-fullscreen": "Ieși din modul pe tot ecranul",
     "close-details": "Închide",
     "marker-color": "Culoarea marcajului",
     "copy-coordinates": "Copiază coordonatele"
@@ -2528,9 +2526,7 @@
   },
   "settings": {
     "related_settings": "Setări similare",
-    "related_actions": "Acțiuni asociate",
-    "related_space_usage": "Analizați spațiul ocupat în baza de date",
-    "related_space_usage_description": "Vedeți ce notițe, revizii și atașamente ocupă cel mai mult spațiu și recuperați-l."
+    "related_actions": "Acțiuni asociate"
   },
   "settings_appearance": {
     "related_code_blocks": "Tema de culori pentru blocuri de cod în notițe de tip text",
@@ -2820,8 +2816,6 @@
     "rotate": "Rotește",
     "picture-in-picture": "Imagine în imagine",
     "exit-picture-in-picture": "Ieși din imagine în imagine",
-    "fullscreen": "Ecran complet (F)",
-    "exit-fullscreen": "Ieși din ecran complet",
     "unsupported-format": "Previzualizarea media nu este disponibilă pentru acest format de fișier:\n{{mime}}",
     "zoom-to-fit": "Mărește pentru a umple",
     "zoom-reset": "Resetează mărirea pentru a umple",
@@ -3192,8 +3186,6 @@
     "zoom-out": "Micșorează",
     "reset-zoom": "Resetează zoomul",
     "center-map": "Centrează harta",
-    "fullscreen": "Pe tot ecranul",
-    "exit-fullscreen": "Ieși din modul pe tot ecranul",
     "direction-left": "Ramuri spre stânga",
     "direction-right": "Ramuri spre dreapta",
     "direction-side": "Ramuri în ambele părți",
@@ -3817,9 +3809,7 @@
     "sort_by_title": "Titlu",
     "sort_by_date_created": "Data creării",
     "no_items": "Nu a fost găsit niciun conținut activ.",
-    "no_items_hint": "Scripturile, temele, șabloanele și fragmentele pe care le creați vor fi listate aici.",
-    "section_active_content": "Conținut activ și șabloane",
-    "section_space_usage": "Spațiu ocupat"
+    "no_items_hint": "Scripturile, temele, șabloanele și fragmentele pe care le creați vor fi listate aici."
   },
   "space_usage": {
     "loading": "Se măsoară spațiul ocupat...",

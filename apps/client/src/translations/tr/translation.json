@@ -1928,8 +1928,6 @@
     "rotate": "Döndür",
     "picture-in-picture": "Kısmi ekran (resim içinde resim)",
     "exit-picture-in-picture": "Kısmi ekrandan çık",
-    "fullscreen": "Tam ekran",
-    "exit-fullscreen": "Tam ekrandan çık",
     "unsupported-format": "Bu dosya biçimi için medya önizlemesi mevcut değil:\n{{mime}}",
     "zoom-to-fit": "Sığdırmak için yakınlaştır",
     "zoom-reset": "Sığdırmaya sıfırla",
@@ -3098,8 +3096,6 @@
     "zoom-out": "Uzaklaştır",
     "enter-3d": "3B görünüme eğ\nHaritayı serbestçe eğmek için Ctrl'yi basılı tutup sürükleyin",
     "exit-3d": "Haritayı tekrar düz yatır",
-    "fullscreen": "Tam ekran",
-    "exit-fullscreen": "Tam ekrandan çık",
     "close-details": "Kapat",
     "marker-color": "İşaretçi rengi",
     "copy-coordinates": "Koordinatları kopyala"
@@ -3222,9 +3218,7 @@
     "sort_by_title": "Başlık",
     "sort_by_date_created": "Oluşturulma tarihi",
     "no_items": "Etkin içerik bulunamadı.",
-    "no_items_hint": "Oluşturduğunuz betikler, temalar, şablonlar ve parçacıklar burada listelenecektir.",
-    "section_active_content": "Etkin İçerik ve Şablonlar",
-    "section_space_usage": "Alan Kullanımı"
+    "no_items_hint": "Oluşturduğunuz betikler, temalar, şablonlar ve parçacıklar burada listelenecektir."
   },
   "space_usage": {
     "loading": "Alan kullanımı ölçülüyor...",
@@ -3581,9 +3575,7 @@
   },
   "settings": {
     "related_settings": "İlgili ayarlar",
-    "related_actions": "İlgili eylemler",
-    "related_space_usage": "Veritabanı içindeki alan kullanımını analiz et",
-    "related_space_usage_description": "Hangi notların, revizyonların ve eklerin en fazla alan kapladığını görün ve alanı geri kazanın."
+    "related_actions": "İlgili eylemler"
   },
   "settings_appearance": {
     "related_code_blocks": "Metin notlarındaki kod blokları için renk düzeni",
@@ -3896,8 +3888,6 @@
     "zoom-out": "Uzaklaştır",
     "reset-zoom": "Yakınlaştırmayı sıfırla",
     "center-map": "Haritayı ortala",
-    "fullscreen": "Tam ekran",
-    "exit-fullscreen": "Tam ekrandan çık",
     "direction-left": "Dallar sola",
     "direction-right": "Dallar sağa",
     "direction-side": "Dallar her iki tarafa"

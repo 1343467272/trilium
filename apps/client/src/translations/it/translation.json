@@ -250,8 +250,6 @@
     "zoom-out": "Riduci lo zoom",
     "enter-3d": "Inclina la mappa in una visualizzazione 3D\nTieni premuto Ctrl e trascina per inclinare liberamente la mappa",
     "exit-3d": "Rimetti la mappa in piano",
-    "fullscreen": "A schermo intero",
-    "exit-fullscreen": "Esci dalla modalità a schermo intero",
     "close-details": "Vicino",
     "marker-color": "Colore del pennarello",
     "copy-coordinates": "Copia coordinate"
@@ -2526,9 +2524,7 @@
   },
   "settings": {
     "related_settings": "Impostazioni correlate",
-    "related_actions": "Azioni correlate",
-    "related_space_usage": "Analizzare l'utilizzo dello spazio all'interno del database",
-    "related_space_usage_description": "Scopri quali note, revisioni e allegati occupano più spazio e recuperalo."
+    "related_actions": "Azioni correlate"
   },
   "settings_appearance": {
     "related_code_blocks": "Schema di colori per i blocchi di codice nelle note di testo",
@@ -2781,8 +2777,6 @@
     "rotate": "Ruota",
     "picture-in-picture": "Immagine nell'immagine",
     "exit-picture-in-picture": "Esci dalla modalità picture-in-picture",
-    "fullscreen": "Schermo intero",
-    "exit-fullscreen": "Esci dalla modalità a schermo intero",
     "unsupported-format": "Per questo formato di file non è disponibile l'anteprima multimediale:\n{{mime}}",
     "zoom-to-fit": "Ingrandisci per riempire",
     "zoom-reset": "Ripristina lo zoom a schermo intero",
@@ -3101,8 +3095,6 @@
     "zoom-out": "Riduci lo zoom",
     "reset-zoom": "Ripristina lo zoom",
     "center-map": "Centra la mappa",
-    "fullscreen": "A schermo intero",
-    "exit-fullscreen": "Esci dalla modalità a schermo intero",
     "direction-left": "Rami a sinistra",
     "direction-right": "Rami a destra",
     "direction-side": "Rami su entrambi i lati",
@@ -3810,9 +3802,7 @@
     "sort_by_title": "Titolo",
     "sort_by_date_created": "Data di creazione",
     "no_items": "Nessun contenuto attivo trovato.",
-    "no_items_hint": "Qui verranno elencati gli script, i temi, i modelli e gli snippet che creerai.",
-    "section_active_content": "Contenuti interattivi e modelli",
-    "section_space_usage": "Utilizzo dello spazio"
+    "no_items_hint": "Qui verranno elencati gli script, i temi, i modelli e gli snippet che creerai."
   },
   "space_usage": {
     "loading": "Misurare l'utilizzo dello spazio...",

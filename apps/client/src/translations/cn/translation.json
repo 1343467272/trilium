@@ -218,7 +218,8 @@
     "title": "资料表",
     "newTabNoteLink": "在新标签页开启链接",
     "editShortcuts": "编辑键盘快捷键",
-    "toggleArchivedNotes": "显示/隐藏已归档笔记"
+    "toggleArchivedNotes": "显示/隐藏已归档笔记",
+    "openAiAssistant": "对选中内容打开 AI 助手"
   },
   "import": {
     "importIntoNote": "导入到笔记",
@@ -625,7 +626,8 @@
     "share_html": "注入到共享页面的 HTML 笔记，位置由该笔记上的 <code>#shareHtmlLocation</code> 指定。该笔记必须位于共享子树内。",
     "select_options_placeholder": "输入一个选项并按 Enter",
     "map_dark_style": "告知地理地图：<code>map:style</code> 中给定的自定义样式为深色样式，因此标记标题将以浅色绘制。集合属性中提供的样式本身即表明这一点，无需此类标注。",
-    "map_cluster": "将彼此靠近的标记聚合成单个带编号的气泡，点击即可展开。"
+    "map_cluster": "将彼此靠近的标记聚合成单个带编号的气泡，点击即可展开。",
+    "ai_quick_action": "将这篇笔记作为指令提供给文本编辑器的 AI 助手菜单。标题为操作命名，内容为提示词。"
   },
   "attribute_editor": {
     "help_text_body1": "要添加标签，只需输入例如 <code>#rock</code> ；或者如果你还想同时添加数值，则可输入例如 <code>#year = 2020</code>",
@@ -884,7 +886,8 @@
     "new-version-available": "新更新可用",
     "download-update": "取得版本 {{latestVersion}}",
     "search_notes": "搜索笔记",
-    "show_deleted_notes": "显示已删除的笔记"
+    "show_deleted_notes": "显示已删除的笔记",
+    "show_space_usage": "显示空间占用"
   },
   "zen_mode": {
     "button_exit": "退出禅模式"
@@ -986,7 +989,8 @@
     "create_child_note_title": "创建子笔记并添加到图",
     "reset_pan_zoom_title": "重置平移和缩放到初始坐标和放大倍率",
     "zoom_in_title": "放大",
-    "zoom_out_title": "缩小"
+    "zoom_out_title": "缩小",
+    "create_child_note_text": "添加笔记"
   },
   "zpetne_odkazy": {
     "relation": "关系",
@@ -1347,8 +1351,9 @@
     "successfully_created_lightly_anonymized_database": "成功创建轻度匿名化的数据库，路径为 {{anonymizedFilePath}}",
     "no_anonymized_database_yet": "尚无匿名化数据库。",
     "description": "创建数据库的匿名副本，以便在调试问题时与开发人员共享，而不会泄露个人数据。",
-    "anonymized_databases_location": "匿名化后的数据库保存在 {{- anonymizedFolder}}。",
-    "download": "下载"
+    "anonymized_databases_location": "匿名化后的数据库保存在 <Folder/>。",
+    "download": "下载",
+    "delete_confirmation": "删除匿名化的数据库 {{fileName}} 吗？原始数据库不受影响。"
   },
   "database_integrity_check": {
     "title": "数据库完整性检查",
@@ -1624,7 +1629,8 @@
     "formatting-locale-auto": "依应用的语言设置",
     "default-content-language": "默认内容语言",
     "default-content-language-description": "笔记默认使用的编写语言，除非在「基本属性」部分为笔记单独设置了语言。它会影响从右到左的排版以及输入时产生的引号样式等功能。",
-    "default-content-language-auto": "跟随应用的语言"
+    "default-content-language-auto": "跟随应用的语言",
+    "dates-title": "日期与日历"
   },
   "backup": {
     "automatic_backup": "自动备份",
@@ -2120,7 +2126,8 @@
     "cut": "笔记已剪切到剪贴板。",
     "copied": "笔记已复制到剪贴板。",
     "copy_failed": "由于权限问题，无法复制到剪贴板。",
-    "copy_success": "已复制到剪贴板。"
+    "copy_success": "已复制到剪贴板。",
+    "copied_without_links": "笔记已复制到剪贴板，但笔记链接无法放入系统剪贴板。"
   },
   "entrypoints": {
     "note-revision-created": "笔记修订已创建。",
@@ -2257,8 +2264,6 @@
     "webgl-unavailable": "由于 WebGL 不可用，无法绘制此地图。请检查是否已启用硬件加速，并确保显卡驱动程序为最新版本。",
     "zoom-in": "放大",
     "zoom-out": "缩小",
-    "fullscreen": "全屏",
-    "exit-fullscreen": "退出全屏",
     "create-child-note-cancel": "取消添加笔记",
     "add-marker": "添加标记",
     "add-marker-cancel": "取消",
@@ -2350,7 +2355,10 @@
   },
   "svg": {
     "export_to_png": "无法将图表导出为PNG。",
-    "export_to_svg": "此图像无法导出为SVG。"
+    "export_to_svg": "此图像无法导出为SVG。",
+    "zoom_in": "放大",
+    "zoom_out": "缩小",
+    "reset_zoom": "重置缩放"
   },
   "code_theme": {
     "title": "外观",
@@ -2488,9 +2496,7 @@
   },
   "settings": {
     "related_settings": "相关设置",
-    "related_actions": "相关操作",
-    "related_space_usage": "分析数据库内的空间占用",
-    "related_space_usage_description": "查看哪些笔记、修订和附件占用空间最多，并回收这些空间。"
+    "related_actions": "相关操作"
   },
   "settings_appearance": {
     "related_code_blocks": "文本笔记中代码块的色彩方案",
@@ -2658,7 +2664,11 @@
     "pages_alt": "第{{pageNumber}}页",
     "pages_loading": "加载中...",
     "layers_other": "{{count}} 层",
-    "annotations_other": "{{count}} 条注释"
+    "annotations_other": "{{count}} 条注释",
+    "annotation_drawing": "第 {{pageNumber}} 页上的绘图",
+    "annotation_highlight": "第 {{pageNumber}} 页上的高亮",
+    "annotation_note": "第 {{pageNumber}} 页上的注释",
+    "annotation_text_box": "第 {{pageNumber}} 页上的文本框"
   },
   "platform_indicator": {
     "available_on": "在 {{platform}} 上可用"
@@ -2728,8 +2738,6 @@
     "rotate": "旋转",
     "picture-in-picture": "画中画",
     "exit-picture-in-picture": "退出画中画",
-    "fullscreen": "全屏",
-    "exit-fullscreen": "退出全屏",
     "unsupported-format": "此文件格式不支持媒体预览：\n{{mime}}",
     "zoom-to-fit": "缩放以填充",
     "zoom-reset": "重置缩放以填充",
@@ -2952,8 +2960,6 @@
     "zoom-in": "放大",
     "zoom-out": "缩小",
     "center-map": "将地图居中",
-    "fullscreen": "全屏",
-    "exit-fullscreen": "退出全屏",
     "direction-left": "分支向左",
     "direction-right": "分支向右",
     "direction-side": "分支向两侧",
@@ -3121,7 +3127,25 @@
     "start_over": "从头开始",
     "start_over_confirm": "Trilium 将返回设置界面，你可以在那里创建新的知识库、恢复备份或从其他设备同步。系统会先提供当前数据的备份，在你做出选择之前不会删除任何内容。继续吗？",
     "start_over_pending": "下次重启此服务器时，将出现设置界面。准备好后请重启服务器，或点击下方的「取消」保持现状。",
-    "start_over_cancel": "取消从头开始"
+    "start_over_cancel": "取消从头开始",
+    "info": "数据库信息",
+    "info_location": "位置",
+    "info_location_opfs": "浏览器的源私有文件系统（OPFS）",
+    "info_created": "原始创建日期",
+    "info_content": "内容",
+    "info_notes_other": "{{count}} 篇笔记",
+    "info_attachments_other": "{{count}} 个附件",
+    "info_size": "大小",
+    "info_no_backup": "暂无备份",
+    "maintenance": "维护",
+    "analyze_space_usage": "分析空间占用",
+    "analyze_space_usage_description": "识别哪些笔记占用空间最多，更清晰地了解你的笔记有多大。",
+    "analyze_space_usage_button": "分析",
+    "cleanup": "清理数据库",
+    "cleanup_description": "擦除已删除的笔记和附件，修剪修订快照并压缩图片，以保持数据库精简。",
+    "related_backup": "备份",
+    "related_backup_description": "创建或恢复数据库备份，管理自动备份。",
+    "info_backup": "备份"
   },
   "revisions_snapshot": {
     "title": "笔记修订"
@@ -3184,7 +3208,9 @@
   },
   "common": {
     "save": "保存",
-    "cancel": "取消"
+    "cancel": "取消",
+    "fullscreen": "全屏",
+    "exit_fullscreen": "退出全屏"
   },
   "spreadsheet": {
     "read-only": "此注释为只读。",
@@ -3363,7 +3389,23 @@
       "turn-the-current-block-into-a-paragraph": "将当前块转换为段落。",
       "warning": "警告",
       "the-file-is-too-large-to-be-uploaded-http-413-if-trilium-is-behind-a-reverse-proxy-raise-its-request-body-size-limit": "文件过大，无法上传（HTTP 413）。如果 Trilium 位于反向代理之后，请提高其请求体大小限制。",
-      "the-server-responded-with-http-0": "服务器返回了 HTTP %0。"
+      "the-server-responded-with-http-0": "服务器返回了 HTTP %0。",
+      "ai-0": "AI：%0",
+      "ai-assistant": "AI 助手",
+      "applies-to-the-current-paragraph": "应用于当前段落。",
+      "ask-ai": "向 AI 提问…",
+      "ask-ai-to": "让 AI…",
+      "ask-ai-to-rewrite-the-selection-or-generate-new-content": "让 AI 重写所选内容或生成新内容。",
+      "changes": "更改",
+      "describe-a-change-then-press-enter": "描述更改内容，然后按回车",
+      "insert-below": "在下方插入",
+      "looks-good-already-nothing-to-change": "看起来已经不错了——无需更改。",
+      "result": "结果",
+      "send": "发送",
+      "stop": "停止",
+      "tokens": "tokens",
+      "try-again": "重试",
+      "working": "正在处理…"
     },
     "toolbar-groups": {
       "text-formatting": "文本格式",
@@ -3476,7 +3518,12 @@
   },
   "options": {
     "title": "选项",
-    "back": "返回所有选项"
+    "back": "返回所有选项",
+    "search_placeholder": "搜索设置",
+    "search_clear": "清除搜索",
+    "search_title": "选项搜索",
+    "search_hint": "输入关键字以在所有设置页面中搜索。",
+    "search_no_results": "没有设置符合您的需求。"
   },
   "full_content_width_switch": {
     "title": "全宽"
@@ -3643,9 +3690,7 @@
     "sort_by_title": "标题",
     "sort_by_date_created": "创建日期",
     "no_items": "未找到活动内容。",
-    "no_items_hint": "你创建的脚本、主题、模板和代码片段将在此处列出。",
-    "section_active_content": "活动内容与模板",
-    "section_space_usage": "空间使用情况"
+    "no_items_hint": "你创建的脚本、主题、模板和代码片段将在此处列出。"
   },
   "attribute_list_panel": {
     "no_attributes": "无属性",
@@ -3845,7 +3890,8 @@
   "database_file_list": {
     "size_on_disk": "磁盘占用 {{size}}",
     "invalid_backup": "无效的备份文件",
-    "unsupported_version": "不支持的备份文件格式版本"
+    "unsupported_version": "不支持的备份文件格式版本",
+    "delete": "删除"
   },
   "password_with_confirmation": {
     "password": "密码",
@@ -3881,5 +3927,47 @@
     "custom_to_placeholder": "替换为",
     "custom_add": "添加替换",
     "custom_remove": "移除替换"
+  },
+  "ai_assistant": {
+    "title": "AI 助手",
+    "action_ask": "向 AI 提问…",
+    "group_edit": "编辑或审阅",
+    "group_generate": "生成",
+    "group_adjust": "调整",
+    "group_tone": "更改语气",
+    "group_reformat": "重新格式化",
+    "group_translate": "翻译",
+    "group_custom": "自定义",
+    "model": "模型：{{model}}",
+    "command_make_shorter": "缩短",
+    "command_make_longer": "加长",
+    "command_simplify": "简化语言",
+    "command_tone": "将语气改为 {{tone}}",
+    "command_bullet_list": "转换为项目符号列表",
+    "command_table": "转换为表格",
+    "command_diagram": "转换为图表",
+    "command_callout": "转换为提示块",
+    "command_collapsible": "转换为可折叠区块",
+    "command_action_items": "提取行动项",
+    "command_translate": "翻译为 {{language}}",
+    "action_fix_typos": "修复错别字",
+    "action_improve_writing": "改进写作",
+    "action_summarize": "总结",
+    "action_explain": "解释",
+    "action_continue": "继续写作",
+    "adjust_shorter": "更短",
+    "adjust_longer": "更长",
+    "adjust_simpler": "更简单",
+    "tone_professional": "专业",
+    "tone_casual": "随意",
+    "tone_direct": "直接",
+    "tone_friendly": "友好",
+    "tone_confident": "自信",
+    "reformat_bullet_list": "项目符号列表",
+    "reformat_table": "表格",
+    "reformat_diagram": "图表",
+    "reformat_callout": "提示块",
+    "reformat_collapsible": "可折叠区块",
+    "reformat_action_items": "行动项"
   }
 }

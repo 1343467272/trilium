@@ -110,7 +110,8 @@
     "new-version-available": "新しいアップデートが利用可能",
     "download-update": "{{latestVersion}} をバージョンを入手",
     "search_notes": "検索ノート",
-    "show_deleted_notes": "削除されたノートを表示"
+    "show_deleted_notes": "削除されたノートを表示",
+    "show_space_usage": "スペース使用状況を表示"
   },
   "left_pane_toggle": {
     "show_panel": "パネルを表示",
@@ -265,7 +266,8 @@
     "saturday": "土曜日",
     "default-content-language": "デフォルトのコンテンツ言語",
     "default-content-language-description": "基本プロパティ セクションでノート自体に言語が設定されていない場合、ノートは指定された言語で記述されます。これは、右から左への配置や、入力時に表示される引用符の種類などの機能に影響します。",
-    "default-content-language-auto": "アプリケーションの言語に基づく"
+    "default-content-language-auto": "アプリケーションの言語に基づく",
+    "dates-title": "日付とカレンダー"
   },
   "tab_row": {
     "close_tab": "タブを閉じる",
@@ -439,7 +441,8 @@
     "goUpDown": "ノートのリストで上下する",
     "editBranchPrefix": "アクティブノートのクローンの <a class=\"external\" href=\"https://triliumnext.github.io/Docs/Wiki/tree-concepts.html#prefix\">プレフィックス</a> を編集する",
     "editShortcuts": "キーボードショートカットを編集",
-    "toggleArchivedNotes": "アーカイブされたノートを表示 / 非表示"
+    "toggleArchivedNotes": "アーカイブされたノートを表示 / 非表示",
+    "openAiAssistant": "選択範囲で AI アシスタントを開く"
   },
   "import": {
     "importIntoNote": "ノートにインポート",
@@ -537,7 +540,8 @@
     "zoom_out_title": "ズームアウト",
     "zoom_in_title": "ズームイン",
     "create_child_note_title": "子ノートを作成し、マップに追加",
-    "reset_pan_zoom_title": "パンとズームを初期座標と倍率にリセット"
+    "reset_pan_zoom_title": "パンとズームを初期座標と倍率にリセット",
+    "create_child_note_text": "ノートを追加"
   },
   "tree-context-menu": {
     "advanced": "高度",
@@ -1186,7 +1190,7 @@
     "encryption_not_enabled": "バックアップパスワードは保存されましたが、暗号化を有効にできませんでした。暗号化を有効にするまで、バックアップは暗号化されません。",
     "compressed": "圧縮済み",
     "encrypted": "暗号化済み",
-    "backups_summary_other": "{{count}} 件のバックアップがあり、最新のものは {{age}} 前に作成されました。",
+    "backups_summary_other": "{{count}} 件のバックアップがあり、最新のものは {{age}} 前に作成されました",
     "restore_backup": "バックアップを復元",
     "standalone_heading": "Trilium のデータをバックアップ",
     "standalone_description": "ここでは、Trilium ナレッジベースのバックアップをダウンロードしたり、既存のバックアップを復元したりできます。",
@@ -1539,7 +1543,8 @@
     "share_open_graph_image_relation": "<code>og:image</code> として使用される画像ノート。アドレスを指定する場合は、代わりに同名のラベルを設定してください。",
     "share_html": "共有ページに挿入される HTML ノート。挿入位置は、そのノート上の <code>#shareHtmlLocation</code> で指定します。共有対象のサブツリー内に配置されている必要があります。",
     "map_dark_style": "<code>map:style</code> で指定されたカスタムスタイルがダーク系であることを地図に伝えます。これにより、その上に表示されるマーカーのタイトルが明るい色で描画されるようになります。コレクションのプロパティで提供されるスタイルには、その情報が既に含まれているため、このような指定は不要です。",
-    "map_cluster": "近接して描画されるマーカーをまとめ、番号付きの吹き出しとして表示します。この吹き出しはクリックすると開きます。"
+    "map_cluster": "近接して描画されるマーカーをまとめ、番号付きの吹き出しとして表示します。この吹き出しはクリックすると開きます。",
+    "ai_quick_action": "このノートをテキストエディタの AI アシスタントメニューの指示として表示されます。タイトルがアクション名になり、内容がプロンプトになります。"
   },
   "link_context_menu": {
     "open_note_in_popup": "クイック編集",
@@ -1667,7 +1672,8 @@
     "cut": "ノートはクリップボードに切り取りとられました。",
     "copied": "ノートはクリップボードにコピーされました。",
     "copy_failed": "権限の問題で、クリップボードにコピーできません。",
-    "copy_success": "クリップボードにコピーしました。"
+    "copy_success": "クリップボードにコピーしました。",
+    "copied_without_links": "ノートはクリップボードにコピーされましたが、ノートへのリンクはシステムクリップボードに配置できませんでした。"
   },
   "launcher_context_menu": {
     "add-note-launcher": "ノートランチャーを追加",
@@ -1761,7 +1767,10 @@
   },
   "svg": {
     "export_to_png": "図をPNG形式でエクスポートできませんでした。",
-    "export_to_svg": "図をSVG形式でエクスポートできませんでした。"
+    "export_to_svg": "図をSVG形式でエクスポートできませんでした。",
+    "zoom_in": "拡大",
+    "zoom_out": "縮小",
+    "reset_zoom": "ズームをリセット"
   },
   "code_theme": {
     "title": "外観",
@@ -1961,8 +1970,9 @@
     "successfully_created_lightly_anonymized_database": "軽く匿名化されたデータベースを {{anonymizedFilePath}} に作成",
     "no_anonymized_database_yet": "匿名化されたデータベースはまだありません。",
     "description": "問題のデバッグ時に開発者と共有するために、個人データを公開することなく、データベースの匿名化されたコピーを作成します。",
-    "anonymized_databases_location": "匿名化されたデータベースは {{- anonymizedFolder}} に保存されます。",
-    "download": "ダウンロード"
+    "anonymized_databases_location": "匿名化されたデータベースは <Folder/> に保存されています。",
+    "download": "ダウンロード",
+    "delete_confirmation": "匿名化されたデータベース {{fileName}} を削除しますか？ 元のデータベースには影響しません。"
   },
   "database_integrity_check": {
     "title": "データベースの整合性チェック",
@@ -2297,8 +2307,6 @@
     "webgl-unavailable": "WebGL が利用できないため、この地図を表示できません。ハードウェアアクセラレーションが有効になっていること、およびグラフィックスドライバーが最新であることを確認してください。",
     "zoom-in": "拡大",
     "zoom-out": "縮小",
-    "fullscreen": "全画面表示",
-    "exit-fullscreen": "全画面表示を終了",
     "create-child-note-cancel": "ノートの追加をキャンセル",
     "add-marker": "マーカーを追加",
     "add-marker-cancel": "キャンセル",
@@ -2363,9 +2371,7 @@
   },
   "settings": {
     "related_settings": "関連設定",
-    "related_actions": "関連アクション",
-    "related_space_usage": "データベース内の容量使用状況を分析",
-    "related_space_usage_description": "容量を最も多く消費しているノート、変更履歴、添付ファイルを確認し、容量を解放します。"
+    "related_actions": "関連アクション"
   },
   "settings_appearance": {
     "related_code_blocks": "テキストノート内のコードブロックの配色",
@@ -2658,7 +2664,11 @@
     "pages_other": "{{count}} ページ",
     "pages_alt": "ページ {{pageNumber}}",
     "pages_loading": "読み込み中...",
-    "annotations_other": "{{count}} 注釈"
+    "annotations_other": "{{count}} 注釈",
+    "annotation_drawing": "{{pageNumber}} ページの描画",
+    "annotation_highlight": "{{pageNumber}} ページのハイライト",
+    "annotation_note": "{{pageNumber}} ページのノート",
+    "annotation_text_box": "{{pageNumber}} のテキストボックス"
   },
   "platform_indicator": {
     "available_on": "{{platform}} で利用可能"
@@ -2728,8 +2738,6 @@
     "rotate": "回転",
     "picture-in-picture": "ピクチャーインピクチャー",
     "exit-picture-in-picture": "ピクチャーインピクチャーを終了",
-    "fullscreen": "全画面表示",
-    "exit-fullscreen": "全画面表示を終了",
     "unsupported-format": "このファイル形式ではメディアプレビューはご利用いただけません:\n{{mime}}",
     "zoom-to-fit": "ズームして全体を表示",
     "zoom-reset": "ズーム設定をリセット",
@@ -2935,8 +2943,6 @@
     "zoom-in": "拡大",
     "zoom-out": "縮小",
     "center-map": "マップを中央に配置",
-    "fullscreen": "全画面表示",
-    "exit-fullscreen": "全画面表示を終了",
     "direction-left": "左にブランチを配置",
     "direction-right": "右にブランチを配置",
     "direction-side": "両側にブランチを配置",
@@ -3063,7 +3069,25 @@
     "start_over": "最初からやり直す",
     "start_over_confirm": "Trilium はセットアップ画面に戻ります。そこで、新しいナレッジベースの作成、バックアップの復元、または別のデバイスからの同期を選択できます。まず現在のデータのバックアップが提示され、いずれかを選択するまでデータは削除されません。続行しますか？",
     "start_over_pending": "このサーバーを次回再起動すると、セットアップ画面が表示されます。準備ができたらサーバーを再起動するか、以下で「キャンセル」を選択して現状を維持してください。",
-    "start_over_cancel": "キャンセルして最初からやり直す"
+    "start_over_cancel": "キャンセルして最初からやり直す",
+    "info": "データベース情報",
+    "info_location": "保存場所",
+    "info_location_opfs": "ブラウザのオリジン プライベート ファイルシステム (OPFS)",
+    "info_created": "オリジナル作成日",
+    "info_content": "内容",
+    "info_notes_other": "{{count}} 件のノート",
+    "info_attachments_other": "{{count}} 件の添付ファイル",
+    "info_size": "サイズ",
+    "info_backup": "バックアップ",
+    "info_no_backup": "バックアップはまだありません",
+    "maintenance": "メンテナンス",
+    "analyze_space_usage": "スペース利用状況を分析",
+    "analyze_space_usage_description": "どのノートが最もスペースを占めているかを特定し、ノートのサイズをより明確に把握します。",
+    "analyze_space_usage_button": "分析",
+    "cleanup": "データベースをクリーンアップ",
+    "cleanup_description": "削除済みのノートや添付ファイルを消去し、変更履歴スナップショットを整理して画像を圧縮することで、データベースを軽量に保ちます。",
+    "related_backup": "バックアップ",
+    "related_backup_description": "データベースのバックアップ作成や復元、自動バックアップの管理を行います。"
   },
   "search": {
     "title": "検索",
@@ -3184,7 +3208,9 @@
   },
   "common": {
     "save": "保存",
-    "cancel": "キャンセル"
+    "cancel": "キャンセル",
+    "fullscreen": "全画面表示",
+    "exit_fullscreen": "全画面表示を終了"
   },
   "spreadsheet": {
     "read-only": "このノートは読み取り専用です。",
@@ -3363,7 +3389,23 @@
       "turn-the-current-block-into-a-paragraph": "現在のブロックを段落に変換。",
       "warning": "警告",
       "the-file-is-too-large-to-be-uploaded-http-413-if-trilium-is-behind-a-reverse-proxy-raise-its-request-body-size-limit": "ファイルが大きすぎてアップロードできません（HTTP 413）。Trilium がリバースプロキシの背後にある場合は、リクエストボディのサイズ制限を引き上げてください。",
-      "the-server-responded-with-http-0": "サーバーから HTTP %0 という応答が返されました。"
+      "the-server-responded-with-http-0": "サーバーから HTTP %0 という応答が返されました。",
+      "ai-0": "AI: %0",
+      "ai-assistant": "AI アシスタント",
+      "applies-to-the-current-paragraph": "現在の段落に適用されます。",
+      "ask-ai": "AI に質問…",
+      "ask-ai-to": "AI に依頼…",
+      "ask-ai-to-rewrite-the-selection-or-generate-new-content": "選択範囲の書き換えや新しいコンテンツの生成を AI に依頼する。",
+      "changes": "変更点",
+      "describe-a-change-then-press-enter": "変更内容を入力し、Enter キーを押してください",
+      "insert-below": "下に挿入",
+      "looks-good-already-nothing-to-change": "問題ありません — 変更は不要です。",
+      "result": "結果",
+      "send": "送信",
+      "stop": "停止",
+      "tokens": "トークン",
+      "try-again": "再試行",
+      "working": "処理中…"
     },
     "toolbar-groups": {
       "text-formatting": "テキストの書式設定",
@@ -3427,7 +3469,12 @@
   },
   "options": {
     "title": "オプション",
-    "back": "すべてのオプションに戻る"
+    "back": "すべてのオプションに戻る",
+    "search_placeholder": "設定を検索",
+    "search_clear": "検索をクリア",
+    "search_title": "検索オプション",
+    "search_hint": "キーワードを入力して、すべての設定ページを検索します。",
+    "search_no_results": "該当する設定は見つかりませんでした。"
   },
   "dashboard_view": {
     "refresh-widget": "更新",
@@ -3642,9 +3689,7 @@
     "item_count_other": "{{count}} アイテム",
     "view_mode": "表示:",
     "view_by_category": "カテゴリ別",
-    "view_by_location": "場所別",
-    "section_active_content": "アクティブコンテンツとテンプレート",
-    "section_space_usage": "容量使用状況"
+    "view_by_location": "場所別"
   },
   "show-help": "ヘルプを表示",
   "attribute_list_panel": {
@@ -3845,7 +3890,8 @@
   "database_file_list": {
     "size_on_disk": "ディスク上のサイズ {{size}}",
     "invalid_backup": "無効なバックアップファイル",
-    "unsupported_version": "サポートされていないバックアップファイル形式のバージョン"
+    "unsupported_version": "サポートされていないバックアップファイル形式のバージョン",
+    "delete": "削除"
   },
   "password_with_confirmation": {
     "password": "パスワード",
@@ -3881,5 +3927,47 @@
     "custom_to_placeholder": "置換後のテキスト",
     "custom_add": "置換を追加",
     "custom_remove": "置換を削除"
+  },
+  "ai_assistant": {
+    "title": "AI アシスタント",
+    "action_ask": "AI に質問…",
+    "group_edit": "編集またはレビュー",
+    "group_generate": "生成",
+    "group_adjust": "調整",
+    "group_tone": "トーンの変更",
+    "group_reformat": "再フォーマット",
+    "group_translate": "翻訳",
+    "group_custom": "カスタム",
+    "model": "モデル: {{model}}",
+    "command_make_shorter": "短くする",
+    "command_make_longer": "長くする",
+    "command_simplify": "表現を簡潔にする",
+    "command_tone": "トーンを {{tone}} に変更",
+    "command_bullet_list": "箇条書きにする",
+    "command_table": "表にする",
+    "command_diagram": "図にする",
+    "command_callout": "コールアウトにする",
+    "command_collapsible": "折りたたみ可能なセクションにする",
+    "command_action_items": "アクションアイテムを抽出",
+    "command_translate": "{{language}} に翻訳",
+    "action_fix_typos": "誤字を修正",
+    "action_improve_writing": "文章を改善",
+    "action_summarize": "要約",
+    "action_explain": "解説",
+    "action_continue": "続きを書く",
+    "adjust_shorter": "より短く",
+    "adjust_longer": "より長く",
+    "adjust_simpler": "より簡潔に",
+    "tone_professional": "プロフェッショナル",
+    "tone_casual": "カジュアル",
+    "tone_direct": "ダイレクト",
+    "tone_friendly": "フレンドリー",
+    "tone_confident": "自信に満ちた",
+    "reformat_bullet_list": "箇条書き",
+    "reformat_table": "表",
+    "reformat_diagram": "図",
+    "reformat_callout": "コールアウト",
+    "reformat_collapsible": "折りたたみ",
+    "reformat_action_items": "アクションアイテム"
   }
 }

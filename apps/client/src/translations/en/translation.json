@@ -633,6 +633,7 @@
     "run_on_attribute_creation": "Executes when new attribute is created for the note which defines this relation.",
     "run_on_attribute_change": "Executes when the attribute is changed of a note which defines this relation. This is triggered also when the attribute is deleted.",
     "relation_template": "Note's attributes will be inherited even without a parent-child relationship, note's content and subtree will be added to instance notes if empty. See documentation for details.",
+    "template_new_note_default_parent": "Set on a template note: notes created from the template (e.g. via @-completion) are placed under the target note, unless another location is picked explicitly.",
     "inherit": "Note's attributes will be inherited even without a parent-child relationship. See template relation for a similar concept. See attribute inheritance in the documentation.",
     "render_note": "Notes of type \"render HTML note\" will be rendered using a code note (HTML or script) and it is necessary to point using this relation to which note should be rendered.",
     "widget_relation": "Target of this relation will be executed and rendered as a widget in the sidebar.",
@@ -1062,7 +1063,12 @@
   },
   "options": {
     "title": "Options",
-    "back": "Back to all options"
+    "back": "Back to all options",
+    "search_placeholder": "Search settings",
+    "search_clear": "Clear the search",
+    "search_title": "Options search",
+    "search_hint": "Type a keyword to search across every settings page.",
+    "search_no_results": "No setting matches what you are looking for."
   },
   "global_menu": {
     "menu": "Menu",
@@ -1078,6 +1084,7 @@
     "configure_launchbar": "Configure Launchbar",
     "show_shared_notes_subtree": "Show Shared Notes Subtree",
     "show_deleted_notes": "Show Deleted Notes",
+    "show_space_usage": "Show Space Usage",
     "advanced": "Advanced",
     "open_dev_tools": "Open Dev Tools",
     "open_sql_console": "Open SQL Console",
@@ -1194,6 +1201,7 @@
   },
   "relation_map_buttons": {
     "create_child_note_title": "Create child note and add it to map",
+    "create_child_note_text": "Add note",
     "reset_pan_zoom_title": "Reset pan & zoom to initial coordinates and magnification",
     "zoom_in_title": "Zoom In",
     "zoom_out_title": "Zoom Out"
@@ -1435,9 +1443,7 @@
     "note_paths_what": "A note can sit in more than one place in the note tree at once, and each of those places is listed here as a path.",
     "note_paths_cloning": "Adding a place is called cloning: nothing is copied, so an edit made under one path shows under all of them, and removing one path leaves the note under the others.",
     "backlinks_what": "The notes pointing at this one, either through a link in their text or through a relation naming it.",
-    "backlinks_listing": "A text link is listed with the passage around it, a relation with the name it points by. This side of a link is not editable: it goes away when the note that made it drops the link.",
-    "similar_notes_what": "Notes that look related to this one even where nothing links them.",
-    "similar_notes_how": "The likeness is worked out from the content of the notes, the attributes and relations they carry, and how close together they were created."
+    "backlinks_listing": "A text link is listed with the passage around it, a relation with the name it points by. This side of a link is not editable: it goes away when the note that made it drops the link."
   },
   "abstract_search_option": {
     "remove_this_search_option": "Remove this search option",
@@ -1625,8 +1631,6 @@
     "rotate": "Rotate",
     "picture-in-picture": "Picture-in-picture",
     "exit-picture-in-picture": "Exit picture-in-picture",
-    "fullscreen": "Fullscreen",
-    "exit-fullscreen": "Exit fullscreen",
     "unsupported-format": "Media preview is not available for this file format:\n{{mime}}",
     "zoom-to-fit": "Zoom to fill",
     "zoom-reset": "Reset zoom to fill",
@@ -1714,8 +1718,9 @@
     "choose_anonymization": "You can decide yourself if you want to provide a fully or lightly anonymized database. Even fully anonymized DB is very useful, however in some cases lightly anonymized database can speed up the process of bug identification and fixing.",
     "save_lightly_anonymized_database": "Create copy",
     "existing_anonymized_databases": "Existing anonymized databases",
-    "anonymized_databases_location": "Anonymized databases are stored in {{- anonymizedFolder}}.",
+    "anonymized_databases_location": "Anonymized databases are stored in <Folder/>.",
     "download": "Download",
+    "delete_confirmation": "Delete the anonymized database {{fileName}}? The original database is not affected.",
     "creating_fully_anonymized_database": "Creating fully anonymized database...",
     "creating_lightly_anonymized_database": "Creating lightly anonymized database...",
     "error_creating_anonymized_database": "Could not create anonymized database, check backend logs for details",
@@ -1748,11 +1753,31 @@
   },
   "database": {
     "title": "Database",
+    "info": "Database info",
+    "info_location": "Location",
+    "info_location_opfs": "Browser's origin private file system (OPFS)",
+    "info_created": "Original creation date",
+    "info_content": "Content",
+    "info_notes_one": "{{count}} note",
+    "info_notes_other": "{{count}} notes",
+    "info_attachments_one": "{{count}} attachment",
+    "info_attachments_other": "{{count}} attachments",
+    "info_size": "Size",
+    "info_backup": "Backup",
+    "info_no_backup": "No backups yet",
+    "maintenance": "Maintenance",
+    "analyze_space_usage": "Analyze space usage",
+    "analyze_space_usage_description": "Identify which notes take up the most space, and get a clearer picture of how large your notes are.",
+    "analyze_space_usage_button": "Analyze",
+    "cleanup": "Clean up the database",
+    "cleanup_description": "Erase deleted notes and attachments, trim revision snapshots and compress images to keep the database slim.",
     "start_over_description": "Switch to a new blank database, start again syncing with a new server or restore a backup. You will be prompted to backup your data before discarding the existing data.",
     "start_over": "Start over",
     "start_over_confirm": "Trilium will go back to the setup screen, where you can start a new knowledge base, restore a backup or sync from another device. You will be offered a backup of your current data first, and nothing is deleted until you choose one of those. Continue?",
     "start_over_pending": "The setup screen will appear the next time this server is restarted. Restart the server when you are ready, or cancel below to leave everything as it is.",
-    "start_over_cancel": "Cancel start over"
+    "start_over_cancel": "Cancel start over",
+    "related_backup": "Backup",
+    "related_backup_description": "Create or restore database backups, manage automatic backups."
   },
   "vacuum_database": {
     "title": "Vacuum Database",
@@ -2042,6 +2067,7 @@
   "i18n": {
     "title": "Localization",
     "language": "Language",
+    "dates-title": "Dates & calendar",
     "first-day-of-the-week": "First day of the week",
     "monday": "Monday",
     "tuesday": "Tuesday",
@@ -2081,8 +2107,8 @@
     "backup_recommendation": "It's recommended to keep the backup turned on, but this can make application startup slow with large databases and/or slow storage devices.",
     "backup_now": "Backup now",
     "restore_backup": "Restore a backup",
-    "backups_summary_one": "{{count}} backup, the most recent from {{age}} ago.",
-    "backups_summary_other": "{{count}} backups, the most recent from {{age}} ago.",
+    "backups_summary_one": "{{count}} backup, the most recent from {{age}} ago",
+    "backups_summary_other": "{{count}} backups, the most recent from {{age}} ago",
     "existing_backups": "Existing backups",
     "date-and-time": "Date & time",
     "path": "Path",
@@ -2114,6 +2140,7 @@
     "encrypted": "Encrypted"
   },
   "database_file_list": {
+    "delete": "Delete",
     "size_on_disk": "{{size}} on disk",
     "invalid_backup": "Invalid backup file",
     "unsupported_version": "Unsupported backup file format version"
@@ -2723,6 +2750,7 @@
   "clipboard": {
     "cut": "Note(s) have been cut into clipboard.",
     "copied": "Note(s) have been copied into clipboard.",
+    "copied_without_links": "Note(s) have been copied into clipboard, but the note links could not be placed on the system clipboard.",
     "copy_failed": "Cannot copy to clipboard due to permission issues.",
     "copy_success": "Copied to clipboard."
   },
@@ -2923,8 +2951,6 @@
     "zoom-out": "Zoom out",
     "enter-3d": "Tilt into a 3D view\nHold Ctrl and drag to tilt the map freely",
     "exit-3d": "Lay the map flat again",
-    "fullscreen": "Fullscreen",
-    "exit-fullscreen": "Exit fullscreen",
     "close-details": "Close",
     "marker-color": "Marker color",
     "copy-coordinates": "Copy coordinates"
@@ -3047,9 +3073,7 @@
     "sort_by_title": "Title",
     "sort_by_date_created": "Creation date",
     "no_items": "No active content found.",
-    "no_items_hint": "Scripts, themes, templates and snippets you create will be listed here.",
-    "section_active_content": "Active Content & Templates",
-    "section_space_usage": "Space Usage"
+    "no_items_hint": "Scripts, themes, templates and snippets you create will be listed here."
   },
   "space_usage": {
     "loading": "Measuring space usage...",
@@ -3092,6 +3116,12 @@
     "status_content_hint": "Space held by all notes (hidden ones included), their attachments and their revisions, with duplicated content counted once",
     "status_deleted": "{{size}} in deleted notes and attachments",
     "status_deleted_hint": "Space still held by deleted notes and by deleted attachments (whose note may still exist); erasing them reclaims it",
+    "status_notes": "Notes",
+    "status_total": "Total",
+    "status_attachments": "Attachments",
+    "status_deleted_items": "Deleted items",
+    "selection_hint": "Tap an item for details",
+    "show_selection_details": "Show selection details",
     "menu_show_details": "Show details",
     "menu_erase_deleted": "Erase deleted data",
     "erase_deleted_message": "Deleted data has been erased.",
@@ -3196,7 +3226,10 @@
   },
   "svg": {
     "export_to_png": "The diagram could not be exported to PNG.",
-    "export_to_svg": "The diagram could not be exported to SVG."
+    "export_to_svg": "The diagram could not be exported to SVG.",
+    "zoom_in": "Zoom in",
+    "zoom_out": "Zoom out",
+    "reset_zoom": "Reset zoom"
   },
   "code_theme": {
     "title": "Appearance",
@@ -3408,9 +3441,7 @@
   },
   "settings": {
     "related_settings": "Related settings",
-    "related_actions": "Related actions",
-    "related_space_usage": "Analyze the space usage within the database",
-    "related_space_usage_description": "See which notes, revisions and attachments take up the most space, and reclaim it."
+    "related_actions": "Related actions"
   },
   "settings_appearance": {
     "related_code_blocks": "Color scheme for code blocks in text notes",
@@ -3525,7 +3556,8 @@
     "tab_width_style_tabs": "Tabs"
   },
   "attributes_panel": {
-    "title": "Note Attributes"
+    "title": "Note Attributes",
+    "edit_in_sidebar": "Edit in the sidebar"
   },
   "right_pane": {
     "empty_message": "Nothing to show for this note",
@@ -3584,7 +3616,11 @@
     "pages_alt": "Page {{pageNumber}}",
     "pages_loading": "Loading...",
     "annotations_one": "{{count}} annotation",
-    "annotations_other": "{{count}} annotations"
+    "annotations_other": "{{count}} annotations",
+    "annotation_drawing": "Drawing on page {{pageNumber}}",
+    "annotation_highlight": "Highlight on page {{pageNumber}}",
+    "annotation_note": "Note on page {{pageNumber}}",
+    "annotation_text_box": "Text box on page {{pageNumber}}"
   },
   "platform_indicator": {
     "available_on": "Available on {{platform}}"
@@ -3723,8 +3759,6 @@
     "zoom-out": "Zoom out",
     "reset-zoom": "Reset zoom",
     "center-map": "Center the map",
-    "fullscreen": "Fullscreen",
-    "exit-fullscreen": "Exit fullscreen",
     "direction-left": "Branches to the left",
     "direction-right": "Branches to the right",
     "direction-side": "Branches to both sides",
@@ -3830,7 +3864,9 @@
   },
   "common": {
     "save": "Save",
-    "cancel": "Cancel"
+    "cancel": "Cancel",
+    "fullscreen": "Fullscreen",
+    "exit_fullscreen": "Exit fullscreen"
   },
   "spreadsheet": {
     "read-only": "This note is read-only.",

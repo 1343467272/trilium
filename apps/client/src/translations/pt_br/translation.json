@@ -2138,8 +2138,6 @@
     "zoom-out": "Reduzir",
     "enter-3d": "Inclinar para uma visualização 3D\nSegure Ctrl e arraste para inclinar o mapa livremente",
     "exit-3d": "Deixar o mapa plano novamente",
-    "fullscreen": "Tela cheia",
-    "exit-fullscreen": "Sair da tela cheia",
     "close-details": "Fechar",
     "marker-color": "Cor do marcador",
     "copy-coordinates": "Copiar coordenadas"
@@ -2316,9 +2314,7 @@
   },
   "settings": {
     "related_settings": "Configurações relacionadas",
-    "related_actions": "Ações relacionadas",
-    "related_space_usage": "Analisar o uso de espaço dentro do banco de dados",
-    "related_space_usage_description": "Veja quais notas, revisões e anexos ocupam mais espaço e recupere-o."
+    "related_actions": "Ações relacionadas"
   },
   "settings_appearance": {
     "related_code_blocks": "Esquema de cores para blocos de código em notas de texto",
@@ -2742,8 +2738,6 @@
     "play-mode-next": "Reproduzir a próxima",
     "picture-in-picture": "Picture-in-picture",
     "exit-picture-in-picture": "Sair do picture-in-picture",
-    "fullscreen": "Tela cheia",
-    "exit-fullscreen": "Sair da tela cheia",
     "unsupported-format": "A pré-visualização de mídia não está disponível para este formato de arquivo:\n{{mime}}",
     "zoom-to-fit": "Ampliar para preencher",
     "zoom-reset": "Redefinir zoom para preencher",
@@ -3016,8 +3010,6 @@
     "zoom-out": "Reduzir",
     "reset-zoom": "Redefinir zoom",
     "center-map": "Centralizar o mapa",
-    "fullscreen": "Tela cheia",
-    "exit-fullscreen": "Sair da tela cheia",
     "direction-left": "Ramos para a esquerda",
     "direction-right": "Ramos para a direita",
     "direction-side": "Ramos para ambos os lados",
@@ -3650,9 +3642,7 @@
     "sort_by_title": "Título",
     "sort_by_date_created": "Data de criação",
     "no_items": "Nenhum conteúdo ativo encontrado.",
-    "no_items_hint": "Scripts, temas, modelos e trechos que você criar serão listados aqui.",
-    "section_active_content": "Conteúdo ativo e modelos",
-    "section_space_usage": "Uso de espaço"
+    "no_items_hint": "Scripts, temas, modelos e trechos que você criar serão listados aqui."
   },
   "space_usage": {
     "loading": "Medindo o uso de espaço...",
