@@ -51,6 +51,18 @@ jobs:
       - name: Sync Capacitor Android project
         run: pnpm --filter @triliumnext/mobile exec cap sync android
 
+      - name: Restrict native libs to arm64-v8a (Snapdragon 8+)
+        run: |
+          cat >> apps/mobile/android/app/build.gradle <<'EOF'
+          android {
+              defaultConfig {
+                  ndk {
+                      abiFilters "arm64-v8a"
+                  }
+              }
+          }
+          EOF
+
       - name: Build release APK (unsigned)
         working-directory: apps/mobile/android
         run: ./gradlew assembleRelease
