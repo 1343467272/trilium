@@ -23,12 +23,80 @@ jobs:
     runs-on: ubuntu-latest
     env:
       TRILIUM_SECURITY_BACKEND_SCRIPTING_ENABLED: "true"
+      ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
     steps:
       - name: Checkout the repository
         uses: actions/checkout@v7
 
-      - name: Build mobile APK
-        uses: ./.github/actions/build-mobile
+      - uses: pnpm/action-setup@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Update build info
+        run: pnpm run chore:update-build-info
+
+      - name: Build client-standalone (webDir for Capacitor)
+        run: pnpm --filter @triliumnext/mobile build
+
+      - name: Sync Capacitor Android project
+        run: pnpm --filter @triliumnext/mobile exec cap sync android
+
+      - name: Build release APK (unsigned)
+        working-directory: apps/mobile/android
+        run: ./gradlew assembleRelease
+
+      - name: Sign release APK (v1/v2/v3/v4 signature schemes)
+        if: env.ANDROID_KEYSTORE_B64 != ''
+        run: |
+          APKSIGNER="$(ls "${ANDROID_HOME}"/build-tools/*/apksigner | sort -V | tail -n 1)"
+          OUT_DIR="${RUNNER_TEMP}/signed"
+          mkdir -p "$OUT_DIR"
+
+          KEYSTORE="${RUNNER_TEMP}/release.keystore"
+          echo "$ANDROID_KEYSTORE_B64" | base64 -d > "$KEYSTORE"
+
+          "$APKSIGNER" sign \
+            --ks "$KEYSTORE" \
+            --ks-key-alias "$ANDROID_KEY_ALIAS" \
+            --ks-pass "pass:${ANDROID_KEYSTORE_PASSWORD}" \
+            --key-pass "pass:${ANDROID_KEY_PASSWORD}" \
+            --v1-signing-enabled true \
+            --v2-signing-enabled true \
+            --v3-signing-enabled true \
+            --v4-signing-enabled true \
+            --out "$OUT_DIR/TriliumNotes-release.apk" \
+            apps/mobile/android/app/build/outputs/apk/release/app-release-unsigned.apk
+
+          "$APKSIGNER" verify --print-certs "$OUT_DIR/TriliumNotes-release.apk"
+          rm -f "$KEYSTORE"
+
+      - name: Upload signed release APK
+        if: env.ANDROID_KEYSTORE_B64 != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: trilium-mobile-android-release-signed
+          path: |
+            ${{ runner.temp }}/signed/TriliumNotes-release.apk
+            ${{ runner.temp }}/signed/TriliumNotes-release.apk.idsig
+          retention-days: 14
+
+      - name: Upload unsigned APK (fallback when no signing secrets)
+        if: env.ANDROID_KEYSTORE_B64 == ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: trilium-mobile-android-release-unsigned
+          path: apps/mobile/android/app/build/outputs/apk/release/app-release-unsigned.apk
+          retention-days: 14
 
   build_ios:
     name: Build iOS App
