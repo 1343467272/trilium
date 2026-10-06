@@ -5,16 +5,23 @@ This can be useful for a few things:
 
 *   computer programmers can store code snippets as notes with syntax highlighting
 *   JavaScript code notes can be executed inside Trilium for some extra functionality
-    *   we call such JavaScript code notes "scripts" - see <a class="reference-link" href="../Scripting.md">Scripting</a>
+    *   we call such JavaScript code notes "scripts" – see <a class="reference-link" href="../Scripting.md">Scripting</a>
 *   JSON, XML etc. can be used as storage for structured data (typically used in conjunction with scripting)
 
 For shorter snippets of code that can be embedded in [Text](Text.md) notes, see [Code blocks](Text/Developer-specific%20formatting/Code%20blocks.md).
 
 ![](Code_image.png)
 
+## Creating a code note
+
+In the [Note Tree](../Basic%20Concepts%20and%20Features/UI%20Elements/Note%20Tree.md), right-click a note and select _Insert child note_ or _Insert note after_, then:
+
+*   To create a plain text code note, select _Code_.
+*   To create a code note in a given language, hover _Code_ and select the language. The list shows the languages enabled in the options (see below), and ends with _Configure code notes..._, which opens them.
+
 ## Adjusting the language of a code note
 
-In the [Ribbon](../Basic%20Concepts%20and%20Features/UI%20Elements/Ribbon.md), look for the _Note type_ selector and click it to reveal the possible note types. Inside of it there will be a section called _Code_, select any one of the languages.
+In the [Ribbon](../Basic%20Concepts%20and%20Features/UI%20Elements/Ribbon.md), look for the _Note type_ selector and click it to reveal the possible note types. Inside of it there will be a section called _Code_, select any one of the languages. To find a language quickly, type its name: the list narrows to the matching entries, and <kbd>Enter</kbd> picks the first one.
 
 ![](1_Code_image.png)
 
@@ -49,7 +56,7 @@ The status bar at the bottom of the editor shows the current indentation setting
 2.  **Display Width** — choose from preset widths (1, 2, 3, 4, 6, 8). Changes are saved as a per-note `#tabWidth` label.
 3.  **Re-indent Content To** — convert existing indentation to a different style. For example, re-indent a file from 4 spaces to 2 spaces, or from spaces to tabs. This rewrites the leading whitespace on every line while preserving alignment remainders.
 
-Clicking the language indicator lets you change the note's MIME type.
+Clicking the language indicator lets you change the note's MIME type. As in the _Note type_ selector, typing narrows the list of languages.
 
 ### Re-indentation
 
@@ -67,3 +74,19 @@ Since Trilium 0.94.0 the colors of code notes can be customized by going <a cla
 > [!NOTE]
 > **Why are there only a few themes whereas the code block themes for text notes have a lot?**  
 > The reason is that Code notes use a different technology than the one used in Text notes, and as such there is a more limited selection of themes. If you find a CodeMirror 6 (not 5) theme that you would like to use, let us know and we might consider adding it to the set of default themes. There is no possibility of adding new themes (at least for now), since the themes are defined in JavaScript and not at CSS level.
+
+## Programming ligatures
+
+If you see `!=` displayed as `≠` or `->` as `→` inside a code note, those are _font ligature_: the default monospace font draws certain character pairs as a single symbol. The underlying text is not changed by Trilium (unlike text notes which have <a class="reference-link" href="Text/Automatic%20replacements.md">Automatic replacements</a>), and copying it out gives you back `!=` and `->`.
+
+This can be turned off with <a class="reference-link" href="../Basic%20Concepts%20and%20Features/UI%20Elements/Options.md">Options</a>_→ Appearance → Fonts → Programming ligatures_.
+
+## Virtual keyboard behavior
+
+When using a virtual keyboard, keyboard suggestions and corrections are controlled as follows:
+
+*   For <a class="reference-link" href="Markdown.md">Markdown</a> and plain text code notes, the autocorrect is **on**, as well as automatic capitalization.
+*   For all the other code notes, the autocorrect is off in order to avoid issues when typing code.
+
+> [!NOTE]
+> Not all browsers and platforms respect this value, so the keyboard suggestions might appear without autocorrecting or the browser might disregard this and autocorrect anyway.

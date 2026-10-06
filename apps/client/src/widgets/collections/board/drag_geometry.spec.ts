@@ -1,19 +1,27 @@
 import { describe, expect, it } from "vitest";
 
 import {
-    type CardBox, cardInsertionIndex, columnAt, type ColumnBox, columnCovers,
-    columnInsertionIndex, movesColumn
+    type CardBox, cardInsertionIndex, columnAt, type ColumnBox, columnCovers, columnEndAt,
+    columnInsertionIndex, columnStandsAside, movesColumn
 } from "./drag_geometry";
 
-/** Three 100px columns with a 20px gap, standing 400 tall from the top of the page. */
+/**
+ * Three 100px columns with a 20px gap, standing 400 tall from the top of the page. The heading
+ * begins at the top of each and the button that adds a card ends at its foot.
+ */
 function columns(cards: Record<string, CardBox[]> = {}): ColumnBox[] {
     return [ "To Do", "Doing", "Done" ].map((value, index) => ({
         value,
         left: index * 120,
         width: 100,
         top: 0,
+        origin: 0,
         height: 400,
-        cards: cards[value] ?? []
+        headStart: 0,
+        footEnd: 400,
+        sorted: false,
+        cards: cards[value] ?? [],
+        count: (cards[value] ?? []).length
     }));
 }
 
@@ -79,7 +87,8 @@ describe("columnCovers", () => {
      */
     it("tells the column from the empty space below a short one", () => {
         const strip: ColumnBox = {
-            value: "Parked", left: 0, width: 36, top: 0, height: 90, cards: []
+            value: "Parked", left: 0, width: 36, top: 0, height: 90, origin: 0,
+            headStart: 90, footEnd: 90, sorted: false, cards: [], count: 0
         };
 
         expect(columnCovers(strip, 18, 0)).toBe(true);
@@ -170,5 +179,77 @@ describe("movesColumn", () => {
         expect(movesColumn(0, 0)).toBe(false);
         expect(movesColumn(0, 1)).toBe(false);
         expect(movesColumn(0, 2)).toBe(true);
+    });
+});
+
+describe("columnStandsAside", () => {
+    // Six columns, the third one carried, each standing 266px wide with the gap after it.
+    const aside = (index: number, to: number | null) => columnStandsAside(index, 2, to, 266);
+
+    it("moves the columns between where it left and where it lands, and no others", () => {
+        // Carried to the right: the ones it passes close up behind it.
+        expect([ 0, 1, 2, 3, 4, 5 ].map(index => aside(index, 5)))
+            .toEqual([ 0, 0, 0, -266, -266, 0 ]);
+
+        // Carried to the left: the ones it passes stand aside for it.
+        expect([ 0, 1, 2, 3, 4, 5 ].map(index => aside(index, 0)))
+            .toEqual([ 266, 266, 0, 0, 0, 0 ]);
+    });
+
+    it("holds everything still where the column would land back in its own place", () => {
+        expect([ 0, 1, 2, 3, 4, 5 ].map(index => aside(index, 2))).toEqual([ 0, 0, 0, 0, 0, 0 ]);
+        // The place just after its own is the same place: it is the only column out of the row.
+        expect([ 0, 1, 2, 3, 4, 5 ].map(index => aside(index, 3))).toEqual([ 0, 0, 0, 0, 0, 0 ]);
+    });
+
+    it("holds everything still while the column is over nowhere it could land", () => {
+        expect([ 0, 1, 2, 3, 4, 5 ].map(index => aside(index, null))).toEqual([ 0, 0, 0, 0, 0, 0 ]);
+    });
+
+    it("counts the place past the last column as the end of the row", () => {
+        expect([ 0, 1, 2, 3, 4, 5 ].map(index => aside(index, 6)))
+            .toEqual([ 0, 0, 0, -266, -266, -266 ]);
+    });
+});
+
+describe("columnEndAt", () => {
+    /**
+     * The two ends stand 30px clear of the column, the heading and the add button being where a
+     * card is held to walk the column along rather than to place it.
+     */
+    it("answers for what stands 30px above the heading and below the add button", () => {
+        const [ column ] = columns();
+
+        expect(columnEndAt(column, -31)).toBe("first");
+        expect(columnEndAt(column, -200)).toBe("first");
+
+        // The heading itself, the button at the foot, and the band past each of them.
+        expect(columnEndAt(column, -30)).toBeUndefined();
+        expect(columnEndAt(column, 0)).toBeUndefined();
+        expect(columnEndAt(column, 200)).toBeUndefined();
+        expect(columnEndAt(column, 400)).toBeUndefined();
+        expect(columnEndAt(column, 429)).toBeUndefined();
+
+        expect(columnEndAt(column, 430)).toBe("last");
+        expect(columnEndAt(column, 900)).toBe("last");
+    });
+
+    /** A sorted column places what it is given, so neither of its ends is the reader's to pick. */
+    it("offers neither end of a column that orders its own cards", () => {
+        const [ column ] = columns();
+        const sorted = { ...column, sorted: true };
+
+        expect(columnEndAt(sorted, 0)).toBeUndefined();
+        expect(columnEndAt(sorted, 900)).toBeUndefined();
+    });
+
+    /** A collapsed column is a heading and nothing else, and so is neither end of itself. */
+    it("offers neither end of a column with no room between them", () => {
+        const [ column ] = columns();
+        const strip = { ...column, headStart: 40, footEnd: 40 };
+
+        expect(columnEndAt(strip, 0)).toBeUndefined();
+        expect(columnEndAt(strip, 40)).toBeUndefined();
+        expect(columnEndAt(strip, 900)).toBeUndefined();
     });
 });

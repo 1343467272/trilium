@@ -1,10 +1,9 @@
 import clsx from "clsx";
-import { Fragment } from "preact";
+import { Fragment, TargetedMouseEvent, TargetedWheelEvent } from "preact";
 import { flushSync } from "preact/compat";
 import {
-    useCallback, useContext, useEffect, useMemo, useRef, useState
+    useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState
 } from "preact/hooks";
-import { JSX } from "preact/jsx-runtime";
 
 import FBranch from "../../../entities/fbranch";
 import FNote from "../../../entities/fnote";
@@ -14,27 +13,49 @@ import dialog from "../../../services/dialog";
 import { getHue, parseColor } from "../../../services/css_class_manager";
 import froca from "../../../services/froca";
 import { t } from "../../../services/i18n";
+import { isMobile } from "../../../services/utils";
 import { DragData, TREE_CLIPBOARD_TYPE } from "../../note_tree";
 import ActionButton from "../../react/ActionButton";
 import Icon from "../../react/Icon";
 import { IconPickerButton } from "../../react/IconPicker";
-import { useStaticTooltip } from "../../react/hooks";
-import { FLIP_SETTLE_MS, useFlip } from "../../react/flip";
+import { useIsOnScreen, useLingeringTrue, useStaticTooltip } from "../../react/hooks";
+import { useFlip } from "../../react/flip";
 import { useScrollFade } from "../../react/scroll_fade";
+import { useSelection } from "../../react/selection";
+
+/** How long a field waits for the card it made, after which it is taken down regardless. */
+const HAND_OVER_MS = 2000;
+
+/** What a gap stands at when nothing carried says otherwise. Matches `.board-drop-placeholder`. */
+const STOCK_GAP_HEIGHT = 40;
 
 /**
- * How long `footerQuietUntil` holds for a card `AddNewItem` is making, if the write never answers.
+ * The least a card can stand, which is one line of its title with the padding and gap around it.
+ *
+ * Says how many cards a column can show at once, which is how many below the gap have to move.
  */
-const FOOTER_QUIET_MS = 5000;
+const MIN_CARD_HEIGHT = 32;
 
 /** How long an open takes. Matches `--board-expand-duration` in the board's own rules. */
-const EXPAND_MS = 200;
+export const EXPAND_MS = 200;
 import NoteLink from "../../react/NoteLink";
-import { BoardActionsContext, BoardDragStateContext, TitleEditor } from ".";
+import {
+    BoardActionsContext, BoardDragStateContext, BoardOverlayHostContext, BoardSelectionModeContext,
+    TitleEditor
+} from ".";
 import BoardApi from "./api";
 import Card from "./card";
-import { DEFAULT_COLUMN_ICON, INBOX_COLUMN } from "./columns";
-import { openColumnContextMenu, openCreateCardMenu } from "./context_menu";
+import CardTemplatePill from "./card_template_pill";
+import { cardTemplateIcon, type CardTemplates } from "./card_templates";
+import { DEFAULT_CARD_ICON, DEFAULT_COLUMN_ICON, INBOX_COLUMN } from "./columns";
+import { ColumnToolbar, RAIL_EXIT_MS } from "./card_toolbar";
+import { openColumnContextMenu, openColumnSortMenu, openCreateCardMenu } from "./context_menu";
+import type { ColumnSort } from "./data";
+import { cardSpacing } from "./drag_measure";
+import {
+    REVEAL_CARD, type RevealCardDetail, useColumnWindow, WINDOW_THRESHOLD
+} from "./windowing";
+import { BoardDropStateContext, useDropIndex, useIsDropTarget } from "./drop_state";
 
 interface DragContext {
     column: string;
@@ -56,11 +77,21 @@ export default function Column({
     archived,
     collapsed,
     keepCollapsed,
+    isCollapseVolatile,
+    collapsesQuickly,
+    willOpen,
     isActive,
+    isPeeked,
+    isResizing,
+    standsAside,
     nested,
     limit,
     columnItems,
+    totalCount,
     isNew,
+    cardTemplates,
+    sort,
+    landedNoteId,
     api,
     parentNote,
     isInRelationMode
@@ -76,12 +107,49 @@ export default function Column({
     collapsed?: boolean,
     /** Whether the column collapses again once opened, which keeps `collapsed` through an open. */
     keepCollapsed?: boolean,
+    /**
+     * Whether `collapsed` is the filter's rather than the stored flag, so a change to it is not
+     * written and the column is not offered to keep collapsed.
+     */
+    isCollapseVolatile?: boolean,
+    /** Whether a collapse now being drawn was asked for, which runs at the quick duration. */
+    collapsesQuickly?: boolean,
+    /**
+     * Whether the column is about to open, while it is still drawn as a strip. It lays its cards
+     * out meanwhile, so the open does not pay for that on the frame the width starts moving.
+     */
+    willOpen?: boolean,
     /** Whether this is the column the reader is working in, which opens it while it is collapsed. */
     isActive?: boolean,
+    /** Whether the board is showing every collapsed column at once, which opens this one too. */
+    isPeeked?: boolean,
+    /** Whether a column is still taking its new width, during which no column's cards move. */
+    isResizing?: boolean,
+    /**
+     * How far the column stands aside for one being carried, in pixels.
+     *
+     * The row keeps its order for the length of the gesture, so a step costs a transform per
+     * column rather than a fresh layout of every card on the board.
+     */
+    standsAside?: number,
+    /** What a new card is made from, and how the reader picks something else. */
+    cardTemplates: CardTemplates,
     /** Whether the inbox also collects notes deeper than the board's direct children. */
     nested?: boolean,
     /** The note limit, absent if disabled. */
     limit?: number,
+    /**
+     * How the column orders its cards, absent for the manual order. A sorted column opens no drop
+     * gap and offers no control that puts a card at a chosen index.
+     */
+    sort?: ColumnSort,
+    /** The card just dropped here, drawn with the `appearing` reveal. */
+    landedNoteId?: string,
+    /**
+     * How many cards the column really holds, when an active filter leaves `columnItems` with
+     * fewer. The badge counts what is shown; the limit is about the real column.
+     */
+    totalCount?: number,
     api: BoardApi,
     parentNote: FNote,
     isInRelationMode: boolean,
@@ -92,84 +160,201 @@ export default function Column({
     onFocusColumn: (column: string) => void,
     onFocusCard: (noteId: string) => void
 } & DragContext) {
+    const isSorted = !!sort;
     const [ isCreatingNewItem, setIsCreatingNewItem ] = useState(false);
-    const [ created, setCreated ] = useState<{ noteId?: string, takesFocus: boolean }>();
     /**
-     * Every card this column has drawn, which is what tells one just made from one coming back.
+     * The card a field standing among the cards makes its own above, absent while no such field is
+     * open and empty for one standing below the last card.
      *
-     * `created` names a card until another is made, and the card itself is marked in no way, so a
-     * card carried off the column and back would arrive under that name again. Every arrival is
-     * recorded, whatever became of it: the card can be drawn before the write answers with its id,
-     * and the footer's own card is never opened out at all.
+     * The card below the field rather than the one above it, so the field keeps its place as it
+     * makes cards: each one is drawn above the field, and a run of them stands in the order it was
+     * typed. Named by the card above instead, the field would be carried down past every card it
+     * made, and moving the element it is typed in takes focus out of it.
      */
-    const arrived = useRef(new Set<string>());
+    const [ insertBefore, setInsertBefore ] = useState<{ branchId?: string }>();
+    /**
+     * The cards as last drawn, for the callback that opens a field among them. Read through a ref
+     * so that callback keeps one identity: rebuilt per refresh, it would be a new prop on every
+     * card and no card could be left undrawn.
+     */
+    const itemsRef = useRef(columnItems);
+    itemsRef.current = columnItems;
+    // A ref for the same reason: `beginInsert` below keeps one identity.
+    const isSortedRef = useRef(isSorted);
+    isSortedRef.current = isSorted;
+    /** Opens the field at a place among the cards, which is the index the card it makes takes. */
+    const beginInsert = useCallback((index: number) => {
+        // A sorted column has no index to insert at.
+        if (isSortedRef.current) {
+            return;
+        }
+
+        setInsertBefore({ branchId: itemsRef.current?.[index]?.branch.branchId });
+    }, []);
+    /** Opens the field at the foot of the column, which its button and its menu also open. */
+    const beginNewItem = useCallback(() => setIsCreatingNewItem(true), []);
+    /** The card the footer just made, which is revealed and scrolled to as it is drawn. */
+    const [ createdNoteId, setCreatedNoteId ] = useState<string>();
+    /**
+     * The card a field standing among the others just made, which takes the field's place.
+     *
+     * The field stands where the card goes until the board has drawn it, so the card fades in
+     * where the field was rather than opening out of a gap the column has to make for it.
+     */
+    const [ insertedNoteId, setInsertedNoteId ] = useState<string>();
+    const cardInserted = useCallback((noteId: string | undefined) => {
+        setInsertedNoteId(noteId);
+        setCreatedNoteId(noteId);
+    }, []);
     // `isNew` stays true until another column is added, so the reveal is recorded here rather than
     // replayed on every redraw of the board.
     const [ isRevealed, setIsRevealed ] = useState(false);
-    /**
-     * Until when a card from `AddNewItem` can still arrive, during which `useFlip` does not grow
-     * it.
-     *
-     * Testing the id is not enough: `createNewItem()` answers with it after the refresh that draws
-     * the card can already have run, so `created` is set too late. `onCreating` sets this before
-     * the write instead.
-     */
-    const footerQuietUntil = useRef(0);
-    // An inserted card is left focused, since that is where the work is; a card from the footer is
-    // not, or it would take focus from the editor being typed in.
-    const cardInserted = useCallback(
-        (noteId: string | undefined) => setCreated({ noteId, takesFocus: true }), []);
-    const addingFromFooter = useCallback(() => {
-        // Long enough for a write that never answers; `cardAdded` shortens it when one does.
-        footerQuietUntil.current = Date.now() + FOOTER_QUIET_MS;
-    }, []);
-    const cardAdded = useCallback((noteId: string | undefined) => {
-        footerQuietUntil.current = Date.now() + FLIP_SETTLE_MS;
-        setCreated({ noteId, takesFocus: false });
-    }, []);
-    const { setColumnNameToEdit, setColumnLimitToEdit, setActiveColumn } =
+    const { setColumnNameToEdit, setColumnLimitToEdit, setActiveColumn, setInsertingColumn } =
         useContext(BoardActionsContext);
-    const { branchIdToEdit, columnNameToEdit, dropTarget, draggedCard, dropPosition } = useContext(BoardDragStateContext);
+    const { branchIdToEdit, columnNameToEdit, draggedCard, draggedColumn } =
+        useContext(BoardDragStateContext);
+    // Read for the `Select all cards` menu entry, which calls `selection.selectAll`.
+    const selection = useSelection();
+    // Every card on the move. The one under the pointer is taken out of the flow by the gesture
+    // itself; the rest of a carried selection stay where they are drawn and are dimmed instead.
+    const carriedNoteIds = draggedCard
+        ? new Set(draggedCard.noteIds ?? [ draggedCard.noteId ])
+        : null;
+    // Asked about this column alone: where the gap stands changes on every step of a drag, and a
+    // column that the answer does not concern is left as it is rather than drawn again.
+    const standingDropIndex = useDropIndex(column);
+    // A sorted column draws only its border, since `sortColumnMap` decides where the card lands.
+    // The source column keeps the gap at the lifted card's own index, or the cards below close up
+    // for the length of the gesture. A gap stands before the card it indexes, hence the `+ 1`.
+    const dropIndex = !isSorted
+        ? standingDropIndex
+        : (draggedCard?.fromColumn === column ? draggedCard.index + 1 : null);
+    const isDropTarget = useIsDropTarget(column);
     const isEditing = (columnNameToEdit === column);
     const editorRef = useRef<HTMLInputElement>(null);
     const headerRef = useRef<HTMLHeadingElement>(null);
     const contentRef = useRef<HTMLDivElement>(null);
     const scrollFade = useScrollFade(contentRef);
-    // Cards slide to follow the drop gap opening and closing. Only the card named by `created`
-    // opens out of nothing: a card moved here from another column mounts as a new element too, and
-    // would collapse and reopen after the drop. The footer's own card is excluded as well, by
-    // `footerQuietUntil`: the scroll to the end and the fade already show it.
+    const noteIds = useMemo(
+        () => (columnItems ?? []).map(({ note }) => note.noteId), [ columnItems ]);
+    // A column of thousands draws only what the reader can see. Left off below the threshold, so
+    // an ordinary board keeps the code path it has always had.
+    const isWindowed = noteIds.length > WINDOW_THRESHOLD;
+    const { bounds, windowChanged, scrollToCard } = useColumnWindow(contentRef, noteIds, isWindowed);
+    const shownItems = isWindowed
+        ? (columnItems ?? []).slice(bounds.from, bounds.until)
+        : (columnItems ?? []);
+    // Cards slide to follow the drop gap opening and closing. Measured only when the column's own
+    // cards have changed: reading one position costs a layout of the whole board, and anything
+    // else that redraws it would have every column read one per card.
+    const measured = useRef<unknown>(undefined);
+    const cardsChanged = measured.current !== columnItems;
+    measured.current = columnItems;
     useFlip(contentRef, {
         selector: ".board-note",
-        grow: (card) => {
-            const noteId = card.getAttribute("data-note-id");
-            if (!noteId) {
-                return false;
-            }
+        // Paused where nothing has moved the cards, so the places it knows are still good.
+        paused: !cardsChanged,
+        // Off for the length of a gesture, so the commit that ends one records where the cards
+        // landed rather than sliding them there. A window that has just swapped its cards is the
+        // same case: the places recorded before it name cards that are no longer drawn, and
+        // sliding from them would animate a scroll as though the column had been reordered.
+        disabled: !!draggedCard || !!draggedColumn || !!isResizing || windowChanged
+    });
 
-            const isFirstArrival = !arrived.current.has(noteId);
-            arrived.current.add(noteId);
+    const windowFrom = isWindowed ? bounds.from : 0;
+    // The gap is a standing element that slides, and the cards beside it are transformed: putting
+    // one among the cards, or taking one out, restyles every element the board holds.
+    const gapRef = useRef<HTMLDivElement>(null);
+    const roomRef = useRef<HTMLDivElement>(null);
+    /** Whether a card was being carried at the previous commit. */
+    const carried = useRef(false);
+    /** Which cards were last told to stand aside, so only what changed is written. */
+    const aside = useRef({ from: 0, until: 0, room: 0 });
+    useLayoutEffect(() => {
+        // The commits a drag opens and closes on, where a card is already standing where it is
+        // being drawn. Every commit in between moves the cards for real and eases as usual.
+        const atOnce = carried.current !== !!draggedCard;
+        carried.current = !!draggedCard;
 
-            return isFirstArrival && noteId === created?.noteId
-                && Date.now() > footerQuietUntil.current;
+        const area = contentRef.current;
+        const gap = gapRef.current;
+        if (!area || !gap) return;
+
+        const cards = area.querySelectorAll<HTMLElement>(".board-note");
+        const height = draggedCard?.height ?? STOCK_GAP_HEIGHT;
+        const room = dropIndex === null ? 0 : height + cardSpacing();
+        // Read with the places below, before anything is written: every card the column can show
+        // moves, and the ones past its foot are left alone whatever it holds.
+        const reach = Math.ceil(area.clientHeight / MIN_CARD_HEIGHT) + 1;
+
+        // A windowed column draws a slice of its cards, so a place in the column has to be read
+        // as a place among the ones drawn before it can name an element.
+        const placeOf = (index: number) => index - windowFrom;
+
+        // Read before anything is written, and `offsetTop` is no business of a transform anyway.
+        if (dropIndex !== null) {
+            const standing = cards[placeOf(dropIndex)];
+            // `lift()` sets `display: none` on the carried card, so a gap past the last one
+            // measures against the last card still laid out.
+            const drawn = [ ...cards ].filter(card => card.style.display !== "none");
+            const last = drawn[drawn.length - 1];
+            const top = standing
+                ? standing.offsetTop
+                // Above the window, place the gap at the first rendered card; below it, after
+                // the last.
+                : (placeOf(dropIndex) < 0
+                    ? (cards[0]?.offsetTop ?? 0)
+                    : (last ? last.offsetTop + last.offsetHeight + cardSpacing() : 0));
+            gap.style.transform = `translateY(${top}px)`;
+            gap.style.height = `${height}px`;
+        } else {
+            clearGap(gap);
         }
-    });
-    const { handleDragOver, handleDragLeave, handleDrop } = useDragging({
-        column, columnIndex, columnItems, isEditing, api, parentNote
-    });
+        gap.classList.toggle("show", dropIndex !== null);
+        roomRef.current?.style.setProperty("height", `${room}px`);
 
-    // Measured rather than styled: the gap stands for the card being carried, which is whatever
-    // height its own content gave it. A drag from the note tree carries no card, so the stock
-    // height stands.
-    const gapStyle = draggedCard?.height
-        ? { height: `${draggedCard.height}px` }
-        : undefined;
+        // Once the gap is gone, every card is put back, whichever ones they now are: a drop
+        // reorders the column, so the places that stood aside no longer name the same cards.
+        if (dropIndex === null) {
+            for (const card of cards) {
+                if (card.style.transform) {
+                    placeCard(card, null, atOnce);
+                }
+            }
+            aside.current = { from: 0, until: 0, room: 0 };
+            return;
+        }
+
+        const from = Math.max(0, placeOf(dropIndex));
+        const until = Math.min(cards.length, from + reach);
+        const last = aside.current;
+        // A step of a drag moves the gap by a card, so only the few cards it passed change what
+        // they are told; the rest of the window is already standing where it should.
+        const afresh = last.room !== room;
+        for (let index = last.from; index < last.until; index++) {
+            if (afresh || index < from || index >= until) {
+                const card = cards[index];
+                if (card) {
+                    placeCard(card, null, atOnce);
+                }
+            }
+        }
+        for (let index = from; index < until; index++) {
+            if (afresh || index < last.from || index >= last.until) {
+                placeCard(cards[index], `translateY(${room}px)`, atOnce);
+            }
+        }
+        aside.current = { from, until, room };
+    }, [ dropIndex, draggedCard, columnItems, windowFrom ]);
+    const { handleDragOver, handleDragLeave, handleDrop } = useDragging({
+        column, columnIndex, columnItems, isEditing, api, parentNote, onLanded: setCreatedNoteId
+    });
 
     // Read here rather than in the badge: the column body shows an outline as well.
-    const isOverLimit = limit !== undefined && (columnItems?.length ?? 0) > limit;
-    const isCollapsed = !!collapsed && !isActive;
+    const isOverLimit = limit !== undefined && (totalCount ?? columnItems?.length ?? 0) > limit;
+    const isCollapsed = !!collapsed && !isActive && !isPeeked;
     // A column opened to take a dragged card takes its width at once, and its cards with it.
-    const opensAtOnce = !!draggedCard || dropTarget === column;
+    const opensAtOnce = !!draggedCard || isDropTarget;
 
     /**
      * Whether the column is still widening, during which its cards are left unpainted.
@@ -181,6 +366,17 @@ export default function Column({
      * Unpainted rather than undrawn: the board focuses the card a keyboard open steps onto, and a
      * card that is not there yet is one it cannot hand focus to.
      */
+    /**
+     * Whether the cards have been drawn, which they stay once they have been.
+     *
+     * A column collapsed when the board opens draws none of them; past the first open they are
+     * hidden rather than taken out, which is what makes closing one cheap.
+     */
+    const [ isDrawn, setIsDrawn ] = useState(!isCollapsed);
+    if (!isDrawn && (!isCollapsed || willOpen)) {
+        setIsDrawn(true);
+    }
+
     const [ isExpanding, setIsExpanding ] = useState(false);
     const [ wasCollapsed, setWasCollapsed ] = useState(isCollapsed);
     if (wasCollapsed !== isCollapsed) {
@@ -197,16 +393,16 @@ export default function Column({
         return () => window.clearTimeout(timer);
     }, [ isExpanding ]);
 
-    // Only while the column is open: the strip's own press opens it, which is what it says
-    // instead. Memoised because `useStaticTooltip` rebuilds the tooltip on a new config.
+    // Off on a strip and on mobile. Memoised: `useStaticTooltip` rebuilds on a new config.
     const headerTooltip = useMemo(
-        () => ({ title: isCollapsed ? "" : t("board_view.collapse-hint") }), [ isCollapsed ]);
+        () => ({ title: isCollapsed || isMobile() ? "" : t("board_view.collapse-hint") }),
+        [ isCollapsed ]);
     useStaticTooltip(headerRef, headerTooltip);
 
     // Reported on the way in only. A column opened by being selected closes when another one is
     // selected, so nothing here watches for focus leaving: the menu, the icon picker and the limit
     // dialog all render outside the column, and each would otherwise close it as it opened.
-    const select = useCallback(() => {
+    const expand = useCallback(() => {
         setActiveColumn(column);
 
         // Opening the strip by hand opens the column for good, unless `keepCollapsed` says it
@@ -216,6 +412,20 @@ export default function Column({
             api.setColumnCollapsed(column, false);
         }
     }, [ api, column, isCollapsed, keepCollapsed, setActiveColumn ]);
+
+    /**
+     * What a press on the column does. On a touch screen a collapsed strip only takes the focus,
+     * which brings its rail up: the rail carries the button that opens it, so a tap aimed at the
+     * rail cannot open the column on the way.
+     */
+    const select = useCallback(() => {
+        if (isMobile() && isCollapsed) {
+            headerRef.current?.focus();
+            return;
+        }
+
+        expand();
+    }, [ expand, isCollapsed ]);
 
     /**
      * Whether the collapse now being drawn is one the reader asked for, which runs faster than a
@@ -242,10 +452,33 @@ export default function Column({
     // Focus reaching a column closes whichever one was open, and opens nothing: a collapsed column
     // is walked onto without being disturbed, and is opened by a click or by Space instead.
     const handleFocusIn = useCallback(() => {
-        if (!isActive) {
-            setActiveColumn(undefined);
+        if (isActive) {
+            return;
         }
-    }, [ isActive, setActiveColumn ]);
+
+        // While the whole board is peeked, focus arriving settles the peek on this column rather
+        // than closing every column: the reader has just gone to work in this one, and a press on
+        // one of its cards is focus arriving before it is a click.
+        setActiveColumn(isPeeked ? column : undefined);
+    }, [ column, isActive, isPeeked, setActiveColumn ]);
+
+    // Only for a sorted column. The arrow shows which way the order runs.
+    const sortButton = sort && (
+        <ActionButton
+            className="column-sort"
+            icon={sort.isDescending ? "bx bx-sort-down" : "bx bx-sort-up"}
+            text={t("board_view.sort")}
+            // Disabled on a strip: the menu would open over the space the column is about to
+            // take as it widens.
+            disabled={isCollapsed}
+            onClick={(e) => {
+                // The heading is the column's drag handle and opens its own menu on a right
+                // click; neither should also fire from the button.
+                e.stopPropagation();
+                openColumnSortMenu(api, ...menuOrigin(e), column);
+            }}
+        />
+    );
 
     const openMenu = useCallback((e: ContextMenuEvent) => {
         openColumnContextMenu(api, e, {
@@ -258,13 +491,15 @@ export default function Column({
             canRename: !isCollapsed,
             isCollapsed,
             keepCollapsed,
+            canKeepCollapsed: !isCollapseVolatile,
             nested,
             onEditTitle: () => setColumnNameToEdit(column),
-            onNewItem: () => setIsCreatingNewItem(true),
+            onNewItem: beginNewItem,
             onAddColumn: async (direction) => {
                 setColumnNameToEdit(await api.insertColumn(column, direction));
             },
             onSetLimit: () => setColumnLimitToEdit(column),
+            onSelectAll: () => selection.selectAll(api.getColumnNoteIds(column)),
             onCollapse: collapse,
             onKeepCollapsed: (keep) => {
                 setIsCollapsingByHand(keep);
@@ -283,7 +518,8 @@ export default function Column({
             }
         });
     }, [
-        api, column, color, archived, collapsed, keepCollapsed, collapse, isCollapsed, nested,
+        api, column, color, archived, collapsed, keepCollapsed, isCollapseVolatile, collapse,
+        isCollapsed, nested, selection,
         columns, columnIndex, setColumnNameToEdit, setColumnLimitToEdit, setActiveColumn,
         onMoveColumn, onFocusColumn
     ]);
@@ -298,10 +534,53 @@ export default function Column({
         if (e.key === "F2" && !isCollapsed) {
             setColumnNameToEdit(column);
         }
-    }, [ column, isCollapsed ]);
+
+        // Space collapses the column; `keyboard.ts` handles it on a strip. The target check
+        // excludes the heading's buttons, which activate on Space themselves.
+        if (e.key === " " && !isCollapsed && e.target === e.currentTarget) {
+            e.preventDefault();
+            e.stopPropagation();
+            collapse();
+        }
+
+        // Enter makes a card at the head of the column, Shift+Enter one at its foot.
+        // `keyboard.ts` takes Ctrl+Enter for a column, and Enter on a strip.
+        if (e.key === "Enter" && !e.ctrlKey && !isCollapsed && e.target === e.currentTarget) {
+            e.preventDefault();
+            e.stopPropagation();
+
+            // A sorted column places its own cards, so the field opens at the foot either way.
+            if (e.shiftKey || isSorted) {
+                beginNewItem();
+            } else {
+                beginInsert(0);
+            }
+        }
+    }, [ beginInsert, beginNewItem, collapse, column, isCollapsed, isSorted ]);
+
+    const overlayHost = useContext(BoardOverlayHostContext);
+    /** Whether the heading holds the focus, which on mobile floats the column's rail. */
+    const [ isHeaderFocused, setIsHeaderFocused ] = useState(false);
+    // Focus moving within the heading or onto the rail keeps the rail; anywhere else takes it.
+    const handleHeaderFocusOut = useCallback((e: FocusEvent) => {
+        const next = e.relatedTarget instanceof Element ? e.relatedTarget : null;
+        if (next && (headerRef.current?.contains(next) || next.closest(".board-card-toolbar"))) {
+            return;
+        }
+
+        setIsHeaderFocused(false);
+    }, []);
+    const isSelecting = useContext(BoardSelectionModeContext);
+    // Off the heading while its title is edited, since the rename it offers is under way, and in
+    // selection mode, where the board's own rail stands for the selection.
+    const isRailWanted = isMobile() && isHeaderFocused && !isEditing && !isSelecting;
+    const isHeaderOnScreen = useIsOnScreen(headerRef, isRailWanted);
+    const isRailShown = isRailWanted && isHeaderOnScreen;
+    // Kept drawn while it slides off.
+    const isRailDrawn = useLingeringTrue(isRailShown, RAIL_EXIT_MS);
 
     /** Allow using mouse wheel to scroll inside card, while also maintaining column horizontal scrolling. */
-    const handleScroll = useCallback((event: JSX.TargetedWheelEvent<HTMLDivElement>) => {
+    const handleScroll = useCallback((event: TargetedWheelEvent<HTMLDivElement>) => {
         const el = event.currentTarget;
         if (!el) return;
 
@@ -321,17 +600,103 @@ export default function Column({
         editorRef.current?.focus();
     }, [ isEditing ]);
 
+    // The field is taken down only once the card it made stands in its place, so the column does
+    // not close the gap the field held and open it again for the card.
+    useEffect(() => {
+        if (!insertedNoteId) {
+            return;
+        }
+
+        const close = () => {
+            setInsertBefore(undefined);
+            setInsertedNoteId(undefined);
+        };
+
+        if (columnItems?.some(({ note }) => note.noteId === insertedNoteId)) {
+            close();
+            return;
+        }
+
+        // A card can be drawn in another column, which one made from a template carrying a value
+        // of its own is, so the field is not left standing for a card that never arrives here.
+        const timer = window.setTimeout(close, HAND_OVER_MS);
+        return () => window.clearTimeout(timer);
+    }, [ insertedNoteId, columnItems ]);
+
+    // A card created at the foot of a long column falls outside the window, so the card's own
+    // scroll effect never runs. Scroll to it here, which renders it.
+    const arrived = createdNoteId ?? landedNoteId;
+    useEffect(() => {
+        if (!isWindowed || !arrived) return;
+
+        const index = noteIds.indexOf(arrived);
+        if (index >= 0 && (index < bounds.from || index >= bounds.until)) {
+            scrollToCard(index);
+        }
+    }, [ arrived, isWindowed, noteIds, bounds.from, bounds.until, scrollToCard ]);
+
+    // The keyboard can walk onto a card the window leaves undrawn, which cannot be focused until
+    // it is in the page.
+    useEffect(() => {
+        const board = contentRef.current?.closest<HTMLElement>(".board-view-container");
+        if (!board || !isWindowed) return;
+
+        const reveal = (event: Event) => {
+            const { detail } = event as CustomEvent<RevealCardDetail>;
+            if (detail.column === column) {
+                scrollToCard(detail.index, detail.immediate);
+            }
+        };
+
+        board.addEventListener(REVEAL_CARD, reveal);
+        return () => board.removeEventListener(REVEAL_CARD, reveal);
+    }, [ column, isWindowed, scrollToCard ]);
+
+    // The board raises its backdrop for any open field, and each column holds its own.
+    useEffect(() => {
+        setInsertingColumn(column, !!insertBefore);
+        return () => setInsertingColumn(column, false);
+    }, [ column, insertBefore, setInsertingColumn ]);
+
+    // Whether the title being edited is one of this column's, which lifts the mask below.
+    const hasEditedCard = !!branchIdToEdit
+        && !!columnItems?.some(({ branch }) => branch.branchId === branchIdToEdit);
+
+    // The field a card is inserted in, drawn where the reader asked for the card. The same field
+    // as the one below the column, so a card is made the same way wherever it goes.
+    const insertField = insertBefore && (
+        <AddNewItem
+            api={api}
+            cardTemplates={cardTemplates}
+            column={column}
+            insert={{
+                before: insertBefore.branchId,
+                close: () => setInsertBefore(undefined)
+            }}
+            onCreated={cardInserted}
+        />
+    );
+
     return (
         <div
             data-column={column}
+            // Read by the drag, which offers neither end of a column that places its own cards.
+            data-sorted={isSorted ? "true" : undefined}
+            // Also read by the drag, for placing a card at the column's foot. On the column rather
+            // than on the card area below, which a collapsed column does not draw at all.
+            data-count={noteIds.length}
             className={clsx("board-column", {
-                "drag-over": dropTarget === column && draggedCard?.fromColumn !== column,
+                "drag-over": isDropTarget && (isSorted || draggedCard?.fromColumn !== column),
                 // The class the themes key a hue off, worn here as anywhere else that carries one.
                 "with-hue": hue !== undefined,
+                "board-column-inbox": column === INBOX_COLUMN,
                 "board-column-archived": archived,
+                "editing-open": hasEditedCard || !!insertBefore,
+                windowed: isWindowed,
                 "over-limit": isOverLimit,
                 collapsed: isCollapsed,
-                "quick-collapse": isCollapsingByHand,
+                "pre-expanding": isCollapsed && willOpen,
+                "quick-collapse": isCollapsingByHand || collapsesQuickly,
                 // Opening is drawn for the reader who asked for it. A column opened to take a
                 // dragged card takes its width at once, since the drop is measured as it opens.
                 "quick-expand": !isCollapsed && !opensAtOnce,
@@ -350,16 +715,20 @@ export default function Column({
             onDragOver={handleDragOver}
             onDragLeave={handleDragLeave}
             onDrop={handleDrop}
-            style={{ "--board-column-custom-hue": hue }}
+            style={{
+                "--board-column-custom-hue": hue,
+                transform: standsAside ? `translateX(${standsAside}px)` : undefined
+            }}
         >
             <h3
                 ref={headerRef}
                 className={`${isEditing ? "editing" : ""}`}
-                // While collapsed the header is what opens the column, so it says so and answers
-                // for the keys a button answers for. Open, it is a heading again and Space does
-                // nothing, so neither is claimed.
+                // A collapsed header opens the column, so it is announced as a button. Open, it
+                // is a heading, and Space collapses it as a board shortcut like F2.
+                // @ts-expect-error Preact allows no `button` role on a heading element.
                 role={isCollapsed ? "button" : undefined}
                 aria-expanded={isCollapsed ? false : undefined}
+                aria-keyshortcuts="Space"
                 onContextMenu={openMenu}
                 onMouseDown={(e) => {
                     if (e.detail <= 1) {
@@ -372,6 +741,12 @@ export default function Column({
                     }
                 }}
                 onKeyDown={handleTitleKeyDown}
+                // Only where the rail follows the focus: elsewhere a redraw on every focus
+                // change buys nothing, and would write a controlled editor's value back mid-edit.
+                onFocusIn={isMobile() ? () => setIsHeaderFocused(true) : undefined}
+                onFocusOut={isMobile() ? handleHeaderFocusOut : undefined}
+                // A tap takes the focus, which not every touch browser gives a heading on its own.
+                onClick={isMobile() ? () => headerRef.current?.focus() : undefined}
                 tabIndex={300}
             >
                 {isCollapsed ? (
@@ -386,6 +761,7 @@ export default function Column({
                             }}
                         />
                         <CountBadge items={columnItems} limit={limit} isOver={isOverLimit} />
+                        {sortButton}
                         <span className="title">
                             {isInRelationMode
                                 ? <NoteLink notePath={column} />
@@ -417,6 +793,7 @@ export default function Column({
                                 : api.getColumnTitle(column)}
                         </span>
                         <div className="spacer" />
+                        {sortButton}
                         <CountBadge items={columnItems} limit={limit} isOver={isOverLimit} />
                         <ActionButton
                             className="column-menu"
@@ -443,81 +820,228 @@ export default function Column({
                 </>)}
             </h3>
 
-            {!isCollapsed && <div
+            {isDrawn && <div
                 ref={contentRef}
                 className={clsx("board-column-content", scrollFade.className)}
                 style={scrollFade.style}
                 onWheel={handleScroll}
+                data-window-from={isWindowed ? windowFrom : undefined}
+                data-window-count={isWindowed ? noteIds.length : undefined}
             >
-                {(columnItems ?? []).map(({ note, branch }, index) => {
-                    // The card being carried is out of the flow, so the gap stands in its own
-                    // place too: held still, which a touch does before it moves, that is where it
-                    // was picked up from.
-                    const showIndicatorBefore = dropPosition?.column === column &&
-                                            dropPosition.index === index;
-
-                    return (
-                        <Fragment key={note.noteId}>
-                            {showIndicatorBefore && (
-                                <div className="board-drop-placeholder show" style={gapStyle} />
-                            )}
-                            <Card
-                                api={api}
-                                note={note}
-                                branch={branch}
-                                column={column}
-                                index={index}
-                                statusAttribute={api.statusAttribute}
-                                isNew={note.noteId === created?.noteId}
-                                focusOnArrival={
-                                    note.noteId === created?.noteId && created.takesFocus
-                                }
-                                isDragging={draggedCard?.noteId === note.noteId}
-                                isEditing={branch.branchId === branchIdToEdit}
-                                onFocusCard={onFocusCard}
-                                onCreated={cardInserted}
-                            />
-                        </Fragment>
-                    );
-                })}
-                {dropPosition?.column === column && dropPosition.index === (columnItems?.length ?? 0) && (
-                    <div className="board-drop-placeholder show" style={gapStyle} />
-                )}
+                <div className="board-window-spacer" style={{ height: `${bounds.above}px` }} />
+                {shownItems.map(({ note, branch }, offset) => (
+                    <Fragment key={note.noteId}>
+                        {insertBefore?.branchId === branch.branchId && insertField}
+                        <Card
+                            api={api}
+                            note={note}
+                            branch={branch}
+                            column={column}
+                            index={bounds.from + offset}
+                            statusAttribute={api.statusAttribute}
+                            isNew={note.noteId === createdNoteId
+                                || note.noteId === landedNoteId}
+                            focusOnArrival={note.noteId === insertedNoteId}
+                            isDragging={!!carriedNoteIds?.has(note.noteId)}
+                            isEditing={branch.branchId === branchIdToEdit}
+                            onFocusCard={onFocusCard}
+                            onInsert={beginInsert}
+                            onNewItem={beginNewItem}
+                        />
+                    </Fragment>
+                ))}
+                <div className="board-window-spacer" style={{ height: `${bounds.below}px` }} />
+                {insertBefore && !insertBefore.branchId && insertField}
+                {/* Both stand here for the length of the board's life: an element appearing
+                    among the cards, or leaving them, is what a drag cannot afford. */}
+                <div ref={gapRef} className="board-drop-placeholder">
+                    {/* The gap is the one the lifted card left, and it does not follow the
+                        pointer. */}
+                    {isSorted && (
+                        <span className="sorted-no-reorder">
+                            {t("board_view.sorted-no-reorder")}
+                        </span>
+                    )}
+                </div>
+                <div ref={roomRef} className="board-drop-room" />
             </div>}
 
+            {isRailDrawn && overlayHost.current && (
+                <ColumnToolbar
+                    host={overlayHost.current}
+                    isLeaving={!isRailShown}
+                    isCollapsed={isCollapsed}
+                    onRename={() => setColumnNameToEdit(column)}
+                    onToggleCollapse={isCollapsed ? expand : collapse}
+                    onSort={(e) => openColumnSortMenu(api, e.pageX, e.pageY, column)}
+                    onFocusOut={handleHeaderFocusOut}
+                />
+            )}
             {!isCollapsed && <AddNewItem
                 api={api}
+                cardTemplates={cardTemplates}
                 column={column}
+                isSorted={isSorted}
                 isCreating={isCreatingNewItem}
                 setIsCreating={setIsCreatingNewItem}
-                onCreated={cardAdded}
-                onCreating={addingFromFooter}
+                onCreated={setCreatedNoteId}
             />}
         </div>
     );
 }
 
 /**
- * The editor a new card is named in, opened by the button below the column or by its menu. The
- * state is the column's rather than this component's, since the menu is raised from the header.
+ * Puts a card where a transform says, easing it there unless the board is drawing a still frame.
+ *
+ * Suppressed on the card rather than by a rule under the board's own class, which would match
+ * every card on it.
+ *
+ * @param transform what to write, or `null` to put the card back where the column draws it.
+ * @param atOnce whether the card is already standing where it is being put, as at a lift or a drop.
  */
-function AddNewItem({ column, api, isCreating, setIsCreating, onCreated, onCreating }: {
+/**
+ * Where a menu opened from a button stands: at the pointer for a press, and below the button for a
+ * keyboard, which reports no position of its own.
+ */
+function menuOrigin(e: TargetedMouseEvent<HTMLElement>): [ number, number ] {
+    if (e.detail) {
+        return [ e.pageX, e.pageY ];
+    }
+
+    const box = e.currentTarget.getBoundingClientRect();
+    return [ box.right + window.scrollX, box.bottom + window.scrollY ];
+}
+
+export function placeCard(card: HTMLElement, transform: string | null, atOnce: boolean) {
+    if (atOnce) {
+        card.style.transition = "none";
+        settling.add(card);
+    }
+
+    if (transform === null) {
+        card.style.removeProperty("transform");
+    } else {
+        card.style.transform = transform;
+    }
+
+    if (!atOnce) {
+        return;
+    }
+
+    // Started afresh on every call: a lift and the drop that follows it a frame later would
+    // otherwise be put back on the first one's schedule, before the drop has been drawn.
+    if (restoring !== undefined) {
+        cancelAnimationFrame(restoring);
+    }
+
+    // Put back a frame later than the one that draws them, since a frame's callbacks run before
+    // the styles it paints are worked out.
+    restoring = requestAnimationFrame(() => {
+        restoring = requestAnimationFrame(() => {
+            restoring = undefined;
+            for (const held of settling) {
+                held.style.removeProperty("transition");
+            }
+            settling.clear();
+        });
+    });
+}
+
+/**
+ * Takes back the room a closed gap holds in its column.
+ *
+ * `.board-drop-placeholder` is positioned in the column's scrolling box, so its height and
+ * transform count towards `scrollHeight` whether it is showing or not. Left where the last drag
+ * put it, it holds a card's worth of scroll past the last card.
+ */
+export function clearGap(gap: HTMLElement) {
+    gap.style.removeProperty("transform");
+    // Set rather than removed: the stylesheet gives the gap a height of its own to fall back on.
+    gap.style.height = "0px";
+}
+
+/**
+ * Puts back at once the suppressed transitions of the cards one board holds, for a board leaving
+ * the page.
+ *
+ * Its own cards alone, and whatever has already left the page: another board can be part-way
+ * through a gesture, and the frame that would put its cards back is the same one.
+ */
+export function settleCards(container: HTMLElement | null) {
+    for (const held of settling) {
+        if (held.isConnected && !container?.contains(held)) {
+            continue;
+        }
+
+        held.style.removeProperty("transition");
+        settling.delete(held);
+    }
+
+    if (!settling.size && restoring !== undefined) {
+        cancelAnimationFrame(restoring);
+        restoring = undefined;
+    }
+}
+
+/** The cards whose transition is suppressed, waiting for the frame that puts it back. */
+const settling = new Set<HTMLElement>();
+let restoring: number | undefined;
+
+/**
+ * The editor a new card is named in, standing below the column or between two of its cards.
+ *
+ * Below the column it is opened by the button it replaces or by the column's menu, so that state
+ * is the column's rather than this component's: the menu is raised from the header. Between two
+ * cards it is opened by a card's own menu, and `insert` says where it stands.
+ */
+function AddNewItem({
+    column, api, cardTemplates, isCreating, setIsCreating, onCreated, insert, isSorted
+}: {
     column: string,
     api: BoardApi,
-    isCreating: boolean,
-    setIsCreating: (isCreating: boolean) => void,
-    /** Names the card just made, which the column reveals once the board has drawn it. */
+    cardTemplates: CardTemplates,
+    /** Whether the column orders its own cards, which leaves the reader no end to pick. */
+    isSorted?: boolean,
+    isCreating?: boolean,
+    setIsCreating?: (isCreating: boolean) => void,
+    /** Names the card just made, which the column shows once the board has drawn it. */
     onCreated: (noteId: string | undefined) => void,
-    /** Said before the write, which the card can be drawn by the board ahead of. */
-    onCreating: () => void
+    /**
+     * Where a field standing among the cards puts what it makes: above the card it is given, or
+     * at the end of the column where it is given none. Absent for the field below the column.
+     */
+    insert?: { before?: string, close: () => void }
 }) {
+    // A field standing among the cards is nothing else: there is no button for it to replace, and
+    // it is taken down rather than closed.
+    const isEditing = !!insert || !!isCreating;
+    const close = useCallback(
+        () => insert ? insert.close() : setIsCreating?.(false),
+        [ insert, setIsCreating ]);
     // What the editor opens with: empty to begin with, then whatever was typed into it and left
     // unsaved, so that reaching for something else and coming back does not cost the title.
     const [ initialTitle, setInitialTitle ] = useState("");
+    // The icon a card made from the current template would carry.
+    const templateIcon = cardTemplateIcon(cardTemplates.current) ?? DEFAULT_CARD_ICON;
+    // Kept between cards, unlike the title: a run of cards is often a run of the same kind of card.
+    const [ icon, setIcon ] = useState(templateIcon);
+    /** The template icon `icon` was last set from, telling a picked icon from a followed one. */
+    const followedIcon = useRef(templateIcon);
+
+    // Follow the template only while `icon` is still the previous template's. A picked icon is
+    // kept: a template change says nothing about it.
+    useEffect(() => {
+        if (templateIcon === followedIcon.current) {
+            return;
+        }
+
+        setIcon(shown => shown === followedIcon.current ? templateIcon : shown);
+        followedIcon.current = templateIcon;
+    }, [ templateIcon ]);
 
     const open = useCallback((title: string) => {
         setInitialTitle(title);
-        setIsCreating(true);
+        setIsCreating?.(true);
     }, [ setIsCreating ]);
 
     /** Puts a note that already exists into this column, for a field with nothing typed into it. */
@@ -528,15 +1052,15 @@ function AddNewItem({ column, api, isCreating, setIsCreating, onCreated, onCreat
         });
 
         if (noteId) {
-            await api.addExistingItem(column, noteId);
+            await api.addExistingItem(column, noteId, insert?.before);
         }
-    }, [ api, column ]);
+    }, [ api, column, insert ]);
 
     const handleKeyDown = useCallback((e: KeyboardEvent) => {
         if (isCreating) return;
 
         if (e.key === "Enter" && !e.ctrlKey) {
-            setIsCreating(true);
+            setIsCreating?.(true);
             return;
         }
 
@@ -549,14 +1073,34 @@ function AddNewItem({ column, api, isCreating, setIsCreating, onCreated, onCreat
         }
     }, [ isCreating, open, setIsCreating ]);
 
+    /** Makes the card, where the field stands or at the end of the column. */
+    const create = useCallback(async (title: string, atStart?: boolean) => {
+        const cardIcon = icon !== templateIcon ? icon : undefined;
+
+        if (insert) {
+            // Left standing until the column has drawn the card, which takes the field's place.
+            const noteId = await api.createNewItemBefore(
+                column, insert.before, title, cardIcon, cardTemplates.current);
+            if (noteId) {
+                onCreated(noteId);
+            } else {
+                insert.close();
+            }
+            return;
+        }
+
+        onCreated(await api.createNewItem(
+            column, title, atStart ? "top" : "bottom", cardIcon, cardTemplates.current));
+    }, [ api, cardTemplates, column, icon, insert, onCreated, templateIcon ]);
+
     return (
         <div
-            className={`board-new-item ${isCreating ? "editing" : ""}`}
-            onClick={() => flushSync(() => setIsCreating(true))}
-            onKeyDown={handleKeyDown}
-            tabIndex={300}
+            className={clsx("board-new-item", { editing: isEditing, inserting: !!insert })}
+            onClick={!insert ? () => flushSync(() => setIsCreating?.(true)) : undefined}
+            onKeyDown={!insert ? handleKeyDown : undefined}
+            tabIndex={!insert ? 300 : undefined}
         >
-            {!isCreating ? (
+            {!isEditing ? (
                 <>
                     <Icon icon="bx bx-plus" />{" "}
                     {t("board_view.new-item")}
@@ -565,22 +1109,30 @@ function AddNewItem({ column, api, isCreating, setIsCreating, onCreated, onCreat
                 <TitleEditor
                     currentValue={initialTitle}
                     placeholder={t("board_view.new-item-placeholder")}
-                    save={async (title, atStart) => {
-                        onCreating();
-                        onCreated(await api.createNewItem(
-                            column, title, atStart ? "top" : "bottom"));
-                    }}
-                    dismiss={() => setIsCreating(false)}
+                    save={create}
+                    dismiss={close}
                     mode="multiline" isNewItem
                     selectOnFocus={false}
                     saveAndContinue
+                    handsOver={!!insert}
                     abandon={setInitialTitle}
                     whenEmpty={{
                         title: t("board_view.add-existing-item"),
                         onClick: addExistingItem
                     }}
                     submitTitle={t("board_view.create-new-note")}
-                    openPlacements={openCreateCardMenu}
+                    // Only the field below the column offers both ends. One standing among the
+                    // cards is already at the end the reader asked for, and a sorted column places
+                    // the card itself.
+                    openPlacements={!insert && !isSorted ? openCreateCardMenu : undefined}
+                    footer={(hold) => <CardTemplatePill {...cardTemplates} {...hold} />}
+                    icon={{
+                        current: icon,
+                        onSelect: setIcon,
+                        onReset: icon !== templateIcon
+                            ? () => setIcon(templateIcon)
+                            : undefined
+                    }}
                 />
             )}
         </div>
@@ -629,10 +1181,21 @@ ${warning}` : counts}
     );
 }
 
-function useDragging({ column, columnIndex, columnItems, isEditing, api, parentNote }: DragContext & { isEditing: boolean, api: BoardApi, parentNote: FNote }) {
+function useDragging({
+    column, columnIndex, columnItems, isEditing, api, parentNote, onLanded
+}: DragContext & {
+    isEditing: boolean,
+    api: BoardApi,
+    parentNote: FNote,
+    /** Reports a card a sorted column placed, for the `appearing` reveal. */
+    onLanded: (noteId: string) => void
+}) {
     const { setDraggedColumn, setDropTarget, setDropPosition, setActiveColumn } =
         useContext(BoardActionsContext);
-    const { draggedColumn, dropPosition } = useContext(BoardDragStateContext);
+    const { draggedColumn } = useContext(BoardDragStateContext);
+    // Read when a drop happens rather than watched: these callbacks answer for a drag from the
+    // note tree, and where the gap stands is of no interest to the column until one lands.
+    const dropState = useContext(BoardDropStateContext);
     /** Needed to track if current column is dragged in real-time, since {@link draggedColumn} is populated one render cycle later.  */
     const isDraggingRef = useRef(false);
 
@@ -686,10 +1249,11 @@ function useDragging({ column, columnIndex, columnItems, isEditing, api, parentN
             }
         }
 
-        if (!(dropPosition?.column === column && dropPosition.index === newIndex)) {
+        const standing = dropState.get().position;
+        if (!(standing?.column === column && standing.index === newIndex)) {
             setDropPosition({ column, index: newIndex });
         }
-    }, [column, setDropTarget, setActiveColumn, dropPosition, setDropPosition, isEditing]);
+    }, [column, setDropTarget, setActiveColumn, dropState, setDropPosition, isEditing]);
 
     const handleDragLeave = useCallback((e: DragEvent) => {
         const relatedTarget = e.relatedTarget as HTMLElement;
@@ -704,6 +1268,8 @@ function useDragging({ column, columnIndex, columnItems, isEditing, api, parentN
     const handleDrop = useCallback(async (e: DragEvent) => {
         if (draggedColumn) return; // Don't handle card drops when dragging columns
         e.preventDefault();
+        // Taken before the gap is closed, which is what says where the note goes.
+        const standing = dropState.get().position;
         setDropTarget(null);
         setDropPosition(null);
 
@@ -721,11 +1287,16 @@ function useDragging({ column, columnIndex, columnItems, isEditing, api, parentN
             const { noteId, branchId } = dropped[0];
             const targetNote = await froca.getNote(noteId, true);
             const parentNoteId = parentNote.noteId;
-            if (!dropPosition) return;
+            if (!standing) return;
 
-            const targetIndex = dropPosition.index - 1;
+            // A sorted column places the card itself, so the note is added at the end of the
+            // board's children and nothing is written against the card it was dropped over.
+            const isSorted = api.isColumnSorted(column);
+            const targetIndex = standing.index - 1;
             const targetItems = columnItems || [];
-            const targetBranch = targetIndex >= 0 ? targetItems[targetIndex].branch : null;
+            const targetBranch = !isSorted && targetIndex >= 0
+                ? targetItems[targetIndex].branch
+                : null;
 
             await api.changeColumn(noteId, column);
 
@@ -740,8 +1311,16 @@ function useDragging({ column, columnIndex, columnItems, isEditing, api, parentN
             } else if (targetBranch) {
                 await branches.moveAfterBranch([ branchId ], targetBranch.branchId);
             }
+
+            // The drop named a column, not an index, so the reveal shows where it landed.
+            if (isSorted) {
+                onLanded(noteId);
+            }
         }
-    }, [ api, draggedColumn, dropPosition, columnItems, column, setDropTarget, setDropPosition ]);
+    }, [
+        api, draggedColumn, dropState, columnItems, column, setDropTarget, setDropPosition,
+        onLanded
+    ]);
 
     return { handleColumnDragStart, handleColumnDragEnd, handleDragOver, handleDragLeave, handleDrop };
 }

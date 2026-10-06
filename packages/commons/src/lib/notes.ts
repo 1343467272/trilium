@@ -3,7 +3,7 @@
  */
 
 import { isFontMimeType } from "./font_mimes.js";
-import { MIME_TYPES_DICT } from "./mime_type.js";
+import { MIME_TYPES_DICT, type MimeTypeDefinition } from "./mime_type.js";
 import { NoteType } from "./rows.js";
 
 export const NOTE_TYPE_ICONS = {
@@ -55,6 +55,21 @@ export function getImageAttachmentTitle(type: NoteType | null | undefined): stri
     return (NOTE_TYPE_IMAGE_ATTACHMENTS as Partial<Record<NoteType, string>>)[type];
 }
 
+/** The media type of a canvas drawing saved in an attachment, such as one in a text note. */
+export const CANVAS_ATTACHMENT_MIME = "application/vnd.excalidraw+json";
+
+/** The title of the attachment a new canvas drawing is saved in. */
+export const CANVAS_ATTACHMENT_TITLE = "Canvas.excalidraw";
+
+/** The content of a new, empty canvas drawing. */
+export const EMPTY_CANVAS_CONTENT = JSON.stringify({
+    type: "excalidraw",
+    version: 2,
+    elements: [],
+    files: {},
+    appState: {}
+});
+
 /**
  * The note a mind map node's link points at, or `null` where it points somewhere else entirely.
  *
@@ -89,26 +104,40 @@ const FILE_MIME_MAPPINGS: Record<string, string> = {
     "application/vnd.oasis.opendocument.spreadsheet": "bx bx-spreadsheet",
     "application/vnd.ms-excel": "bx bx-spreadsheet",
     "text/csv": "bx bx-spreadsheet",
+    [CANVAS_ATTACHMENT_MIME]: NOTE_TYPE_ICONS.canvas
 };
 
 const IMAGE_MIME_MAPPINGS: Record<string, string> = {
     "image/gif": "bx bxs-file-gif",
 };
 
-/** The label a note carries to stand on a geo map, read by {@link getNoteIcon}. */
+/** The labels a note carries to stand on a geo map, read by {@link getNoteIcon}. */
 export const GEO_LOCATION_ATTRIBUTE = "geolocation";
+export const GEO_SHAPE_ATTRIBUTE = "geoShape";
 
 /** The icon a note on a geo map is drawn under where it has none of its own. */
 export const GEO_MARKER_ICON = "bx bx-pin";
 
 /**
+ * The icon for a drawn shape, keyed by the kind its `#geoShape` label names (see the client's
+ * geomap/shapes.ts for the format). An unreadable label falls back to the line icon.
+ */
+export const GEO_SHAPE_ICONS: Record<string, string> = {
+    line: "bx bx-vector",
+    polygon: "bx bx-shape-polygon",
+    circle: "bx bx-shape-circle"
+};
+
+/**
  * The icon a note is drawn under: its own `#iconClass` where it has one, and a default read off
  * what the note is otherwise.
  *
- * A note carrying a non-empty `#geolocation` is drawn as a pin where it has nothing more specific,
- * so the geo map writes no `#iconClass` onto a marker it creates and an icon the map hands down
- * through `#child:iconClass` or a template still applies. `iconClass` stays an argument rather than
- * being read here because the share tree narrows it to the prefixes an icon pack supplies.
+ * A note carrying a non-empty `#geolocation` is drawn as a pin, and one carrying a `#geoShape` as
+ * the shape it names, where neither has anything more specific. The geo map therefore writes no
+ * `#iconClass` onto a marker or a shape it creates, so an icon it hands down through
+ * `#child:iconClass` or a template still applies, and redrawing a shape as another kind changes the
+ * icon with it. `iconClass` stays an argument rather than being read here because the share tree
+ * narrows it to the prefixes an icon pack supplies.
  */
 export function getNoteIcon({
     noteId, type, mime, iconClass, workspaceIconClass, isFolder, getLabelValue
@@ -132,18 +161,21 @@ export function getNoteIcon({
     if (noteId === "_share") {
         return "bx bx-share-alt";
     } else if (type === "text") {
-        // A location is written onto a note deliberately, so it outranks the folder icon the note
-        // picks up from having children.
+        // A place on a map is written onto a note deliberately, so it outranks the folder icon the
+        // note picks up from having children.
         if (getLabelValue(GEO_LOCATION_ATTRIBUTE)) {
             return GEO_MARKER_ICON;
+        }
+        const shape = getLabelValue(GEO_SHAPE_ATTRIBUTE);
+        if (shape) {
+            return GEO_SHAPE_ICONS[shape.split(":", 1)[0]] ?? GEO_SHAPE_ICONS.line;
         }
         if (isFolder()) {
             return "bx bx-folder";
         }
         return "bx bx-note";
     } else if (type === "code") {
-        const correspondingMimeType = MIME_TYPES_DICT.find(m => m.mime === mime);
-        return correspondingMimeType?.icon ?? NOTE_TYPE_ICONS.code;
+        return getCodeLanguageIcon(MIME_TYPES_DICT.find(m => m.mime === mime));
     } else if (type === "file") {
         return getFileMimeIcon(mime);
     } else if (type === "image") {
@@ -166,6 +198,14 @@ export function getMimeIcon(mime: string | undefined | null): string {
     }
 
     return mime.startsWith("image/") ? getImageMimeIcon(mime) : getFileMimeIcon(mime);
+}
+
+/**
+ * The icon of a code note in `language`: the language's own, or the code note type's for a language
+ * without one or a mime `MIME_TYPES_DICT` does not know.
+ */
+export function getCodeLanguageIcon(language: Pick<MimeTypeDefinition, "icon"> | undefined): string {
+    return language?.icon ?? NOTE_TYPE_ICONS.code;
 }
 
 function getFileMimeIcon(mime: string): string {

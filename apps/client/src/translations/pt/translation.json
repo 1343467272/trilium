@@ -2,7 +2,17 @@
   "about": {
     "data_directory": "Diretório de dados:",
     "version_label": "Versão:",
-    "contributors_label": "Contribuidores:"
+    "contributors_label": "Contribuidores:",
+    "contributor_roles": {
+      "original-dev": "desenvolvedor original",
+      "lead-dev": "desenvolvedor principal"
+    },
+    "role_brief_history": {
+      "lead-dev": "Elian Doran fundou TrilliumNext em 2024, uma bifurcação (fork) criado desde que Zadam se afastou do projeto. Zadam depois transferious o repositório original para o time TrilliumNext, juntando ambos projetos em apenas um novamente."
+    },
+    "license_tooltip": "Ver licença",
+    "donate": "Doar",
+    "donate_tooltip": "Doe para apoiar esse projeto"
   },
   "toast": {
     "critical-error": {
@@ -199,8 +209,7 @@
     "copy_to_clipboard": "Copiar para a área de transferência"
   },
   "jump_to_note": {
-    "search_placeholder": "Pesquise uma nota pelo nome ou digite > para comandos...",
-    "search_button": "Pesquisar no texto completo"
+    "search_placeholder": "Pesquise uma nota pelo nome ou digite > para comandos..."
   },
   "markdown_import": {
     "dialog_title": "Importar Markdown",
@@ -222,8 +231,7 @@
     "search_placeholder": "pesquisar caminho pelo nome (valor predefinido se não for preenchido)",
     "modal_title": "Escolher tipo de nota",
     "modal_body": "Escolha o tipo/modelo da nova nota:",
-    "templates": "Modelos",
-    "builtin_templates": "Modelos Incorporados"
+    "templates": "Modelos"
   },
   "password_not_set": {
     "title": "A palavra-passe não está definida",
@@ -257,10 +265,8 @@
     "title": "título",
     "date_created": "data de criação",
     "date_modified": "data de modificação",
-    "sorting_direction": "Direção de ordenação",
     "ascending": "crescente",
     "descending": "decrescente",
-    "folders": "Pastas",
     "sort_folders_at_top": "posicionar pastas no topo",
     "natural_sort": "Ordenação Natural",
     "sort_with_respect_to_different_character_sorting": "classificar de acordo com diferentes regras de ordenação de caracteres e colação em diferentes idiomas ou regiões.",
@@ -690,10 +696,7 @@
     "button_title": "Exportar diagrama como SVG"
   },
   "relation_map_buttons": {
-    "create_child_note_title": "Criar nota filha e adicione neste mapa de relação",
-    "reset_pan_zoom_title": "Redefinir pan & zoom para coordenadas e ampliação iniciais",
-    "zoom_in_title": "Aumentar",
-    "zoom_out_title": "Reduzir"
+    "create_child_note_title": "Criar nota filha e adicione neste mapa de relação"
   },
   "zpetne_odkazy": {
     "relation": "relação",
@@ -938,7 +941,6 @@
     "label_rock_or_pop": "apenas uma das etiquetas deve estar presente",
     "label_year_comparison": "comparação numérica (também >, >=, <).",
     "label_date_created": "notas criadas no último mês",
-    "error": "Erro na pesquisa: {{error}}",
     "search_prefix": "Pesquisa:"
   },
   "attachment_detail": {
@@ -1396,7 +1398,6 @@
     "copy-note-path-to-clipboard": "Copiar caminho da nota para a área de transferência",
     "protect-subtree": "Proteger subárvore",
     "unprotect-subtree": "Desproteger subárvore",
-    "copy-clone": "Copiar / clonar",
     "clone-to": "Clonar para...",
     "cut": "Recortar",
     "move-to": "Mover para...",
@@ -1443,8 +1444,7 @@
     "geo-map": "Mapa geográfico",
     "beta-feature": "Beta",
     "task-list": "Lista de Tarefas",
-    "new-feature": "Novo",
-    "collections": "Coleções"
+    "new-feature": "Novo"
   },
   "protect_note": {
     "toggle-on": "Proteger a nota",
@@ -1486,7 +1486,6 @@
     "placeholder": "Pesquisa rápida",
     "searching": "A pesquisar...",
     "no-results": "Nenhum resultado encontrado",
-    "more-results": "... e mais {{number}} resultados.",
     "show-in-full-search": "Exibir na pesquisa completa"
   },
   "note_tree": {
@@ -1536,7 +1535,6 @@
     "created_on": "Criado em <Value />",
     "last_modified": "Modificado em <Value />",
     "note_type_switcher_label": "Alterar de {{type}} para:",
-    "note_type_switcher_others": "Outro tipo de nota",
     "note_type_switcher_templates": "Template",
     "note_type_switcher_collection": "Colecção",
     "edited_notes": "Notas editadas neste dia"
@@ -1690,12 +1688,9 @@
     "background-effects-description": "O Mica adiciona um desfoque, fundo estiloso as janelas da aplicação, criando uma profundidade e aspecto moderno. \"Barra de titulo nativa\" deve estar inactiva."
   },
   "note_autocomplete": {
-    "search-for": "Pesquisar por \"{{term}}\"",
     "create-note": "Criar conectar nota filha \"{{term}}\"",
     "insert-external-link": "Inserir ligação externa para \"{{term}}\"",
-    "clear-text-field": "Limpar campo de texto",
-    "show-recent-notes": "Exibir notas recentes",
-    "full-text-search": "Pesquisa por texto completo"
+    "clear-text-field": "Limpar campo de texto"
   },
   "note_tooltip": {
     "note-has-been-deleted": "A nota foi apagada.",

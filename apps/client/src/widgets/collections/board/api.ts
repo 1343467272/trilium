@@ -1,6 +1,7 @@
 import { BulkAction, type DefinitionObject, promotedAttributeDefinitionParser } from "@triliumnext/commons";
 
 import appContext from "../../../components/app_context";
+import type NoteContext from "../../../components/note_context";
 import FNote from "../../../entities/fnote";
 import attributes from "../../../services/attributes";
 import branches from "../../../services/branches";
@@ -10,18 +11,39 @@ import dialog from "../../../services/dialog";
 import froca from "../../../services/froca";
 import { t } from "../../../services/i18n";
 import note_create from "../../../services/note_create";
+import { type NoteTypeOption, resolveNoteTypeOptions } from "../../../services/note_types";
 import server from "../../../services/server";
 import ws from "../../../services/ws";
 import toast from "../../../services/toast";
-import { BoardColumnData, BoardViewData } from ".";
 import {
-    type BoardStatusDefinition, canStoreColumnsInDefinition, DEFAULT_COLUMN_ICON,
-    DEFAULT_GROUP_BY, INBOX_COLUMN, INBOX_COLUMN_ICON
+    type PromotedAttribute, resolvePromotedAttributes, storedPromotedAttributes,
+    visiblePromotedAttributeNames
+} from "../promoted_attributes";
+import {
+    DEFAULT_SORT, MANUAL_SORT, parseSortKey, parseStoredSortKey, type SortKey, type StoredSortKey
+} from "../sorting";
+import { BoardColumnData, BoardViewData } from ".";
+import { currentCardTemplate, DEFAULT_CARD_TEMPLATES } from "./card_templates";
+import {
+    type BoardStatusDefinition, canStoreColumnsInDefinition, COLUMN_WIDTH_LABEL, type ColumnWidth,
+    DEFAULT_COLUMN_ICON, DEFAULT_COLUMN_WIDTH, DEFAULT_GROUP_BY, INBOX_COLUMN, INBOX_COLUMN_ICON,
+    parseColumnWidth
 } from "./columns";
-import { ColumnMap } from "./data";
+import { readColumns, writeColumns } from "./column_storage";
+import { cardNotes, ColumnItem, ColumnMap } from "./data";
+import {
+    cardReference, ColumnReferenceLabel, columnReference, newColumnId, readColumnId
+} from "./reference";
+import { SORT_DESCENDING_LABEL, SORT_LABEL } from "./sort";
 
 /** Which end of a column a new card is made at. */
 export type CardPlacement = "top" | "bottom";
+
+/** The relation a card carries to stand in for another note rather than open an editor of its own. */
+export const CARD_REDIRECT_RELATION = "board:cardRedirectTo";
+
+/** The previous name of the relation above. `openCard` falls back to it. */
+export const CARD_REDIRECT_RELATION_LEGACY = "boardCardRedirectTo";
 
 /** One write's claim on a column, held until that write lands or is taken back. */
 interface ColumnClaim {
@@ -33,6 +55,19 @@ interface ColumnClaim {
     value: string | undefined;
     /** Whether a record is left at all, as against the column being left to read as it stands. */
     records: boolean;
+}
+
+/**
+ * The collapse state the board draws while a filter narrows it, in place of the stored flags.
+ *
+ * A column without matches is drawn as a strip so the results are read at a glance, and what the
+ * reader opens or closes meanwhile is held by the board rather than written: clearing the filter
+ * brings the stored state back.
+ */
+export interface VolatileCollapse {
+    isCollapsed(column: string): boolean;
+    /** Opens or closes one column, or every column when given `null`. */
+    setCollapsed(column: string | null, collapsed: boolean): void;
 }
 
 /**
@@ -97,6 +132,25 @@ export default class BoardApi {
     /** The branch last sent to the end of each column, by {@link moveToColumnEnd}. */
     private sentToColumnEnd = new Map<string, string>();
     statusAttribute: string;
+    /**
+     * What the board groups by, with the `#`/`~` prefix it is written with. Every column read and
+     * write is keyed by it, so one grouping's columns can never be stored under another's.
+     */
+    groupBy: string;
+
+    /**
+     * The pane the board is drawn in, set by the board on every render.
+     *
+     * A redirecting card navigates this rather than whichever pane holds the focus: the board can be
+     * one split of several, and the focused one is often the pane the reader came from.
+     */
+    noteContext: NoteContext | null | undefined;
+
+    /**
+     * Stands in for the stored collapse flags while a filter is on, set by the board on every
+     * render and cleared with the filter. See {@link VolatileCollapse}.
+     */
+    volatileCollapse: VolatileCollapse | undefined;
 
     /** The config as the board last handed it over, against which a fresh one is recognised. */
     private viewConfigSource: BoardViewData | undefined;
@@ -112,10 +166,18 @@ export default class BoardApi {
         private setBranchIdToEdit: (branchId: string | undefined) => void,
         private pending: PendingColumnWrites =
             { renames: new Map(), claims: new Map(), inFlight: 0 },
-        private statusDefinition?: BoardStatusDefinition
+        private statusDefinition?: BoardStatusDefinition,
+        /**
+         * Every card, when `byColumn` is narrowed by a filter. Bulk operations read this one, so a
+         * column operation reaches the cards the filter leaves out too.
+         */
+        private allByColumn?: ColumnMap,
+        /** Draws a card the active filter does not match. See {@link keepInView}. */
+        private keepNote?: (noteId: string) => void
     ) {
         this.viewConfigSource = viewConfig;
         this.viewConfig = viewConfig ?? {};
+        this.groupBy = statusAttribute;
         this.isRelationMode = statusAttribute.startsWith("~");
 
         if (statusAttribute.startsWith("~") || statusAttribute.startsWith("#")) {
@@ -138,7 +200,9 @@ export default class BoardApi {
         viewConfig: BoardViewData | undefined,
         saveConfig: (newConfig: BoardViewData) => void,
         setBranchIdToEdit: (branchId: string | undefined) => void,
-        statusDefinition?: BoardStatusDefinition
+        statusDefinition?: BoardStatusDefinition,
+        allByColumn?: ColumnMap,
+        keepNote?: (noteId: string) => void
     ) {
         // What was sent to the end of a column stands in for what the map does not show yet, so it
         // is given up with the map it stands in for. Kept across a refresh, it would name a branch
@@ -148,6 +212,8 @@ export default class BoardApi {
         }
 
         this.byColumn = byColumn;
+        this.allByColumn = allByColumn;
+        this.keepNote = keepNote;
         this.columns = columns;
         this.parentNote = parentNote;
         // Only a config the board has actually replaced, since `storeColumns` moves this one ahead
@@ -159,6 +225,7 @@ export default class BoardApi {
         this.saveConfig = saveConfig;
         this.setBranchIdToEdit = setBranchIdToEdit;
         this.statusDefinition = statusDefinition;
+        this.groupBy = statusAttribute;
         this.isRelationMode = statusAttribute.startsWith("~");
         this.statusAttribute = statusAttribute.replace(/^[~#]/, "");
     }
@@ -170,24 +237,71 @@ export default class BoardApi {
      * board lands at the bottom. The top is created before the column's own first card: all
      * columns share one list of children, so the board's first child is not this column's.
      */
-    async createNewItem(column: string, title: string, placement: CardPlacement = "bottom") {
-        const first = placement === "top"
-            ? this.byColumn?.get(column)?.[0]?.branch.branchId
-            : undefined;
+    async createNewItem(
+        column: string, title: string, placement: CardPlacement = "bottom", icon?: string,
+        template: NoteTypeOption | undefined = this.getCurrentCardTemplate()
+    ) {
+        const first = placement === "top" ? this.firstInColumn(column) : undefined;
 
         try {
             const { note } = await note_create.createNote(this.parentNote.noteId, {
                 activate: false,
                 title,
                 isProtected: this.parentNote.isProtected,
-                attributes: this.groupingFor(column),
+                ...(template?.options ?? {}),
+                attributes: this.attributesFor(column, icon),
                 ...(first ? { target: "before", targetBranchId: first } : {})
             });
 
+            this.keepInView(note?.noteId);
             return note?.noteId;
         } catch (error) {
             console.error("Failed to create new item:", error);
         }
+    }
+
+    /**
+     * Creates a card above another one, for a field standing among a column's cards.
+     *
+     * Without a card to go above, which is where the field stands below the last one, the card is
+     * made at the end of the column.
+     */
+    async createNewItemBefore(
+        column: string, beforeBranchId: string | undefined, title: string, icon?: string,
+        template: NoteTypeOption | undefined = this.getCurrentCardTemplate()
+    ) {
+        if (!beforeBranchId) {
+            return this.createNewItem(column, title, "bottom", icon, template);
+        }
+
+        const { note } = await this.insertRowAtPosition(
+            column, beforeBranchId, "before", title, icon, template);
+        return note.noteId;
+    }
+
+    /**
+     * Reports a card the board has just gained, which `useCollectionFilter` draws and marks even
+     * when the query misses it. Without this, adding a card to a filtered board shows nothing.
+     */
+    private keepInView(noteId: string | undefined) {
+        if (noteId) {
+            this.keepNote?.(noteId);
+        }
+    }
+
+    /** What a new card carries besides its title: the column it lands in, and its icon. */
+    private attributesFor(column: string, icon?: string) {
+        return [
+            ...this.groupingFor(column),
+            ...(icon
+                ? [ {
+                    type: "label" as const,
+                    name: "iconClass",
+                    value: icon,
+                    isInheritable: false
+                } ]
+                : [])
+        ];
     }
 
     /**
@@ -221,7 +335,7 @@ export default class BoardApi {
      *
      * @returns whether the note was added, `false` when the user backed out.
      */
-    async addExistingItem(column: string, noteId: string) {
+    async addExistingItem(column: string, noteId: string, beforeBranchId?: string) {
         const note = await froca.getNote(noteId, true);
         if (!note) return false;
 
@@ -242,7 +356,32 @@ export default class BoardApi {
         }
 
         await this.changeColumn(noteId, column);
+
+        if (beforeBranchId) {
+            await this.moveIntoPlace(noteId, beforeBranchId);
+        }
+
+        this.keepInView(noteId);
         return true;
+    }
+
+    /**
+     * Puts a card that was just added above another one, which is where a field standing among a
+     * column's cards adds it, rather than leaving it at the end of the column.
+     *
+     * The wait is what makes the move possible: a note cloned onto the board is given its branch by
+     * the server, and that branch has to be in froca before it can be moved.
+     */
+    private async moveIntoPlace(noteId: string, beforeBranchId: string) {
+        await ws.waitForMaxKnownEntityChangeId();
+
+        const note = await froca.getNote(noteId);
+        const branchId = note?.getParentBranches()
+            .find(branch => branch.parentNoteId === this.parentNote.noteId)?.branchId;
+
+        if (branchId && branchId !== beforeBranchId) {
+            await branches.moveBeforeBranch([ branchId ], beforeBranchId);
+        }
     }
 
     async changeColumn(noteId: string, newColumn: string) {
@@ -273,7 +412,7 @@ export default class BoardApi {
             return;
         }
 
-        return this.removeFromBoard(noteId);
+        return this.removeCardFromBoard(noteId);
     }
 
     /**
@@ -281,19 +420,26 @@ export default class BoardApi {
      *
      * @param atStart whether it goes at the head of the board rather than after the last column.
      */
-    async addNewColumn(columnName: string, atStart = false) {
+    async addNewColumn(columnName: string, atStart = false, icon?: string) {
         if (!columnName.trim()) {
             return;
         }
 
-        const columns = this.viewConfig?.columns ?? [];
+        const columns = this.storedColumns;
 
         // Add the new column to persisted data if it doesn't exist
         if (columns.some(col => col.value === columnName)) return false;
         settleColumn(this.pending, columnName);
 
+        // The icon goes in with the column rather than after it: a write of its own would be a
+        // second refresh of the board for a column that has only just been drawn.
+        const added: BoardColumnData = { value: columnName, id: newColumnId() };
+        if (icon) {
+            added.icon = icon;
+        }
+
         if (!atStart) {
-            this.storeColumns([ ...columns, { value: columnName } ]);
+            this.storeColumns([ ...columns, added ]);
             return true;
         }
 
@@ -309,7 +455,7 @@ export default class BoardApi {
 
         const byValue = new Map(columns.map(col => [ col.value, col ]));
         const placed: BoardColumnData[] = order.map(value => byValue.get(value) ?? { value });
-        placed.splice(order[0] === INBOX_COLUMN ? 1 : 0, 0, { value: columnName });
+        placed.splice(order[0] === INBOX_COLUMN ? 1 : 0, 0, added);
         this.storeColumns(placed);
         return true;
     }
@@ -323,7 +469,7 @@ export default class BoardApi {
      * where it is already taken, so adding several in a row cannot silently do nothing.
      */
     async insertColumn(relativeTo: string, direction: "before" | "after") {
-        const stored = this.viewConfig?.columns ?? [];
+        const stored = this.storedColumns;
         const taken = new Set([ ...this.columns, ...stored.map(col => col.value) ]);
 
         const stockName = t("board_view.new-column");
@@ -346,27 +492,34 @@ export default class BoardApi {
         order.splice(
             neighbour < 0 ? order.length : neighbour + (direction === "after" ? 1 : 0), 0, name);
 
-        // Entries carry more than their name, so each is moved rather than rebuilt.
+        // Entries carry more than their name, so each is moved rather than rebuilt. The new one is
+        // the only one written from scratch, and is the only one given an id.
         const byValue = new Map(stored.map(col => [ col.value, col ]));
-        this.storeColumns(order.map(value => byValue.get(value) ?? { value }));
+        this.storeColumns(order.map(value =>
+            byValue.get(value) ?? (value === name ? { value, id: newColumnId() } : { value })));
 
         return name;
     }
 
     /**
-     * Asks before taking a column off the board, the grouping label going from every card in it.
+     * Asks before taking a column off the board, offering to delete its cards as well.
      * Both the menu and the Delete key come through here, so the question is put once and the same
      * way, and a refusal from the server is reported rather than passing for a deletion.
      *
      * @returns whether the column went, for a caller with something to do afterwards.
      */
     async confirmAndRemoveColumn(column: string) {
-        if (!await dialog.confirm(t("board_view.delete-column-confirmation"))) {
+        // Count from the unfiltered map, which is the one `removeColumn` deletes from.
+        const cards = (this.allByColumn ?? this.byColumn)?.get(column)?.length ?? 0;
+        const answer = await dialog.confirmWithNoteDeletion(
+            t("board_view.delete-column-confirmation"),
+            cards ? t("board_view.delete-column-notes", { count: cards }) : undefined);
+        if (!answer || !answer.confirmed) {
             return false;
         }
 
         try {
-            await this.removeColumn(column);
+            await this.removeColumn(column, answer.isDeleteNoteChecked);
             return true;
         } catch (e) {
             console.error("Failed to delete the board column:", e);
@@ -375,17 +528,26 @@ export default class BoardApi {
         }
     }
 
-    async removeColumn(column: string) {
-        // Remove the value from the notes.
-        const noteIds = this.byColumn?.get(column)?.map(item => item.note.noteId) || [];
+    /**
+     * Takes a column off the board.
+     *
+     * @param deleteNotes deletes the column's cards instead of removing the grouping value from
+     *                    them.
+     */
+    async removeColumn(column: string, deleteNotes = false) {
+        // `allByColumn` covers the cards an active filter is not showing.
+        const items = (this.allByColumn ?? this.byColumn)?.get(column);
+        const noteIds = items?.map(item => item.note.noteId) || [];
 
-        const action: BulkAction = this.isRelationMode
-            ? { name: "deleteRelation", relationName: this.statusAttribute }
-            : { name: "deleteLabel", labelName: this.statusAttribute };
+        const action: BulkAction = deleteNotes
+            ? { name: "deleteNote" }
+            : this.isRelationMode
+                ? { name: "deleteRelation", relationName: this.statusAttribute }
+                : { name: "deleteLabel", labelName: this.statusAttribute };
         await this.retiredWhile(column, undefined,
             () => executeBulkActions(noteIds, [ action ], { silent: true }));
 
-        this.storeColumns((this.viewConfig?.columns ?? []).filter(col => col.value !== column));
+        this.storeColumns(this.storedColumns.filter(col => col.value !== column));
     }
 
     async renameColumn(oldValue: string, newValue: string) {
@@ -432,7 +594,7 @@ export default class BoardApi {
      * inbox has no value, so it uses a name stored in the config.
      */
     getColumnTitle(column: string) {
-        const named = this.viewConfig?.columns?.find(col => col.value === column)?.displayName;
+        const named = this.storedColumns.find(col => col.value === column)?.displayName;
         return named || (column === INBOX_COLUMN ? t("board_view.inbox") : column);
     }
 
@@ -442,15 +604,68 @@ export default class BoardApi {
      * Most columns are identified by the value their cards carry, so renaming writes that value
      * to every card in the column. The inbox has no value, so it stores a display name instead and
      * its cards are left untouched.
+     *
+     * @returns `false` when nothing was written, which keeps the caller's editor open: the name
+     *          is blank, or another column already uses it and renaming would merge the two.
      */
-    async setColumnTitle(column: string, title: string) {
-        if (!title.trim()) {
-            return;
+    setColumnTitle(column: string, title: string): false | void | Promise<void> {
+        const name = title.trim();
+        if (!name) {
+            return false;
+        }
+
+        if (this.isColumnNameTaken(name, column)) {
+            toast.showMessage(t("board_view.column-name-taken", { column: name }), undefined,
+                "bx bx-duplicate");
+            return false;
         }
 
         return column === INBOX_COLUMN
-            ? this.updateColumn(column, { displayName: title.trim() })
-            : this.renameColumn(column, title);
+            ? this.updateColumn(column, { displayName: name })
+            : this.renameColumn(column, name);
+    }
+
+    /**
+     * Whether a column other than `except` already uses a name.
+     *
+     * Compares titles as well as values, since the inbox is named by `displayName`, and covers the
+     * stored columns so that an empty one counts.
+     */
+    private isColumnNameTaken(name: string, except: string) {
+        const values = new Set([ ...this.columns, ...this.storedColumns.map(col => col.value) ]);
+        for (const value of values) {
+            if (value !== except && (value === name || this.getColumnTitle(value) === name)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * What each column is called, the icon it shows and how many cards it holds, which the right
+     * pane's outline is drawn from.
+     */
+    getColumnOutline(columns: string[]) {
+        return columns.map(column => {
+            const { title, icon } = this.getColumnLabel(column);
+            return { value: column, title, icon, count: this.byColumn?.get(column)?.length ?? 0 };
+        });
+    }
+
+    /**
+     * The title, icon and colour naming a column outside the board itself.
+     *
+     * A relation board keys its columns by note id, so the title comes from the note.
+     */
+    getColumnLabel(column: string): ColumnReferenceLabel {
+        return {
+            title: this.isRelationMode && column !== INBOX_COLUMN
+                ? froca.getNoteFromCache(column)?.title ?? column
+                : this.getColumnTitle(column),
+            icon: this.getColumnIcon(column) ?? DEFAULT_COLUMN_ICON,
+            color: this.storedColumns.find(col => col.value === column)?.color
+        };
     }
 
     /**
@@ -460,11 +675,13 @@ export default class BoardApi {
      * `NoteLink` puts in the heading — and `setColumnIcon` is not offered there.
      */
     getColumnIcon(column: string) {
-        if (this.isRelationMode) {
+        // The inbox stands for the cards carrying no value at all, so there is no note behind it
+        // even on a relation board, where every other column is one.
+        if (this.isRelationMode && column !== INBOX_COLUMN) {
             return froca.getNoteFromCache(column)?.getIcon();
         }
 
-        const stored = this.viewConfig?.columns?.find(col => col.value === column)?.icon;
+        const stored = this.storedColumns.find(col => col.value === column)?.icon;
         if (stored) {
             return stored;
         }
@@ -477,7 +694,7 @@ export default class BoardApi {
      * while it carries none. The colour is stored per column in both modes, unlike the icon.
      */
     getColumnColorClass(column: string) {
-        const color = this.viewConfig?.columns?.find(col => col.value === column)?.color;
+        const color = this.storedColumns.find(col => col.value === column)?.color;
         return cssClassManager.createClassForColor(color ?? null);
     }
 
@@ -492,21 +709,149 @@ export default class BoardApi {
     }
 
     /**
-     * Hides the inbox column by turning off the board's setting. The stored entry is kept, so
-     * its icon, colour and position are restored when it is switched back on.
+     * Whether the board keeps an inbox column. The stored entry outlives being switched off, so
+     * its icon, colour and position come back with it.
      */
-    async disableInbox() {
-        await attributes.setBooleanWithInheritance(this.parentNote, "enableInboxColumn", false);
+    async setInboxEnabled(enabled: boolean) {
+        await attributes.setBooleanWithInheritance(
+            this.parentNote, "board:showInbox", enabled);
     }
 
-    /** The note limit set for a column, absent if disabled. */
+    /** Hides the inbox column, which is what its own menu offers. */
+    async disableInbox() {
+        await this.setInboxEnabled(false);
+    }
+
+    /** Whether the board draws the notes filed as archived, cards and columns alike. */
+    async setArchivedShown(shown: boolean) {
+        await attributes.setBooleanWithInheritance(this.parentNote, "includeArchived", shown);
+    }
+
+    /** How wide the board draws its columns, which the board turns into a class of its own. */
+    get columnWidth() {
+        return parseColumnWidth(this.parentNote?.getLabelValue(COLUMN_WIDTH_LABEL));
+    }
+
+    /**
+     * Sets how wide the columns are drawn.
+     *
+     * Picking the default removes the label, to keep the note tidy. Where a template or a parent
+     * sets the label, the default is written out instead: `removeOwnedLabelByName` would leave the
+     * inherited value in force.
+     */
+    async setColumnWidth(width: ColumnWidth) {
+        const note = this.parentNote;
+        if (!note) return;
+
+        const inherited = note.getAttributes("label", COLUMN_WIDTH_LABEL)
+            .find(attribute => attribute.noteId !== note.noteId);
+        if (width === DEFAULT_COLUMN_WIDTH
+                && parseColumnWidth(inherited?.value) === DEFAULT_COLUMN_WIDTH) {
+            await attributes.removeOwnedLabelByName(note, COLUMN_WIDTH_LABEL);
+            return;
+        }
+
+        await attributes.setLabel(note.noteId, COLUMN_WIDTH_LABEL, width);
+    }
+
+    /** The note limit set for a column, absent if disabled or for the inbox. */
     getColumnLimit(column: string) {
-        return this.viewConfig?.columns?.find(col => col.value === column)?.limit;
+        if (column === INBOX_COLUMN) {
+            return undefined;
+        }
+
+        return this.storedColumns.find(col => col.value === column)?.limit;
     }
 
     /** Sets a column's note limit. Pass `undefined` to disable it. */
     async setColumnLimit(column: string, limit: number | undefined) {
+        if (column === INBOX_COLUMN) {
+            return;
+        }
+
         await this.updateColumn(column, { limit });
+    }
+
+    /**
+     * Reads a column's stored `orderBy` and `descendingOrder`.
+     *
+     * @returns {@link DEFAULT_SORT} when the column stores nothing, undefined for the manual
+     *          order, and otherwise the stored key. Use {@link getEffectiveColumnSort} to resolve
+     *          {@link DEFAULT_SORT} against the board's own order.
+     */
+    getColumnSort(column: string) {
+        const stored = this.storedColumns.find(col => col.value === column);
+        return {
+            orderBy: parseStoredSortKey(stored?.orderBy),
+            isDescending: !!stored?.descendingOrder
+        };
+    }
+
+    /**
+     * Resolves {@link getColumnSort} against {@link getDefaultSort}: a column storing
+     * {@link DEFAULT_SORT} sorts by the board's key and direction, and by nothing when the board
+     * holds no key.
+     */
+    getEffectiveColumnSort(column: string) {
+        const stored = this.getColumnSort(column);
+        if (stored.orderBy !== DEFAULT_SORT) {
+            return { orderBy: stored.orderBy, isDescending: stored.isDescending };
+        }
+
+        const board = this.getDefaultSort();
+        return { orderBy: board.orderBy, isDescending: board.isDescending };
+    }
+
+    /**
+     * Sets what a column sorts by. `undefined` stores {@link MANUAL_SORT}, since a column storing
+     * nothing sorts by the board's order instead.
+     */
+    async setColumnSort(column: string, orderBy: StoredSortKey | undefined) {
+        await this.updateColumn(column, { orderBy: orderBy ?? MANUAL_SORT });
+    }
+
+    /** Sets whether a column's order runs backwards. */
+    async setColumnSortDirection(column: string, isDescending: boolean) {
+        await this.updateColumn(column, { descendingOrder: isDescending });
+    }
+
+    /**
+     * Reads `#board:sortColumns` and `#board:sortColumnsDescending` off the board note, which is where the
+     * order the columns default to is stored rather than in `board.json`.
+     */
+    getDefaultSort() {
+        return {
+            orderBy: parseSortKey(this.parentNote?.getLabelValue(SORT_LABEL)),
+            isDescending: !!this.parentNote?.isLabelTruthy(SORT_DESCENDING_LABEL)
+        };
+    }
+
+    /** Sets what the board offers to sort by. Pass `undefined` for the manual order. */
+    async setDefaultSort(orderBy: SortKey | undefined) {
+        if (!this.parentNote) return;
+        await attributes.setAttribute(this.parentNote, "label", SORT_LABEL, orderBy ?? null);
+    }
+
+    /** Sets whether the order the board offers runs backwards. */
+    async setDefaultSortDirection(isDescending: boolean) {
+        if (!this.parentNote) return;
+        await attributes.setBooleanWithInheritance(
+            this.parentNote, SORT_DESCENDING_LABEL, isDescending);
+    }
+
+    /**
+     * Removes `orderBy` and `descendingOrder` from every stored column, so all of them sort by the
+     * board's order again.
+     *
+     * Only columns `board.json` holds an entry for are written; a column with no entry already
+     * sorts by the board's order. Written through {@link updateColumns} in one go, since
+     * `updateColumn` rewrites the whole config and a run of them would each start from the config
+     * as it stood before the first.
+     */
+    async resetColumnSortsToDefault() {
+        const stored = this.storedColumns;
+        this.updateColumns(
+            stored.map(({ value }) => value), { orderBy: undefined, descendingOrder: false });
     }
 
     /** Whether the inbox also collects notes deeper than the board's direct children. */
@@ -514,9 +859,76 @@ export default class BoardApi {
         await this.updateColumn(INBOX_COLUMN, { nested });
     }
 
+    /**
+     * The id a reference names a column by, assigning one where the column has none yet.
+     *
+     * A column with no stored entry at all is given one here: it is drawn from the definition or
+     * from a value its cards carry, and until something is stored for it there is nothing to hold
+     * an id.
+     *
+     * The assignment goes through the server, which reads and writes `board.json` in one request.
+     * Two clients copying a reference to the same id-less column would otherwise each generate an
+     * id and the second write would replace the first, breaking the link already copied from it.
+     * The server answers with the id the column actually holds, which is this one only when it
+     * arrived first, and says whether it stored it: a configuration the server cannot read is left
+     * for the board to write out again from here.
+     */
+    async ensureColumnId(column: string) {
+        const stored = readColumnId(this.viewConfig, this.groupBy, column);
+        if (stored) {
+            return stored;
+        }
+
+        const id = newColumnId();
+        try {
+            const settled = await server.put<{ id: string, stored: boolean }>(
+                `notes/${this.parentNote.noteId}/board/column-id`,
+                { groupBy: this.groupBy, value: column, id });
+            if (settled && !settled.stored) {
+                this.updateColumn(column, { id: settled.id });
+            }
+
+            return settled?.id ?? id;
+        } catch (e) {
+            // The link still works for as long as nothing else claims the column, and the board
+            // writes the id out with the rest of the configuration as it draws.
+            console.error("Failed to store the board column id:", e);
+            this.updateColumn(column, { id });
+            return id;
+        }
+    }
+
+    /**
+     * The link that opens this board on one of its columns, which the menu copies.
+     *
+     * Assigning an id to a column that has none is what makes the link outlive a rename, so
+     * copying a reference writes to `board.json` where nothing has been stored for the column yet.
+     */
+    async getColumnReference(column: string) {
+        // `getColumnLabel` reads the note from froca's cache, which the heading fills only after
+        // the board is interactive. Load it first: the label is written into the link for good, so
+        // a cache miss would title the column with its note id.
+        if (this.isRelationMode && column !== INBOX_COLUMN) {
+            await froca.getNote(column, true);
+        }
+
+        return columnReference(this.boardNotePath, await this.ensureColumnId(column),
+            this.getColumnLabel(column));
+    }
+
+    /** The link that opens this board on one of its cards, which is named by its own note id. */
+    getCardReference(noteId: string) {
+        return cardReference(this.boardNotePath, noteId);
+    }
+
+    /** How a link names the board: the path the pane reached it by, or the board alone. */
+    private get boardNotePath() {
+        return this.noteContext?.notePath ?? this.parentNote.noteId;
+    }
+
     /** Whether a column is archived, which the board shows only while archived notes are shown. */
     isColumnArchived(column: string) {
-        return !!this.viewConfig?.columns?.find(col => col.value === column)?.archived;
+        return !!this.storedColumns.find(col => col.value === column)?.archived;
     }
 
     /**
@@ -527,19 +939,162 @@ export default class BoardApi {
         this.updateColumn(column, { archived });
     }
 
-    /** Whether a column is stored as collapsed, which draws it as a strip without its cards. */
-    isColumnCollapsed(column: string) {
-        return !!this.viewConfig?.columns?.find(col => col.value === column)?.collapsed;
+    /**
+     * Everything a card could be made from, as the board read them.
+     *
+     * Held here so that a card made from somewhere other than the editor with the pill in it, an
+     * insert beside another card above all, is made from the same template: the alternative is
+     * handing every card on the board a list it would redraw for.
+     */
+    private availableTemplates: NoteTypeOption[] = [];
+
+    setAvailableCardTemplates(templates: NoteTypeOption[]) {
+        this.availableTemplates = templates;
     }
 
-    /** Collapses a column to a strip, or opens it again. */
+    /** What a card is made from now: the one last used, or the first the board offers. */
+    getCurrentCardTemplate() {
+        return currentCardTemplate(
+            resolveNoteTypeOptions(this.getCardTemplateIds(), this.availableTemplates),
+            this.getLastCardTemplateId());
+    }
+
+    /** The templates the board offers, or the stock set until the reader has picked for it. */
+    getCardTemplateIds() {
+        const stored = this.viewConfig?.templates;
+        return stored?.length ? stored : DEFAULT_CARD_TEMPLATES;
+    }
+
+    /** Which of them a new card is made from, until another is picked. */
+    getLastCardTemplateId() {
+        return this.viewConfig?.template;
+    }
+
+    /** The order and what is hidden, as the view config holds it. */
+    getStoredPromotedAttributes() {
+        return this.viewConfig?.promotedAttributes;
+    }
+
+    /**
+     * Returns the promoted attributes defined by the board note or its cards, in the stored order.
+     * Includes the grouping attribute, so that Board Properties keeps its position for when the
+     * board is grouped by another attribute.
+     */
+    getAllPromotedAttributes() {
+        return resolvePromotedAttributes(
+            this.parentNote, this.viewConfig?.promotedAttributes, [ this.statusAttribute ],
+            this.getCardNotes());
+    }
+
+    /** Returns the note of every card, including the cards the filter hides. */
+    getCardNotes() {
+        return cardNotes(this.allByColumn ?? this.byColumn);
+    }
+
+    /** Those a card can show or a column sort by, which the columns themselves stand for. */
+    getPromotedAttributes() {
+        return this.getAllPromotedAttributes()
+            .filter((attribute) => !attribute.drawnByCollection);
+    }
+
+    /** Which of them a card draws, in order. */
+    getVisiblePromotedAttributeNames() {
+        return visiblePromotedAttributeNames(this.getPromotedAttributes());
+    }
+
+    /**
+     * Stores the order and what is hidden.
+     *
+     * The whole list is written, so an attribute the board no longer defines is dropped from the
+     * config by the same call that arranges the rest.
+     */
+    async setPromotedAttributes(attributes: PromotedAttribute[]) {
+        this.storeConfig({ promotedAttributes: storedPromotedAttributes(attributes) });
+    }
+
+    /** Sets what the board offers. An empty set would leave nothing to make a card from. */
+    async setCardTemplateIds(templates: string[]) {
+        if (!templates.length) {
+            return;
+        }
+
+        this.storeConfig({ templates });
+    }
+
+    /** Stores the query the board is narrowed to, or clears it when given an empty one. */
+    setFilterQuery(query: string) {
+        if ((query || undefined) === this.viewConfig?.filterQuery) {
+            return;
+        }
+
+        this.storeConfig({ filterQuery: query || undefined });
+    }
+
+    /** Remembers what the last card was made from, so the next one is made from it too. */
+    async setLastCardTemplateId(template: string) {
+        if (template === this.viewConfig?.template) {
+            return;
+        }
+
+        this.storeConfig({ template });
+    }
+
+    /** Whether a column is stored as collapsed, which draws it as a strip without its cards. */
+    isColumnCollapsed(column: string) {
+        if (this.volatileCollapse) {
+            return this.volatileCollapse.isCollapsed(column);
+        }
+
+        return !!this.storedColumns.find(col => col.value === column)?.collapsed;
+    }
+
+    /** Collapses a column to a strip, or opens it again. Not written while a filter is on. */
     async setColumnCollapsed(column: string, collapsed: boolean) {
+        if (this.volatileCollapse) {
+            this.volatileCollapse.setCollapsed(column, collapsed);
+            return;
+        }
+
         this.updateColumn(column, { collapsed });
     }
 
-    /** Whether a column collapses again once it has been opened. */
+    /**
+     * Collapses every column, or opens the ones that are not kept collapsed.
+     *
+     * One write for the board: a column resolved from the definition or from a value its cards
+     * carry is drawn without ever having been stored, so this is also where it gets an entry.
+     */
+    async setAllColumnsCollapsed(collapsed: boolean) {
+        if (this.volatileCollapse) {
+            this.volatileCollapse.setCollapsed(null, collapsed);
+            return;
+        }
+
+        const stored = new Map(this.storedColumns.map(col => [ col.value, col ]));
+        const order = [ ...stored.keys() ];
+        for (const derived of this.columns) {
+            if (!stored.has(derived)) {
+                order.push(derived);
+            }
+        }
+
+        this.storeColumns(order.map(value => {
+            const column = { ...(stored.get(value) ?? { value }) };
+            if (collapsed) {
+                column.collapsed = true;
+            } else if (!column.keepCollapsed) {
+                // A column kept collapsed keeps the flag: opening it is what the peek is for.
+                delete column.collapsed;
+            }
+
+            return column;
+        }));
+    }
+
+    /** Whether a column collapses again once it has been opened. Never while a filter is on. */
     isColumnKeptCollapsed(column: string) {
-        return !!this.viewConfig?.columns?.find(col => col.value === column)?.keepCollapsed;
+        return !this.volatileCollapse
+            && !!this.storedColumns.find(col => col.value === column)?.keepCollapsed;
     }
 
     /**
@@ -569,7 +1124,23 @@ export default class BoardApi {
      * a note carries is shown without ever being written, so the first pick for it creates one.
      */
     private updateColumn(column: string, patch: Partial<BoardColumnData>) {
-        const columns = this.viewConfig?.columns ?? [];
+        this.storeColumns(this.withColumn(this.storedColumns, column, patch));
+    }
+
+    /** The same for several columns at once, written as one config. */
+    private updateColumns(columns: string[], patch: Partial<BoardColumnData>) {
+        let next = this.storedColumns;
+        for (const column of columns) {
+            next = this.withColumn(next, column, patch);
+        }
+
+        this.storeColumns(next);
+    }
+
+    /** The columns as they read with the patch applied to one of them. */
+    private withColumn(
+        columns: BoardColumnData[], column: string, patch: Partial<BoardColumnData>
+    ): BoardColumnData[] {
         const patched = (stored: BoardColumnData): BoardColumnData => {
             const updated = { ...stored, ...patch };
             if (!updated.icon) delete updated.icon;
@@ -579,16 +1150,42 @@ export default class BoardApi {
             if (!updated.keepCollapsed) delete updated.keepCollapsed;
             if (!updated.displayName) delete updated.displayName;
             if (!updated.limit) delete updated.limit;
+            if (!updated.orderBy) delete updated.orderBy;
+            if (!updated.descendingOrder) delete updated.descendingOrder;
             return updated;
         };
 
-        this.storeColumns(columns.some(col => col.value === column)
-            ? columns.map(col => col.value === column ? patched(col) : col)
-            : [ ...columns, patched({ value: column }) ]);
+        if (columns.some(col => col.value === column)) {
+            return columns.map(col => col.value === column ? patched(col) : col);
+        }
+
+        // A column with no entry yet is written where the board draws it, after the last column
+        // before it that has one. Appended, it would move to the end of the board the moment
+        // anything was picked for it: the stored order is what the board reads first, and a column
+        // with no entry keeps a place of its own only until it has one. The inbox is drawn at the
+        // head without ever having been written, so collapsing it used to send it to the back.
+        const drawn = this.columns.indexOf(column);
+        const previous = drawn < 0 ? undefined : this.columns.slice(0, drawn).reverse()
+            .find(value => columns.some(col => col.value === value));
+        const at = drawn < 0
+            ? columns.length
+            : previous ? columns.findIndex(col => col.value === previous) + 1 : 0;
+
+        const placed = [ ...columns ];
+        placed.splice(at, 0, patched({ value: column }));
+        return placed;
     }
 
     reorderColumn(fromIndex: number, toIndex: number) {
         if (!this.columns || fromIndex === toIndex) return;
+
+        // The inbox leads whatever the board groups by, so neither carrying it off the front nor
+        // placing a column before it can stand. Refused here rather than at each gesture: the
+        // drag, the keyboard and the menu all reorder through this.
+        const leadsWithInbox = this.columns[0] === INBOX_COLUMN;
+        if (this.columns[fromIndex] === INBOX_COLUMN || (leadsWithInbox && toIndex === 0)) {
+            return;
+        }
 
         const newColumns = [...this.columns];
         const [movedColumn] = newColumns.splice(fromIndex, 1);
@@ -605,12 +1202,12 @@ export default class BoardApi {
         // `columns` is render state: it omits entries the view has yet to catch up with, and any
         // the board is hiding, such as a disabled inbox. Those are neither dropped nor appended at
         // the end.
-        const stored = this.viewConfig?.columns ?? [];
-        const storedColumns = new Map(stored.map(col => [ col.value, col ]));
+        const stored = this.storedColumns;
+        const byValue = new Map(stored.map(col => [ col.value, col ]));
         // Reordering only moves entries, so each keeps its stored icon instead of being rebuilt
         // from its name.
         const reordered: BoardColumnData[] =
-            newColumns.map(value => storedColumns.get(value) ?? { value });
+            newColumns.map(value => byValue.get(value) ?? { value });
 
         // A hidden column goes back after the column it followed in the config, not at the index it
         // held there: the move has shifted the visible columns, so that index points elsewhere now.
@@ -729,13 +1326,24 @@ export default class BoardApi {
      * re-renders off the identity of the config it was handed, so an in-place edit would be written
      * to disk but stay invisible until the view is re-entered.
      */
+    /** Writes part of the board's own configuration, leaving the rest of it as it stands. */
+    private storeConfig(patch: Partial<BoardViewData>) {
+        this.viewConfig = { ...this.viewConfig, ...patch };
+        this.saveConfig(this.viewConfig);
+    }
+
+    /** The columns stored for the grouping the board is on, empty where it has none yet. */
+    private get storedColumns() {
+        return readColumns(this.viewConfig, this.groupBy) ?? [];
+    }
+
     private storeColumns(columns: BoardColumnData[]) {
-        this.viewConfig = { ...this.viewConfig, columns };
+        this.viewConfig = writeColumns(this.viewConfig, this.groupBy, columns);
         this.saveConfig(this.viewConfig);
         // Not awaited — every caller is the tail of a user gesture the board has already rendered —
         // so the failure is caught here rather than left to reject unhandled. The columns are still
         // in the view config, so the board is not wrong, only out of step with the definition.
-        this.syncColumnsToDefinition(columns.map(({ value }) => value))
+        this.syncColumnsToDefinition(columns.map(({ value }) => value), this.groupBy)
             .catch((e) => {
                 console.error("Failed to store the board columns in the attribute definition:", e);
                 toast.showError(t("board_view.column-definition-save-error"));
@@ -754,8 +1362,17 @@ export default class BoardApi {
      *
      * Writing only on a real difference is what makes that safe to call every time: the write lands as
      * an entity change, which re-renders the board, which would write again.
+     *
+     * @param forGroupBy the grouping the columns were resolved for, with its prefix. The write is
+     *                   dropped when the board has moved to another grouping since.
      */
-    async syncColumnsToDefinition(columns: string[]) {
+    async syncColumnsToDefinition(columns: string[], forGroupBy: string) {
+        // The caller resolved these columns for one grouping, and the board can have moved to
+        // another since. Writing them would put one grouping's columns into another's definition.
+        if (forGroupBy !== this.groupBy) {
+            return;
+        }
+
         if (this.isRelationMode || !canStoreColumnsInDefinition(this.statusDefinition)) {
             return;
         }
@@ -809,29 +1426,53 @@ export default class BoardApi {
         );
     }
 
+    /** Creates a card beside another one, which is what a field between two cards makes. */
     async insertRowAtPosition(
         column: string,
         relativeToBranchId: string,
-        direction: "before" | "after") {
+        direction: "before" | "after",
+        title: string,
+        icon?: string,
+        template: NoteTypeOption | undefined = this.getCurrentCardTemplate()) {
         const { note, branch } = await note_create.createNote(this.parentNote.noteId, {
             activate: false,
             targetBranchId: relativeToBranchId,
             target: direction,
-            title: t("board_view.new-item"),
-            attributes: this.groupingFor(column)
+            title,
+            isProtected: this.parentNote.isProtected,
+            ...(template?.options ?? {}),
+            attributes: this.attributesFor(column, icon)
         });
 
         if (!note || !branch) {
             throw new Error("Failed to create note");
         }
 
-        this.startEditing(branch.branchId);
-
-        return note;
+        this.keepInView(note.noteId);
+        return { note, branch };
     }
 
     openNote(noteId: string) {
         appContext.triggerCommand("openInPopup", { noteIdOrPath: noteId });
+    }
+
+    /**
+     * Answers the card's own open gesture, a click or Space.
+     *
+     * A card carrying `board:cardRedirectTo` stands in for the note that relation points at, so it
+     * navigates there instead of opening an editor of its own. Quick edit calls `openNote` and
+     * still opens the card's own editor.
+     */
+    openCard(note: FNote) {
+        const target = note.getRelationValue(CARD_REDIRECT_RELATION)
+            ?? note.getRelationValue(CARD_REDIRECT_RELATION_LEGACY);
+        if (target) {
+            const context = this.noteContext ?? appContext.tabManager?.getActiveContext();
+            void context?.setNote(target);
+            return;
+        }
+
+        this.openNote(note.noteId);
     }
 
     startEditing(branchId: string) {
@@ -855,9 +1496,11 @@ export default class BoardApi {
      * named by the server and has to be in froca before it can be placed.
      */
     async duplicateItem(noteId: string, branchId: string) {
-        const { branch } = await server.post<{ branch: { branchId: string } }>(
-            `notes/${noteId}/duplicate/${this.parentNote.noteId}`);
+        const { note, branch } = await server.post<
+            { note: { noteId: string }, branch: { branchId: string } }>(
+                `notes/${noteId}/duplicate/${this.parentNote.noteId}`);
 
+        this.keepInView(note?.noteId);
         await ws.waitForMaxKnownEntityChangeId();
         await branches.moveAfterBranch([ branch.branchId ], branchId);
     }
@@ -868,7 +1511,25 @@ export default class BoardApi {
             .some(attribute => attribute.noteId !== note.noteId);
     }
 
-    removeFromBoard(noteId: string) {
+    /**
+     * Whether the board draws the inbox column, which holds the cards with no grouping value.
+     *
+     * {@link removeFromBoard} clears that value, so a card lands in the inbox instead of leaving
+     * the board, and one already there does not move at all.
+     */
+    get isInboxEnabled() {
+        return !!this.parentNote?.isLabelTruthy("board:showInbox");
+    }
+
+    /**
+     * Takes cards off the board, which leaves the notes where they are and only takes the grouping
+     * value away. Written together, so a set does not leave a card at a time.
+     */
+    async removeFromBoard(noteIds: string[]) {
+        await Promise.all(noteIds.map((noteId) => this.removeCardFromBoard(noteId)));
+    }
+
+    private removeCardFromBoard(noteId: string) {
         const note = froca.getNoteFromCache(noteId);
         if (!note) return;
         if (this.isRelationMode) {
@@ -892,33 +1553,181 @@ export default class BoardApi {
         return attributes.removeOwnedLabelByName(note, this.statusAttribute);
     }
 
-    /**
-     * Moves a card to the end of another column, where a new one would go.
-     *
-     * {@link moveWithinBoard} leaves a card crossing columns where the tree already had it, which
-     * is where a drop between two cards wants it. A card sent across by the keyboard is aimed at no
-     * card in particular, so it goes where the reader would look for it.
-     */
-    async moveToColumnEnd(noteId: string, branchId: string, targetColumn: string) {
-        // What is already at the end, as far as this instance can know: nothing waits for the board
-        // to redraw between two keystrokes, so the column map still shows the target as it was
-        // before the card the last press sent. Anything sent since is remembered here instead, and
-        // the memory lasts exactly as long as the map it stands in for, both being rebuilt by the
-        // refresh that catches up.
-        const last = this.sentToColumnEnd.get(targetColumn)
-            ?? (this.byColumn?.get(targetColumn) ?? []).at(-1)?.branch.branchId;
+    /** Whether a column orders its own cards rather than keeping the order the user set. */
+    isColumnSorted(column: string) {
+        return !!this.getEffectiveColumnSort(column).orderBy;
+    }
 
-        await this.changeColumn(noteId, targetColumn);
-        if (last && last !== branchId) {
-            await branches.moveAfterBranch([ branchId ], last);
+    /**
+     * Sends cards to the end of another column, where the ones the keyboard sends belong, keeping
+     * the order they are given in.
+     *
+     * The grouping values go together rather than one after another, which is what keeps a set from
+     * arriving a card at a time: each is a request of its own, and one at a time makes the wait the
+     * sum of them. `moveAfterBranch` then places the whole set against one card, in order.
+     */
+    async moveToColumnEnd(cards: { noteId: string, branchId: string }[], targetColumn: string) {
+        const arrived = cards.at(-1);
+        if (!arrived) {
+            return;
         }
 
-        this.sentToColumnEnd.set(targetColumn, branchId);
+        // What is already at the end, as far as this instance can know: nothing waits for the board
+        // to redraw between two keystrokes, so the column map still shows the target as it was
+        // before the cards the last press sent. Anything sent since is remembered here instead, and
+        // the memory lasts exactly as long as the map it stands in for, both being rebuilt by the
+        // refresh that catches up. Read before the writes below for the same reason.
+        const last = this.sentToColumnEnd.get(targetColumn) ?? this.lastInColumn(targetColumn);
+
+        await Promise.all(cards.map((card) => this.changeColumn(card.noteId, targetColumn)));
+
+        // Only the grouping value is written for a sorted column: `sortColumnMap` decides where
+        // its cards are drawn.
+        if (this.isColumnSorted(targetColumn)) {
+            return;
+        }
+
+        if (last && last !== arrived.branchId) {
+            await branches.moveAfterBranch(cards.map((card) => card.branchId), last);
+        }
+
+        this.sentToColumnEnd.set(targetColumn, arrived.branchId);
+    }
+
+    /**
+     * The notes a column draws, in the order it draws them.
+     *
+     * What a range selection is measured against, so a range covers only the cards the reader can
+     * see and never reaches into another column.
+     */
+    getColumnNoteIds(column: string) {
+        return (this.byColumn?.get(column) ?? []).map((item) => item.note.noteId);
+    }
+
+    /**
+     * The cards named by `noteIds`, in the order the board draws them.
+     *
+     * A note the board is not drawing is left out, so a selection that has fallen behind a refresh
+     * cannot make a command act on a card that is no longer there.
+     */
+    getCards(noteIds: ReadonlySet<string>) {
+        const cards: ColumnItem[] = [];
+        for (const items of this.byColumn?.values() ?? []) {
+            for (const item of items) {
+                if (noteIds.has(item.note.noteId)) {
+                    cards.push(item);
+                }
+            }
+        }
+
+        return cards;
+    }
+
+    /** Which column a card stands in, or nothing where the board is not drawing the card. */
+    getCardColumn(noteId: string) {
+        for (const [ column, items ] of this.byColumn ?? []) {
+            if (items.some((item) => item.note.noteId === noteId)) {
+                return column;
+            }
+        }
+
+        return undefined;
+    }
+
+    /**
+     * Moves several cards into a column at one place, keeping the order they were drawn in.
+     *
+     * The grouping value is written for each card, then the branches are placed in one call:
+     * `moveBeforeBranch` and `moveAfterBranch` both take the whole set and keep its order, so the
+     * cards land together rather than each being placed against the one before it.
+     */
+    async moveWithinBoard(
+        cards: { noteId: string, branchId: string }[], targetColumn: string, targetIndex: number
+    ) {
+        // A card the cache has never heard of is left out rather than written for.
+        const moving = cards.filter((card) => froca.getNoteFromCache(card.noteId));
+        if (!moving.length) {
+            return;
+        }
+
+        // Read before the writes below: a redraw between them hands this instance the map with the
+        // cards already moved.
+        const targetItems = this.byColumn?.get(targetColumn) ?? [];
+        const branchIds = moving.map((card) => card.branchId);
+        const moved = new Set(branchIds);
+        // The place is counted among the cards as they are drawn, which includes the ones being
+        // moved. Each of those standing above it names one place that is about to close up.
+        const above = targetItems.slice(0, targetIndex)
+            .filter((item) => moved.has(item.branch.branchId)).length;
+        const staying = targetItems.filter((item) => !moved.has(item.branch.branchId));
+        const at = targetIndex - above;
+
+        // The column as the board holds it, cards a filter hides included, which is what says
+        // whether a card is arriving from elsewhere and whether this move changes anything.
+        const whole = this.allByColumn?.get(targetColumn) ?? targetItems;
+        const held = whole.map((item) => item.branch.branchId);
+
+        // A move that leaves `targetItems` in the order it already holds writes nothing:
+        // `moveBeforeBranch` places a card against a drawn neighbour, so under a filter it would
+        // reorder the hidden cards instead.
+        const standing = targetItems.map((item) => item.branch.branchId);
+        const landing = [
+            ...staying.slice(0, at).map((item) => item.branch.branchId),
+            ...branchIds,
+            ...staying.slice(at).map((item) => item.branch.branchId)
+        ];
+        if (landing.length === standing.length
+                && landing.every((branchId, place) => branchId === standing[place])) {
+            return;
+        }
+
+        // Only the cards arriving from elsewhere are written: one already under this column holds
+        // the value already, and writing it again is a change the board has to redraw for.
+        // Together rather than one after another, so a set does not arrive a card at a time.
+        const arriving = moving.filter((card) => !held.includes(card.branchId));
+        if (arriving.length) {
+            await Promise.all(arriving.map((card) => this.changeColumn(card.noteId, targetColumn)));
+        }
+
+        // A sorted column places its own cards, so nothing is written against a card there.
+        if (this.isColumnSorted(targetColumn)) {
+            return;
+        }
+
+        const before = staying[at];
+        if (before) {
+            await branches.moveBeforeBranch(branchIds, before.branch.branchId);
+            return;
+        }
+
+        // What the cards are placed after: the last one staying, or `lastInColumn`'s answer where
+        // a filter draws none of them at all.
+        const after = staying.at(-1)?.branch.branchId ?? this.lastInColumn(targetColumn);
+        if (after && !moved.has(after)) {
+            await branches.moveAfterBranch(branchIds, after);
+        }
     }
 
     /** Whether a card stands at the head of its column, with nowhere left to be moved up to. */
     isFirstInColumn(branchId: string, column: string) {
         return this.byColumn?.get(column)?.[0]?.branch.branchId === branchId;
+    }
+
+    /**
+     * The card a new or arriving one is placed after: the last one drawn, or `allByColumn`'s last
+     * where a filter draws none. Placement follows the cards on screen wherever there are any.
+     */
+    private lastInColumn(column: string) {
+        const shown = this.byColumn?.get(column) ?? [];
+        const items = shown.length ? shown : this.allByColumn?.get(column) ?? [];
+        return items.at(-1)?.branch.branchId;
+    }
+
+    /** The counterpart of {@link lastInColumn}, for a card made at the head of a column. */
+    private firstInColumn(column: string) {
+        const shown = this.byColumn?.get(column) ?? [];
+        const items = shown.length ? shown : this.allByColumn?.get(column) ?? [];
+        return items[0]?.branch.branchId;
     }
 
     /**
@@ -928,49 +1737,17 @@ export default class BoardApi {
      * a card, which knows the column it is in but not where it stands among the others.
      */
     async moveToColumnStart(noteId: string, branchId: string, column: string) {
+        if (this.isColumnSorted(column)) {
+            return;
+        }
+
         const items = this.byColumn?.get(column) ?? [];
         const at = items.findIndex(item => item.branch.branchId === branchId);
         if (at <= 0) {
             return;
         }
 
-        await this.moveWithinBoard(noteId, branchId, at, 0, column, column);
-    }
-
-    async moveWithinBoard(noteId: string, sourceBranchId: string, sourceIndex: number, targetIndex: number, sourceColumn: string, targetColumn: string) {
-        const targetItems = this.byColumn?.get(targetColumn) ?? [];
-
-        const note = froca.getNoteFromCache(noteId);
-        if (!note) return;
-
-        if (sourceColumn !== targetColumn) {
-            // Moving to a different column
-            await this.changeColumn(noteId, targetColumn);
-
-            // If there are items in the target column, reorder
-            if (targetItems.length > 0 && targetIndex < targetItems.length) {
-                const targetBranch = targetItems[targetIndex].branch;
-                await branches.moveBeforeBranch([ sourceBranchId ], targetBranch.branchId);
-            }
-        } else if (sourceIndex !== targetIndex) {
-            // Reordering within the same column
-            let targetBranchId: string | null = null;
-
-            if (targetIndex < targetItems.length) {
-                // Moving before an existing item
-                const adjustedIndex = sourceIndex < targetIndex ? targetIndex : targetIndex;
-                if (adjustedIndex < targetItems.length) {
-                    targetBranchId = targetItems[adjustedIndex].branch.branchId;
-                    if (targetBranchId) {
-                        await branches.moveBeforeBranch([ sourceBranchId ], targetBranchId);
-                    }
-                }
-            } else if (targetIndex > 0) {
-                // Moving to the end - place after the last item
-                const lastItem = targetItems[targetItems.length - 1];
-                await branches.moveAfterBranch([ sourceBranchId ], lastItem.branch.branchId);
-            }
-        }
+        await this.moveWithinBoard([ { noteId, branchId } ], column, 0);
     }
 
 }

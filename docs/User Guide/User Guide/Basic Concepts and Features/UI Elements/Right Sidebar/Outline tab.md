@@ -18,6 +18,7 @@ The following note types are supported:
 ### Interaction
 
 *   Clicking on a heading will scroll the document to the position of the heading.
+*   As the document is scrolled, the heading being read is highlighted and the list scrolls to keep it in view. If that heading is hidden inside a collapsed section, the collapsed heading is highlighted instead.
 *   Pressing the close button will dismiss the table of contents but it can be shown again from the <a class="reference-link" href="../Floating%20buttons.md">Floating buttons</a> section.
 
 ### Configuration
@@ -71,8 +72,10 @@ When <a class="reference-link" href="../../../Note%20Types/File/PDFs.md">PDFs</
 *   Pages
     *   A preview of all the pages with a small thumbnail.
     *   Clicking on a page will automatically navigate to that page.
+    *   Right-clicking a page and selecting _Copy reference_ copies a link that opens the PDF at that page.
 *   Annotations
     *   Highlight and comment annotations are listed here.
+    *   Right-clicking an annotation and selecting _Copy reference_ copies a link that opens the PDF at that annotation.
     *   For the old layout, this feature is not directly available, however there is a listing of comments directly in the PDF toolbar.
 *   Attachments
     *   If the PDF has its own attachments (not to be confused with Trilium's <a class="reference-link" href="../../Notes/Attachments.md">Attachments</a>), they will be displayed in a list.

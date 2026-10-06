@@ -2,8 +2,7 @@ import "./appearance_fonts.css";
 
 import { customFontFamily, customFontNoteId, customFontOption, FontFamily, OptionNames, SYSTEM_MONOSPACE_FONT_STACK, SYSTEM_SANS_SERIF_FONT_STACK, UserFont } from "@triliumnext/commons";
 import clsx from "clsx";
-import { ComponentChildren, Fragment } from "preact";
-import { createPortal } from "preact/compat";
+import { ComponentChildren, createPortal, Fragment } from "preact";
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { Trans } from "react-i18next";
 
@@ -26,6 +25,7 @@ import SegmentedChoice from "../../react/SegmentedChoice";
 import { renderShortcutKbds } from "../../react/shortcut_kbd";
 import Slider from "../../react/Slider";
 import SettingsSearch from "./components/SettingsSearch";
+import HelpButton from "../../react/HelpButton";
 
 interface FontFamilyEntry {
     value: FontFamily;
@@ -143,7 +143,8 @@ export default function Fonts() {
     const [ pickerShown, setPickerShown ] = useState(false);
 
     return (
-        <Card className="appearance-fonts" heading={t("fonts.fonts")}>
+        <Card className="appearance-fonts" heading={t("fonts.fonts")}
+            actions={<HelpButton helpPage="w4rMEhJsALlA" />}>
             <OptionCardSection
                 name="override-theme-fonts"
                 label={t("fonts.custom_fonts")}

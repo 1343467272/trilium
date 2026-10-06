@@ -1,4 +1,5 @@
 import { isFontMimeType } from "@triliumnext/commons/src/lib/font_mimes.js";
+import { CANVAS_ATTACHMENT_MIME } from "@triliumnext/commons/src/lib/notes.js";
 
 import { getCrypto } from "../encryption/crypto";
 import { getPlatform } from "../platform";
@@ -11,13 +12,17 @@ import { NoteMeta } from "../../meta";
 
 export function isDev() { return getPlatform().getEnv("TRILIUM_ENV") === "dev"; }
 export function isElectron() { return getPlatform().isElectron; }
+export function isStandalone() { return getPlatform().isStandalone; }
 export function isMac() { return getPlatform().isMac; }
 export function isWindows() { return getPlatform().isWindows; }
 export function isLinux() { return getPlatform().isLinux; }
 
 // render and book are string note in the sense that they are expected to contain empty string
 const STRING_NOTE_TYPES = new Set(["text", "code", "relationMap", "search", "render", "book", "mermaid", "canvas", "webView"]);
-const STRING_MIME_TYPES = new Set(["application/javascript", "application/x-javascript", "application/json", "application/x-sql", "image/svg+xml", "application/inkml+xml"]);
+const STRING_MIME_TYPES = new Set([
+    "application/javascript", "application/x-javascript", "application/json", "application/x-sql",
+    "image/svg+xml", "application/inkml+xml", CANVAS_ATTACHMENT_MIME
+]);
 
 export function hash(text: string) {
     return encodeBase64(getCrypto().createHash("sha1", text.normalize()));
@@ -43,6 +48,14 @@ export function randomString(length: number) {
 
 export function newEntityId() {
     return randomString(12);
+}
+
+/**
+ * Link parsing (`link.ts` on the client, `findInternalLinks()` on the server) matches only this
+ * character set, so a note ID outside it cannot be the target of a link.
+ */
+export function isValidEntityId(id: string) {
+    return /^[A-Za-z0-9_]{4,128}$/.test(id);
 }
 
 export function hashedBlobId(content: string | Uint8Array) {
@@ -80,6 +93,44 @@ export function removeDiacritic(str: string) {
 
 export function normalize(str: string) {
     return removeDiacritic(str).toLowerCase();
+}
+
+/**
+ * Diacritic-stripping + lowercasing normalizer that is GUARANTEED to preserve the
+ * original code-unit length, so a position found in the normalized string maps 1:1
+ * onto the original string for slicing/highlighting. This is what the search
+ * snippet/highlight index math relies on: it finds match offsets on the normalized
+ * text but inserts markers into (or slices) the original text at the same offsets.
+ *
+ * Each character (Unicode code point) is transformed individually, and the original character is
+ * kept whenever the transformed result is a different code-unit length: a bare combining mark that
+ * would vanish, or a ligature that would expand. This trades perfect folding of already-decomposed
+ * content for a hard length invariant.
+ */
+export function normalizePreservingLength(str: string) {
+    let result = "";
+    for (const char of str) {
+        const transformed = removeDiacritic(char).toLowerCase();
+        // Keep the transform only when it stays the same code-unit length as the
+        // source character, otherwise index alignment against the original breaks.
+        result += transformed.length === char.length ? transformed : char;
+    }
+
+    return result;
+}
+
+/**
+ * Removes every trailing `/` from `str`.
+ *
+ * Written as an index scan rather than `replace(/\/+$/, "")`: that pattern backtracks
+ * polynomially on a value with many slashes (CodeQL js/polynomial-redos).
+ */
+export function trimTrailingSlashes(str: string) {
+    let end = str.length;
+    while (end > 0 && str.charAt(end - 1) === "/") {
+        end--;
+    }
+    return str.slice(0, end);
 }
 
 /**
