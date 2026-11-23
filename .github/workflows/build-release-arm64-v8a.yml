@@ -1,0 +1,198 @@
+name: Build Trilium 0.107.0 Release APK (arm64-v8a)
+
+# 该 fork 没有同步上游 tag，v0.107.0 对应的提交 d83d715 已存在于 fork 中，
+# 因此默认直接 checkout 这个 commit，保证构建的是 107 版本而不是 master 最新代码。
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "源码 ref（默认锁定 v0.107.0 对应提交）"
+        required: true
+        type: string
+        default: "d83d7151f1c6d4292be88d8d34008f409b252f7f"
+      version_name:
+        description: "APK versionName"
+        required: true
+        type: string
+        default: "0.107.0"
+      version_code:
+        description: "APK versionCode"
+        required: true
+        type: string
+        default: "10700"
+      signing:
+        description: "签名方式：auto=有密钥用密钥，没有则临时生成；secrets=强制使用仓库密钥；unsigned=不签名"
+        required: true
+        type: choice
+        default: auto
+        options:
+          - auto
+          - secrets
+          - unsigned
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build release APK (arm64-v8a)
+    runs-on: ubuntu-latest
+    env:
+      TRILIUM_SECURITY_BACKEND_SCRIPTING_ENABLED: "true"
+      TRILIUM_ANDROID_VERSION_NAME: ${{ inputs.version_name || '0.107.0' }}
+      TRILIUM_ANDROID_VERSION_CODE: ${{ inputs.version_code || '10700' }}
+      ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+    steps:
+      - name: Checkout v0.107.0 source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || 'd83d7151f1c6d4292be88d8d34008f409b252f7f' }}
+          persist-credentials: false
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Stamp build info
+        run: pnpm run chore:update-build-info -- --from-commit
+
+      - name: Build standalone web assets
+        run: pnpm --filter @triliumnext/mobile build
+
+      - name: Sync Capacitor Android project
+        run: pnpm --filter @triliumnext/mobile exec cap sync android
+
+      - name: Restrict native libs to arm64-v8a
+        run: |
+          cat >> apps/mobile/android/app/build.gradle <<'EOF'
+
+          android {
+              defaultConfig {
+                  ndk {
+                      abiFilters "arm64-v8a"
+                  }
+              }
+          }
+          EOF
+          grep -A4 'abiFilters' apps/mobile/android/app/build.gradle
+
+      - name: Prepare signing keystore
+        id: keystore
+        shell: bash
+        run: |
+          set -euo pipefail
+          MODE="${{ inputs.signing || 'auto' }}"
+          KEYSTORE="$RUNNER_TEMP/trilium-release.keystore"
+
+          if [ "$MODE" = "unsigned" ]; then
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "签名已关闭，将产出 app-release-unsigned.apk"
+            exit 0
+          fi
+
+          if [ "$MODE" = "secrets" ] || [ -n "${ANDROID_KEYSTORE_B64:-}" ]; then
+            if [ -z "${ANDROID_KEYSTORE_B64:-}" ] || [ -z "${ANDROID_KEYSTORE_PASSWORD:-}" ] || [ -z "${ANDROID_KEY_ALIAS:-}" ] || [ -z "${ANDROID_KEY_PASSWORD:-}" ]; then
+              echo "::error::signing=secrets 时需要仓库密钥 ANDROID_KEYSTORE_BASE64 / ANDROID_KEYSTORE_PASSWORD / ANDROID_KEY_ALIAS / ANDROID_KEY_PASSWORD"
+              exit 1
+            fi
+            printf '%s' "$ANDROID_KEYSTORE_B64" | base64 -d > "$KEYSTORE"
+            KS_PASS="$ANDROID_KEYSTORE_PASSWORD"
+            KEY_ALIAS="$ANDROID_KEY_ALIAS"
+            KEY_PASS="$ANDROID_KEY_PASSWORD"
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::未配置签名密钥，使用一次性临时密钥签名；每次构建签名都不同，覆盖安装可能需要先卸载旧版。"
+            keytool -genkeypair -v \
+              -keystore "$KEYSTORE" \
+              -alias trilium \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass trilium -keypass trilium \
+              -dname "CN=Trilium CI, OU=CI, O=Trilium, L=NA, ST=NA, C=CN" >/dev/null 2>&1
+            KS_PASS="trilium"
+            KEY_ALIAS="trilium"
+            KEY_PASS="trilium"
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+          {
+            echo "TRILIUM_ANDROID_KEYSTORE_PATH=$KEYSTORE"
+            echo "TRILIUM_ANDROID_KEYSTORE_PASSWORD=$KS_PASS"
+            echo "TRILIUM_ANDROID_KEY_ALIAS=$KEY_ALIAS"
+            echo "TRILIUM_ANDROID_KEY_PASSWORD=$KEY_PASS"
+          } >> "$GITHUB_ENV"
+
+      - name: Assemble release APK
+        working-directory: apps/mobile/android
+        run: ./gradlew assembleRelease --no-daemon
+
+      - name: Verify arm64-v8a only
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK=$(find apps/mobile/android/app/build/outputs/apk/release -maxdepth 1 -name '*.apk' | head -n 1)
+          test -n "$APK" || { echo "::error::没有找到 release APK"; exit 1; }
+          echo "APK: $APK"
+          ABIS=$(unzip -l "$APK" | awk '{print $4}' | grep -oE '^lib/[^/]+' | sort -u || true)
+          echo "Native ABIs: ${ABIS:-none}"
+          if [ -n "$ABIS" ] && [ "$ABIS" != "lib/arm64-v8a" ]; then
+            echo "::error::APK 中出现了非 arm64-v8a 的 native 库"
+            exit 1
+          fi
+
+      - name: Verify signing certificate
+        if: steps.keystore.outputs.signed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK=$(find apps/mobile/android/app/build/outputs/apk/release -maxdepth 1 -name '*.apk' | head -n 1)
+          APKSIGNER="$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -n 1)"
+          EXPECTED="35d02c447492351f06a55894db4b3e7d75912c3a1264a325f0349fc0e748cb7d"
+          "$APKSIGNER" verify --print-certs "$APK" | tee "$RUNNER_TEMP/certs.txt"
+          grep -qi "$EXPECTED" "$RUNNER_TEMP/certs.txt" || {
+            echo "::error::APK 签名证书指纹与仓库密钥不一致"
+            exit 1
+          }
+
+      - name: Upload release APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: trilium-${{ inputs.version_name || '0.107.0' }}-arm64-v8a-release
+          path: apps/mobile/android/app/build/outputs/apk/release/*.apk
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Build summary
+        run: |
+          {
+            echo "### Trilium 0.107.0 release APK"
+            echo ""
+            echo "- 源码 ref: \`${{ inputs.ref || 'd83d7151f1c6d4292be88d8d34008f409b252f7f' }}\` (v0.107.0)"
+            echo "- versionName: \`$TRILIUM_ANDROID_VERSION_NAME\` / versionCode: \`$TRILIUM_ANDROID_VERSION_CODE\`"
+            echo "- ABI: arm64-v8a"
+            echo "- 签名: ${{ steps.keystore.outputs.signed == 'true' && '已签名（见上方说明）' || '未签名' }}"
+            echo "- 产物: Actions 页面底部的 artifact"
+          } >> "$GITHUB_STEP_SUMMARY"
