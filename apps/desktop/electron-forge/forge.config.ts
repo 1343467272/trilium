@@ -43,7 +43,11 @@ const config: ForgeConfig = {
         name: PRODUCT_NAME,
         appVersion: packageJson.version,
         overwrite: true,
-        asar: true,
+        asar: {
+            // The shared libraries beside sherpa-onnx's addon (onnxruntime) are loaded by the OS,
+            // which cannot read them from inside the archive. auto-unpack-natives adds `*.node`.
+            unpack: "**/node_modules/sherpa-onnx-*-*/**"
+        },
         icon: path.join(APP_ICON_PATH, isNightly ? "icon-dev" : "icon"),
         ...macosSignConfiguration,
         windowsSign: windowsSignConfiguration,
@@ -125,7 +129,13 @@ const config: ForgeConfig = {
         {
             name: "@electron-forge/maker-rpm",
             config: {
-                options: baseLinuxMakerConfigOptions
+                options: {
+                    ...baseLinuxMakerConfigOptions,
+                    // electron-installer-redhat's spec template with an absolute `%install` source
+                    // path, which works whether rpmbuild runs `%install` from `BUILD` or from
+                    // `BUILD/<name>-<version>-build` (RPM 4.20+).
+                    specTemplate: path.resolve(path.join(ELECTRON_FORGE_DIR, "rpm-spec.ejs"))
+                }
             }
         },
         {

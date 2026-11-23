@@ -1,4 +1,4 @@
-import { safeHostname } from "@triliumnext/commons";
+import { safeHostname } from "@triliumnext/commons/src/lib/link_embed.js";
 import {
     _setModelData as setModelData,
     ClassicEditor,
@@ -12,7 +12,6 @@ import {
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createTestEditor } from "../../test/editor-kit.js";
-import { installGlobMock } from "../../test/globals-test-kit.js";
 import FindInLinkWidgets from "./find_in_link_widgets.js";
 import LinkEmbedEditing from "./link_embed/link_embed_editing.js";
 import ReferenceLink from "./referencelink.js";
@@ -21,15 +20,21 @@ describe("FindInLinkWidgets", () => {
     let editor: ClassicEditor;
 
     beforeEach(async () => {
-        installGlobMock({
-            getComponentByEl: () => ({
-                loadReferenceLinkTitle: vi.fn((element: unknown) => {
-                    if (element instanceof HTMLElement) {
-                        element.textContent = "Reference match";
-                    }
-                    return Promise.resolve();
-                }),
-                renderLinkEmbed: vi.fn((container: HTMLElement, metadata: LinkEmbedMetadata) => {
+        editor = await createTestEditor([
+            Essentials,
+            Paragraph,
+            LinkEditing,
+            ReferenceLink,
+            LinkEmbedEditing,
+            FindAndReplaceEditing,
+            FindInLinkWidgets
+        ], {
+            referenceLink: {
+                getTitle: vi.fn(async () => "Reference match"),
+                getTitleSync: vi.fn(() => "Reference match")
+            },
+            linkEmbed: {
+                renderEmbed: vi.fn((container: HTMLElement, metadata: LinkEmbedMetadata) => {
                     if (metadata.embedType === "youtube") {
                         return;
                     }
@@ -40,23 +45,11 @@ describe("FindInLinkWidgets", () => {
                         metadata.siteName || safeHostname(metadata.url)
                     );
                 }),
-                renderLinkMention: vi.fn((container: HTMLElement, metadata: LinkEmbedMetadata) => {
+                renderMention: vi.fn((container: HTMLElement, metadata: LinkEmbedMetadata) => {
                     appendText(container, metadata.title || safeHostname(metadata.url));
                 })
-            }),
-            getReferenceLinkTitle: vi.fn(async () => "Reference match"),
-            getReferenceLinkTitleSync: vi.fn(() => "Reference match")
+            }
         });
-
-        editor = await createTestEditor([
-            Essentials,
-            Paragraph,
-            LinkEditing,
-            ReferenceLink,
-            LinkEmbedEditing,
-            FindAndReplaceEditing,
-            FindInLinkWidgets
-        ]);
     });
 
     it("finds text and all rendered link widgets in document order", () => {
@@ -141,6 +134,35 @@ describe("FindInLinkWidgets", () => {
         }
     });
 
+    it("puts the classes and attributes of other highlights on the widget", () => {
+        const conversion = editor.conversion.for("editingDowncast");
+        conversion.markerToHighlight({ model: "classes", view: { classes: "probe" } });
+        conversion.markerToHighlight(
+            { model: "attributes", view: { attributes: { "data-probe": "yes" } } });
+        setModelData(
+            editor.model, '<paragraph><reference href="#root/ref"></reference></paragraph>');
+        const reference = editor.editing.view.getDomRoot()?.querySelector("a.reference-link");
+        const item = editor.model.document.getRoot()?.getChild(0)?.getChild(0) as ModelElement;
+        const toggle = (name: string, isOn: boolean) => editor.model.change((writer) => {
+            if (isOn) {
+                writer.addMarker(name, {
+                    range: writer.createRangeOn(item), usingOperation: false, affectsData: false
+                });
+            } else {
+                writer.removeMarker(name);
+            }
+        });
+
+        toggle("classes", true);
+        expect(reference?.classList.contains("probe")).toBe(true);
+        toggle("classes", false);
+        expect(reference?.classList.contains("probe")).toBe(false);
+        toggle("attributes", true);
+        expect(reference?.getAttribute("data-probe")).toBe("yes");
+        toggle("attributes", false);
+        expect(reference?.hasAttribute("data-probe")).toBe(false);
+    });
+
     it("wraps every match in place and restores the text when the search changes", () => {
         setModelData(
             editor.model,
@@ -171,6 +193,33 @@ describe("FindInLinkWidgets", () => {
         expect(matchTexts(editingRoot, "section.link-embed")).toEqual([]);
         expect(reference.textContent).toBe("Reference match");
         expect(title.childNodes).toHaveLength(1);
+    });
+
+    it("searches again after the host draws a link title over its wrapped matches", () => {
+        let redrawTitle = () => {};
+        editor.config.set("referenceLink", {
+            renderTitle: (element: HTMLElement) => {
+                redrawTitle = () => {
+                    element.textContent = "Reference match";
+                };
+                redrawTitle();
+            }
+        });
+        setModelData(
+            editor.model,
+            '<paragraph><reference href="#root/ref"></reference></paragraph>'
+        );
+        const editingRoot = editor.editing.view.getDomRoot();
+        editor.execute("find", "match");
+        expect(matchTexts(editingRoot, "a.reference-link")).toEqual([ "match" ]);
+
+        // The host draws the title in place of the wrapped one, as when its note finishes loading.
+        redrawTitle();
+        expect(matchTexts(editingRoot, "a.reference-link")).toEqual([]);
+        editor.execute("find", "Ref");
+
+        expect(matchTexts(editingRoot, "a.reference-link")).toEqual([ "Ref" ]);
+        expect(editingRoot?.querySelector("a.reference-link")?.textContent).toBe("Reference match");
     });
 
     it("matches only the text that each link widget displays", () => {
@@ -309,6 +358,19 @@ describe("FindInLinkWidgets", () => {
         editor.execute("replace", "broken", state?.highlightedResult);
         expect(editor.getData()).toContain('class="reference-link"');
         expect(editor.getData()).not.toContain("broken");
+    });
+
+    it("tells which results the replace commands replace", () => {
+        setModelData(
+            editor.model,
+            '<paragraph><reference href="#root/ref"></reference> match</paragraph>'
+        );
+        editor.execute("find", "match");
+
+        const results = [ ...editor.plugins.get(FindAndReplaceEditing).state?.results ?? [] ];
+        const plugin = editor.plugins.get(FindInLinkWidgets);
+        expect(resultElementNames(results)).toEqual([ "reference", "text" ]);
+        expect(results.map((result) => plugin.canReplace(result))).toEqual([ false, true ]);
     });
 });
 

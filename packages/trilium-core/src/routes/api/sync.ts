@@ -92,64 +92,6 @@ function forceFullSync() {
     syncService.sync();
 }
 
-/**
- * @swagger
- * /api/sync/changed:
- *   get:
- *     summary: Pull sync changes
- *     operationId: sync-changed
- *     externalDocs:
- *       description: Server implementation
- *       url: https://github.com/TriliumNext/Trilium/blob/v0.91.6/src/routes/api/sync.ts
- *     parameters:
- *       - in: query
- *         name: instanceId
- *         required: true
- *         schema:
- *           type: string
- *         description: Local instance ID
- *       - in: query
- *         name: lastEntityChangeId
- *         required: true
- *         schema:
- *           type: integer
- *         description: Last locally present change ID
- *       - in: query
- *         name: logMarkerId
- *         required: true
- *         schema:
- *           type: string
- *         description: Marker to identify this request in server log
- *       - in: query
- *         name: maxBlobContentSize
- *         required: false
- *         schema:
- *           type: integer
- *         description: If set, blob rows whose content exceeds this many bytes are returned with empty content; the entity_change metadata (including its hash) is unaffected.
- *     responses:
- *       '200':
- *         description: Sync changes, limited to approximately eight megabytes.
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 entityChanges:
- *                   type: array
- *                   items:
- *                     $ref: '#/components/schemas/EntityChange'
- *                 lastEntityChangeId:
- *                   type: integer
- *                   description: If `outstandingPullCount > 0`, pass this as parameter in your next request to continue.
- *                 outstandingPullCount:
- *                   type: integer
- *                   example: 42
- *                   description: Number of changes not yet returned by the remote.
- *     security:
- *       - session: []
- *     tags:
- *       - sync
- */
 function getChanged(req: Request) {
     const startTime = Date.now();
 
@@ -158,7 +100,9 @@ function getChanged(req: Request) {
     }
 
     let lastEntityChangeId = parseInt(req.query.lastEntityChangeId);
+    const requestedEntityChangeId = lastEntityChangeId;
     const clientInstanceId = req.query.instanceId;
+    const logMarkerId = typeof req.query.logMarkerId === "string" ? req.query.logMarkerId : "?";
 
     // Optional per-client limit: blob rows whose content exceeds this many bytes are served with
     // empty content (a stub). Only clients that opt in (currently mobile) send it; the entity_change
@@ -196,7 +140,7 @@ function getChanged(req: Request) {
             break;
         }
 
-        // rows fetched from entity_changes always carry an id
+        /* v8 ignore next -- rows fetched from entity_changes always carry an id */
         fetchCursor = entityChanges[entityChanges.length - 1].id ?? fetchCursor;
 
         const foreignEntityChanges = entityChanges.filter((ec) => ec.instanceId !== clientInstanceId);
@@ -216,7 +160,7 @@ function getChanged(req: Request) {
         entityChangeRecords.push(...records);
 
         if (records.length > 0) {
-            // rows fetched from entity_changes always carry an id
+            /* v8 ignore next -- rows fetched from entity_changes always carry an id */
             lastEntityChangeId = records[records.length - 1].entityChange.id ?? lastEntityChangeId;
         }
 
@@ -225,10 +169,6 @@ function getChanged(req: Request) {
             // not included must be re-served next request, so stop without advancing further
             break;
         }
-    }
-
-    if (entityChangeRecords.length > 0) {
-        getLog().info(`Returning ${entityChangeRecords.length} entity changes in ${Date.now() - startTime}ms`);
     }
 
     // `outstandingPullCount` is a progress estimate returned on every pull request. Counting with
@@ -249,6 +189,12 @@ function getChanged(req: Request) {
         [lastEntityChangeId]
     );
 
+    if (entityChangeRecords.length > 0) {
+        getLog().info(`Sync ${logMarkerId}: returning ${entityChangeRecords.length} entity changes `
+            + `after entity change ${requestedEntityChangeId} (~${estimatedResponseBytes} bytes, `
+            + `${outstandingPullCount} outstanding) in ${Date.now() - startTime}ms`);
+    }
+
     return {
         entityChanges: entityChangeRecords,
         lastEntityChangeId,
@@ -259,65 +205,11 @@ function getChanged(req: Request) {
 const partialRequests: Record<
     string,
     {
-        createdAt: number;
+        lastPageAt: number;
         payload: string;
     }
 > = {};
 
-/**
- * @swagger
- * /api/sync/update:
- *   put:
- *     summary: Push sync changes
- *     description:
- *       "Basic usage: set `pageCount = 1`, `pageIndex = 0`, and omit `requestId`. Supply your entity changes in the request body."
- *     operationId: sync-update
- *     externalDocs:
- *       description: Server implementation
- *       url: https://github.com/TriliumNext/Trilium/blob/v0.91.6/src/routes/api/sync.ts
- *     parameters:
- *       - in: header
- *         name: pageCount
- *         required: true
- *         schema:
- *           type: integer
- *       - in: header
- *         name: pageIndex
- *         required: true
- *         schema:
- *           type: integer
- *       - in: header
- *         name: requestId
- *         schema:
- *           type: string
- *           description: ID to identify paginated requests
- *       - in: query
- *         name: logMarkerId
- *         required: true
- *         schema:
- *           type: string
- *         description: Marker to identify this request in server log
- *     requestBody:
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             properties:
- *               instanceId:
- *                 type: string
- *                 description: Local instance ID
- *               entities:
- *                 type: array
- *                 items:
- *                   $ref: '#/components/schemas/EntityChange'
- *     responses:
- *       '200':
- *         description: Changes processed successfully
- *     security:
- *       - session: []
- *     tags:
- *       - sync
- */
 function update(req: Request) {
     let { body } = req;
 
@@ -332,23 +224,25 @@ function update(req: Request) {
 
         if (pageIndex === 0) {
             partialRequests[requestId] = {
-                createdAt: Date.now(),
+                lastPageAt: Date.now(),
                 payload: ""
             };
         }
 
-        if (!partialRequests[requestId]) {
+        const partialRequest = partialRequests[requestId];
+        if (!partialRequest) {
             throw new Error(`Partial request ${requestId}, page ${pageIndex + 1} of ${pageCount} of pages does not have expected record.`);
         }
 
-        partialRequests[requestId].payload += req.body;
+        partialRequest.lastPageAt = Date.now();
+        partialRequest.payload += req.body;
 
         getLog().info(`Receiving a partial request ${requestId}, page ${pageIndex + 1} out of ${pageCount} pages.`);
 
         if (pageIndex !== pageCount - 1) {
             return;
         }
-        body = JSON.parse(partialRequests[requestId].payload);
+        body = JSON.parse(partialRequest.payload);
         delete partialRequests[requestId];
     }
 
@@ -357,17 +251,19 @@ function update(req: Request) {
     getSql().transactional(() => syncUpdateService.updateEntities(entities, instanceId));
 }
 
-/* v8 ignore start -- module-level timer, not invoked in tests */
-setInterval(() => {
+/** Drops paged pushes that received no page for 20 minutes, which their client has abandoned. */
+export function cleanUpPartialRequests() {
     for (const key in partialRequests) {
-        if (Date.now() - partialRequests[key].createdAt > 20 * 60 * 1000) {
+        if (Date.now() - partialRequests[key].lastPageAt > 20 * 60 * 1000) {
             getLog().info(`Cleaning up unfinished partial requests for ${key}`);
 
             delete partialRequests[key];
         }
     }
-}, 60 * 1000);
-/* v8 ignore stop */
+}
+
+/* v8 ignore next -- module-level timer, not invoked in tests */
+setInterval(cleanUpPartialRequests, 60 * 1000);
 
 function syncFinished() {
     // after the first sync finishes, the application is ready to be used

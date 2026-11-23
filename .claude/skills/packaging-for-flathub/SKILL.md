@@ -55,6 +55,39 @@ pnpm exec tsx scripts/flatpak/generate-sources.mts ../org.triliumnotes.Trilium
 commit. The pinned commit must be **pushed** — Flathub clones `TriliumNext/Trilium` at
 that SHA.
 
+To build and run the Flathub recipe locally, without touching the packaging repo:
+
+```sh
+pnpm desktop:flathub-build   # scripts/flatpak/build-local.mts
+pnpm desktop:flathub-start
+```
+
+`build-local.mts` renders the same manifest into `apps/desktop/out/flathub/` with two
+changes, and installs it through `org.flatpak.Builder` for the user:
+
+- **The git source becomes a `type: dir` source over the working tree**, so uncommitted
+  changes are built and nothing needs committing or pushing. `skip` matches exact relative
+  paths, not patterns, so the script lists every path `git ls-files -z --others --ignored
+  --directory` reports (~200: each `node_modules`, `dist`, …). `.git` stays in: the
+  manifest's `chore:update-build-info --from-commit` reads `git log`. That is also why a
+  **linked worktree is refused** — its `.git` file points outside the sandbox.
+- **The app ID becomes `org.triliumnotes.Trilium.Test`**, with its own launcher ("Trilium
+  Notes (Test)"), `~/.var/app` data and portal autostart entry. An earlier version
+  installed a `local` branch of the release's ID instead; that shadowed a system-wide
+  release's launcher and let a dev run rewrite the release's autostart entry. The build
+  commands install the desktop file, metainfo and icons under the release's name, and the
+  manifest's `rename-desktop-file`/`rename-appdata-file`/`rename-icon` rename them and the
+  IDs inside them.
+
+`generated-sources.json` is regenerated only when the working tree's lockfile changes.
+Without `flatpak-node-generator` on PATH, the generator runs on the Builder's Python from
+`~/.cache/flatpak-builder-tools`, moved to the CI pin when it differs, raising aiohttp
+3.10's 8190-byte header limit, which GitHub's release responses exceed. The script drops
+`SOURCE_DATE_EPOCH` (a Nix shell's 1980 would date the export older than the installed
+commit) and passes `--delete-build-dirs`: a failed build otherwise leaves a ~5 GB copy
+of the repo under `.flatpak-builder/build/`, which `pnpm scripts:test` then also collects.
+A full build takes about ten minutes.
+
 ## Settled decisions and why (do not relitigate without new facts)
 
 - **From source, not repackaged.** The AppImage-extract fallback (Zettlr-style) exists
@@ -94,7 +127,15 @@ that SHA.
   That is also why the metainfo's `<releases>` — the version Flathub displays — has to be
   right in the commit that gets tagged. `pnpm chore:update-version` regenerates it from
   the newest five `vX.Y.Z` tags, so it is never hand-edited and never accumulates drift;
-  the version being prepared is dated today until its own tag supplies the date.
+  the version being prepared is dated today until its own tag supplies the date. Each entry
+  carries its release's notes, which Flathub requires: the overview paragraphs of
+  `docs/Release Notes/Release Notes/v<X.Y.Z>.md` (`releaseDescription()`), or for notes older
+  than the overview, their key-highlight titles or top-level entries, followed by the
+  Compatibility sentences `chore:release-notes` generates for a sync protocol or database
+  version change, and ending with "Also in
+  this release: N improvements and M bug fixes" counted from the note. An rc is written with
+  `type="development"`. The script fails when a listed version has no release note, so the note
+  is written before the bump.
 - **Sandboxed data dir, narrow filesystem access.** `trilium.sh` sets
   `TRILIUM_DATA_DIR` to `$XDG_DATA_HOME/trilium-data` (i.e. inside `~/.var/app`), falling
   back to host `~/.local/share/trilium-data` when that exists; a `flatpak override` wins.
@@ -209,6 +250,16 @@ build adjudicates it).
 - **What triggers a build**: `refs/pull/*/head` (test, publishes nothing), `master`
   (stable publish), `beta` (beta channel). A push to any other branch builds nothing — so
   a pull request is the only way to get a build without publishing.
+- **Every PR also gets a `flathub/permissions` status** from vorarbeiter, which
+  posts the built permissions to a review service in `flathub-infra/website`
+  (`backend/app/moderation/permission_rules.py`). It diffs the PR's permissions against the
+  published build: an addition is approved or rejected automatically when a moderator's
+  rule matches, otherwise it waits for a moderator. The rules are database rows only
+  moderators can list, so they cannot be mirrored. Rejected so far:
+  `--talk-name=org.freedesktop.secrets` (#3; `safeStorage` uses the Secret portal instead,
+  which works only where the desktop's `*-portals.conf` maps
+  `org.freedesktop.impl.portal.Secret` to a backend) and the two data-dir grants from
+  #10014.
 - Therefore **untagged commits go out as draft PRs to `master`** (shared `update/beta`
   branch, superseded per run) purely for the two-arch verdict. A real `beta` branch is
   for `-rc` tags with actual testers, and publishing there has no review gate.
@@ -251,5 +302,3 @@ build adjudicates it).
    + rounded corners), `<branding>` colors (leaf-green `#cfe8c0` light / `#254d18` dark;
    compare peers via `flathub.org/api/v2/appstream/<id>` → `.branding`), metainfo
    description refresh, and the `--no-playwright-browsers` flag worth filing upstream.
-   License stays `AGPL-3.0-only` until the repo reconciles package.json with the README's
-   v3+ grant.

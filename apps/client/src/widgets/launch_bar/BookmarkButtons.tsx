@@ -5,14 +5,18 @@ import { useContext, useMemo } from "preact/hooks";
 
 import type FNote from "../../entities/fnote";
 import { t } from "../../services/i18n";
-import { FormDropdownSubmenu, FormListItem } from "../react/FormList";
-import { useChildNotes, useNote, useNoteIcon, useNoteLabelBoolean } from "../react/hooks";
-import NoteLink from "../react/NoteLink";
+import { useChildNotes, useNoteLabelBoolean } from "../react/hooks/note";
+import { preloadLazyModule, useLazyModule } from "../react/LazyComponent";
 import ResponsiveContainer from "../react/ResponsiveContainer";
-import { CustomNoteLauncher, launchCustomNoteLauncher } from "./GenericButtons";
-import { LaunchBarContext, LaunchBarDropdownButton, launcherContextMenuHandler, LauncherNoteProps, useLauncherIconAndTitle } from "./launch_bar_widgets";
+import { CustomNoteLauncher } from "./GenericButtons";
+import {
+    LaunchBarContext, LaunchBarDropdownButton, launcherContextMenuHandler, LauncherNoteProps,
+    useLauncherIconAndTitle
+} from "./launch_bar_widgets";
 
 const PARENT_NOTE_ID = "_lbBookmarks";
+/** The most children a menu lists without a filter input above them. */
+export const MAX_UNFILTERED_CHILDREN = 15;
 
 export default function BookmarkButtons({ launcherNote }: LauncherNoteProps) {
     const { isHorizontalLayout } = useContext(LaunchBarContext);
@@ -41,6 +45,7 @@ export default function BookmarkButtons({ launcherNote }: LauncherNoteProps) {
                     launcherNote={launcherNote}
                     icon="bx bx-bookmark"
                     title={t("bookmark_buttons.bookmarks")}
+                    buttonProps={PRELOAD_MENU_PROPS}
                 >
                     {bookmarks}
                 </LaunchBarDropdownButton>
@@ -55,66 +60,58 @@ function SingleBookmark({ note }: { note: FNote }) {
         desktop={
             bookmarkFolder
                 ? <BookmarkFolder note={note} />
-                : <CustomNoteLauncher launcherNote={note} getTargetNoteId={() => note.noteId} />
+                : <CustomNoteLauncher
+                    launcherNote={note}
+                    getTargetNoteId={() => note.noteId}
+                    getOpenMode={getBookmarkOpenMode}
+                />
         }
-        mobile={<MobileBookmarkItem noteId={note.noteId} bookmarkFolder={bookmarkFolder} />}
+        mobile={<LazyMobileBookmarkItem noteId={note.noteId} bookmarkFolder={bookmarkFolder} />}
     />;
 }
 
-function MobileBookmarkItem({ noteId, bookmarkFolder }: { noteId: string, bookmarkFolder: boolean }) {
-    const note = useNote(noteId);
-    const noteIcon = useNoteIcon(note);
-    if (!note) return null;
-
-    return (
-        !bookmarkFolder
-            ? <FormListItem icon={noteIcon} onClick={(e) => launchCustomNoteLauncher(e, { launcherNote: note, getTargetNoteId: () => note.noteId })}>{note.title}</FormListItem>
-            : <MobileBookmarkFolder note={note} />
-    );
-}
-
-function MobileBookmarkFolder({ note }: { note: FNote }) {
-    const childNotes = useChildNotes(note.noteId);
-
-    return (
-        <FormDropdownSubmenu icon="bx bx-folder" title={note.title}>
-            {childNotes.map(childNote => (
-                <FormListItem
-                    key={childNote.noteId}
-                    icon={childNote.getIcon()}
-                    onClick={(e) => launchCustomNoteLauncher(e, { launcherNote: childNote, getTargetNoteId: () => childNote.noteId })}
-                >
-                    {childNote.title}
-                </FormListItem>
-            ))}
-        </FormDropdownSubmenu>
-    );
-}
-
-function BookmarkFolder({ note }: { note: FNote }) {
+/**
+ * A note with `#bookmarkFolder` in the launch bar, which opens a menu of the note and its
+ * children. `parentNoteId` is the launch bar section that shows it, see
+ * `ShowLauncherContextMenuOptions`.
+ */
+export function BookmarkFolder({ note, parentNoteId }: { note: FNote, parentNoteId?: string }) {
     const { icon, title } = useLauncherIconAndTitle(note);
     const childNotes = useChildNotes(note.noteId);
 
     return (
         <LaunchBarDropdownButton
-            panel
             launcherNote={note}
+            parentNoteId={parentNoteId}
             icon={icon}
             title={title}
+            filterable={childNotes.length > MAX_UNFILTERED_CHILDREN}
+            keepOrder
+            buttonProps={PRELOAD_MENU_PROPS}
         >
-            <div className="bookmark-folder-widget">
-                <div className="parent-note">
-                    <NoteLink notePath={note.noteId} noPreview showNoteIcon containerClassName="note-link" noTnLink />
-                </div>
-
-                <ul className="children-notes">
-                    {childNotes.map(childNote => (
-                        <li key={childNote.noteId}>
-                            <NoteLink notePath={childNote.noteId} noPreview showNoteIcon containerClassName="note-link" noTnLink />
-                        </li>
-                    ))}
-                </ul>
-            </div>
+            <LazyFolderRows note={note} />
         </LaunchBarDropdownButton>
     );
+}
+
+// The rows of the menus load once a menu is about to open.
+const loadBookmarkMenu = () => import("./BookmarkMenu");
+const PRELOAD_MENU_PROPS = {
+    onPointerEnter: () => preloadLazyModule(loadBookmarkMenu),
+    onFocus: () => preloadLazyModule(loadBookmarkMenu)
+};
+
+function LazyFolderRows({ note }: { note: FNote }) {
+    const bookmarkMenu = useLazyModule(loadBookmarkMenu);
+    return bookmarkMenu && <bookmarkMenu.FolderRows note={note} depth={0} />;
+}
+
+function LazyMobileBookmarkItem(props: { noteId: string, bookmarkFolder: boolean }) {
+    const bookmarkMenu = useLazyModule(loadBookmarkMenu);
+    return bookmarkMenu && <bookmarkMenu.MobileBookmarkItem {...props} />;
+}
+
+/** Where a click opens a bookmarked note, or one dropped onto the launch bar. */
+export function getBookmarkOpenMode(note: FNote) {
+    return note.getLabelValue("bookmarkOpenMode");
 }

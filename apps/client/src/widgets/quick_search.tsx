@@ -8,7 +8,7 @@ import { useEffect, useRef, useState } from "preact/hooks";
 
 import appContext from "../components/app_context";
 import { t } from "../services/i18n";
-import { calculateHash, type ViewScope } from "../services/link";
+import { calculateHash, type ViewScope } from "../services/navigation_state";
 import server from "../services/server";
 import type { ShortcutHintDefinition } from "../services/shortcut_hints";
 import { isMobile } from "../services/utils";
@@ -17,13 +17,13 @@ import { ExtendedAdmonition } from "./react/Admonition";
 import { AttributeSnippetBadges } from "./react/Badge";
 import Button from "./react/Button";
 import { focusListItem } from "./react/FormList";
-import { useTriliumEvent } from "./react/hooks";
+import { useTriliumEvent } from "./react/hooks/events";
 import Icon from "./react/Icon";
 import { pointerMoved } from "./react/menu_context";
 import OverlayControlGroup from "./react/OverlayControlGroup";
 import Popup from "./react/Popup";
 import RawHtml, { RawHtmlBlock } from "./react/RawHtml";
-import SearchStringEditor from "./ribbon/SearchStringEditor";
+import SearchStringEditor from "./search/SearchStringEditor";
 import { ShortcutHintOverlayButton } from "./shortcut_hints/shortcut_hint_button";
 
 /** The keys the results answer, beside the field's own, for the shortcut-hints pane. */

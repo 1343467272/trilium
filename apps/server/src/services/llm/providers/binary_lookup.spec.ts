@@ -3,16 +3,21 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // The login-shell read drives the real execFile through util.promisify's
 // callback fallback, so the mock receives (shell, args, options, callback).
-type ExecFileCallback = (err: Error | null, result?: { stdout: string; stderr: string }) => void;
+// `err` is unknown: a rejection that is no Error is passed through as it is.
+type ExecFileCallback = (err: unknown, result?: { stdout: string; stderr: string }) => void;
 const execFileMock = vi.hoisted(() => vi.fn<(binary: string, args: string[], options: object, cb: ExecFileCallback) => void>());
 vi.mock("child_process", () => ({ execFile: execFileMock }));
 
 const existsSyncMock = vi.hoisted(() => vi.fn((_path: string) => true));
-vi.mock("fs", () => ({ existsSync: existsSyncMock }));
+const writeFileSyncMock = vi.hoisted(() => vi.fn<(file: string, content: string) => void>());
+vi.mock("fs", () => ({ existsSync: existsSyncMock, mkdirSync: vi.fn(), writeFileSync: writeFileSyncMock, chmodSync: vi.fn() }));
+vi.mock("../../data_dir.js", () => ({ default: { TRILIUM_DATA_DIR: "/data" } }));
 
-vi.mock("@triliumnext/core", () => ({ getLog: () => ({ info: vi.fn(), error: vi.fn() }) }));
+const infoLogMock = vi.hoisted(() => vi.fn<(message: string) => void>());
+vi.mock("@triliumnext/core", () => ({ getLog: () => ({ info: infoLogMock, error: vi.fn() }) }));
+vi.mock("i18next", () => ({ t: (key: string, options: object) => `${key} ${JSON.stringify(options)}` }));
 
-const { extractPathFromShellEnv, findOnPath, needsShell, resetLoginShellPathCache } = await import("./binary_lookup.js");
+const { buildHostLauncher, describeFlatpakSandbox, extractPathFromShellEnv, findOnPath, needsShell, resetLoginShellPathCache } = await import("./binary_lookup.js");
 
 const NVM_BIN = path.join("/home/user", ".nvm", "versions", "node", "v24.19.0", "bin");
 const CLAUDE = path.join(NVM_BIN, "claude");
@@ -25,6 +30,7 @@ describe("findOnPath", () => {
     beforeEach(() => {
         resetLoginShellPathCache();
         execFileMock.mockReset();
+        infoLogMock.mockReset();
         existsSyncMock.mockReset();
         existsSyncMock.mockReturnValue(false);
         stubPlatform("linux");
@@ -117,6 +123,30 @@ describe("findOnPath", () => {
         expect(execFileMock).not.toHaveBeenCalled();
     });
 
+    it("asks the login shell once for a binary that is nowhere, and logs why a read failed", async () => {
+        process.env.PATH = "/usr/bin";
+        loginShellReports("/usr/bin");
+        await expect(findOnPath("claude")).resolves.toBeUndefined();
+        await expect(findOnPath("codex")).resolves.toBeUndefined();
+        expect(execFileMock).toHaveBeenCalledTimes(1);
+
+        // A rejection that is no Error is logged as it is.
+        resetLoginShellPathCache();
+        execFileMock.mockImplementation((_shell, _args, _options, cb) => cb("killed by SIGTERM"));
+        await expect(findOnPath("claude")).resolves.toBeUndefined();
+        expect(infoLogMock).toHaveBeenCalledWith(`Could not read PATH from the login shell "/bin/zsh" (killed by SIGTERM)`);
+    });
+
+    it("adopts the login shell's PATH as it is when none was inherited", async () => {
+        delete process.env.PATH;
+        existsSyncMock.mockImplementation((candidate: string) => candidate === CLAUDE);
+        loginShellReports([NVM_BIN, "/usr/bin"].join(path.delimiter));
+
+        await expect(findOnPath("claude")).resolves.toBe(CLAUDE);
+        expect(process.env.PATH).toBe([NVM_BIN, "/usr/bin"].join(path.delimiter));
+        expect(infoLogMock).toHaveBeenCalledWith(`Adopted PATH from the login shell to reach claude at ${CLAUDE}`);
+    });
+
     it("skips the login shell on Windows and probes the executable extensions", async () => {
         stubPlatform("win32");
         const dir = path.join("npm", "prefix");
@@ -156,5 +186,168 @@ describe("needsShell", () => {
         expect(needsShell("C:\\npm\\copilot.CMD")).toBe(true);
         expect(needsShell("/usr/bin/copilot")).toBe(false);
         expect(needsShell("C:\\npm\\copilot.exe")).toBe(false);
+    });
+});
+
+describe("inside a Flatpak", () => {
+    const LAUNCHER = path.resolve("/data", "flatpak-host", "claude");
+
+    beforeEach(() => {
+        resetLoginShellPathCache();
+        execFileMock.mockReset();
+        writeFileSyncMock.mockReset();
+        infoLogMock.mockReset();
+        process.env.FLATPAK_ID = "org.triliumnotes.Trilium";
+    });
+
+    afterEach(() => {
+        delete process.env.FLATPAK_ID;
+    });
+
+    /** Answers each `flatpak-spawn` call by the host command it runs; `{ fail }` rejects with a value that is no Error. */
+    function hostAnswers(answer: (hostArgs: string[]) => string | Error | { fail: unknown }) {
+        execFileMock.mockImplementation((binary, args, _options, cb) => {
+            expect(binary).toBe("flatpak-spawn");
+            const result = answer(args);
+            if (result instanceof Error) {
+                cb(result);
+            } else if (typeof result === "object") {
+                cb(result.fail);
+            } else {
+                cb(null, { stdout: result, stderr: "" });
+            }
+        });
+    }
+
+    const hostCalls = (marker: string) => execFileMock.mock.calls.filter(([ , args ]) => args.includes(marker));
+
+    it("finds the CLI on the host's PATH and returns a launcher for it", async () => {
+        hostAnswers((args) => (args.includes("command -v \"$1\"") ? "/usr/bin/claude\n" : ""));
+
+        await expect(findOnPath("claude")).resolves.toBe(LAUNCHER);
+        expect(execFileMock.mock.calls.map(([ , args ]) => args)).toEqual([
+            [ "--host", "true" ],
+            [ "--host", "sh", "-c", "command -v \"$1\"", "sh", "claude" ]
+        ]);
+        expect(writeFileSyncMock).toHaveBeenCalledWith(LAUNCHER, buildHostLauncher("/usr/bin/claude"));
+    });
+
+    it("falls back to the host's login shell, whose PATH the launcher then carries", async () => {
+        const loginPath = "/home/user/.nvm/bin:/usr/bin";
+        hostAnswers((args) => {
+            if (args.includes("--env=TERM=dumb")) {
+                return `__TRILIUM_SHELL_ENV__PATH=${loginPath}\n__TRILIUM_SHELL_ENV__`;
+            }
+            if (args.includes("command -v \"$1\"")) {
+                return args.includes(`--env=PATH=${loginPath}`) ? "/home/user/.nvm/bin/claude\n" : "";
+            }
+            return "";
+        });
+
+        await expect(findOnPath("claude")).resolves.toBe(LAUNCHER);
+        expect(writeFileSyncMock).toHaveBeenCalledWith(
+            LAUNCHER, buildHostLauncher("/home/user/.nvm/bin/claude", loginPath));
+    });
+
+    it("reports no CLI when the host has none, or `command -v` names a builtin or alias", async () => {
+        hostAnswers((args) => (args.includes("command -v \"$1\"") ? "claude\n" : ""));
+        await expect(findOnPath("claude")).resolves.toBeUndefined();
+        expect(writeFileSyncMock).not.toHaveBeenCalled();
+        // Asked on the session's PATH, then on the login shell's, which reported none.
+        expect(execFileMock.mock.calls.filter(([ , args ]) => args.includes("command -v \"$1\""))).toHaveLength(1);
+        expect(execFileMock.mock.calls.some(([ , args ]) => args.includes("--env=TERM=dumb"))).toBe(true);
+    });
+
+    it("checks the host and reads its login shell once, and finds nothing when both lookups fail", async () => {
+        hostAnswers((args) => {
+            if (args.includes("--env=TERM=dumb")) {
+                return new Error("Command failed: zsh timed out");
+            }
+            // `command -v` exits with 1 for a name it cannot find.
+            return args.includes("command -v \"$1\"") ? new Error("Command failed: exit code 1") : "";
+        });
+
+        await expect(findOnPath("claude")).resolves.toBeUndefined();
+        await expect(findOnPath("codex")).resolves.toBeUndefined();
+        expect(hostCalls("true")).toHaveLength(1);
+        expect(hostCalls("--env=TERM=dumb")).toHaveLength(1);
+        // Asked on the session's PATH only, as the login shell reported none.
+        expect(hostCalls("command -v \"$1\"").map(([ , args ]) => args.at(-1))).toEqual([ "claude", "codex" ]);
+        expect(writeFileSyncMock).not.toHaveBeenCalled();
+        expect(infoLogMock).toHaveBeenCalledWith("Could not read PATH from the host's login shell (Command failed: zsh timed out)");
+
+        resetLoginShellPathCache();
+        infoLogMock.mockReset();
+        hostAnswers((args) => (args.includes("--env=TERM=dumb") ? { fail: "terminated" } : ""));
+        await expect(findOnPath("claude")).resolves.toBeUndefined();
+        expect(infoLogMock).toHaveBeenCalledWith("Could not read PATH from the host's login shell (terminated)");
+    });
+
+    it("explains the override only when the sandbox blocks the host", async () => {
+        hostAnswers(() => new Error("Portal call failed: org.freedesktop.DBus.Error.ServiceUnknown"));
+        const message = await describeFlatpakSandbox("Claude Code");
+        expect(message).toBe(`llm_providers.flatpak_sandbox ${JSON.stringify({
+            cli: "Claude Code",
+            grantCommand: "flatpak override --user --talk-name=org.freedesktop.Flatpak org.triliumnotes.Trilium",
+            revokeCommand: "flatpak override --user --no-talk-name=org.freedesktop.Flatpak org.triliumnotes.Trilium"
+        })}`);
+        // The lookup stays on the sandbox's own PATH, where a CLI could still be.
+        expect(execFileMock.mock.calls.filter(([ , args ]) => args.includes("command -v \"$1\""))).toEqual([]);
+        expect(infoLogMock).toHaveBeenCalledWith("Running as a Flatpak that cannot start programs on the host (Portal call failed: org.freedesktop.DBus.Error.ServiceUnknown)");
+
+        resetLoginShellPathCache();
+        hostAnswers(() => ({ fail: "no portal" }));
+        await expect(describeFlatpakSandbox("Claude Code")).resolves.toBe(message);
+        expect(infoLogMock).toHaveBeenCalledWith("Running as a Flatpak that cannot start programs on the host (no portal)");
+
+        resetLoginShellPathCache();
+        hostAnswers(() => "");
+        await expect(describeFlatpakSandbox("Claude Code")).resolves.toBeUndefined();
+
+        delete process.env.FLATPAK_ID;
+        await expect(describeFlatpakSandbox("Claude Code")).resolves.toBeUndefined();
+    });
+});
+
+describe.skipIf(process.platform === "win32")("buildHostLauncher", () => {
+    it("runs the CLI through flatpak-spawn with the CLI's variables and a host directory", async () => {
+        const realFs = await vi.importActual<typeof import("fs")>("fs");
+        const { execFileSync } = await vi.importActual<typeof import("child_process")>("child_process");
+        const os = await vi.importActual<typeof import("os")>("os");
+        const dir = realFs.mkdtempSync(path.join(os.tmpdir(), "trilium-launcher-"));
+        try {
+            // A stand-in for flatpak-spawn that prints its directory and arguments.
+            const fakeSpawn = path.join(dir, "flatpak-spawn");
+            realFs.writeFileSync(fakeSpawn, "#!/bin/sh\npwd\nfor arg in \"$@\"; do printf '%s\\n' \"$arg\"; done\n");
+            realFs.chmodSync(fakeSpawn, 0o755);
+            const launcher = path.join(dir, "claude");
+            realFs.writeFileSync(launcher, buildHostLauncher("/opt/it's/claude", "/host/bin:/usr/bin"));
+            realFs.chmodSync(launcher, 0o755);
+
+            const home = realFs.mkdtempSync(path.join(dir, "home-"));
+            const output = execFileSync(launcher, [ "--print", "two words", "$HOME" ], {
+                cwd: dir,
+                encoding: "utf8",
+                env: {
+                    PATH: `${dir}:${process.env.PATH}`,
+                    HOME: home,
+                    CLAUDE_CODE_ENTRYPOINT: "sdk-ts \"quoted\" $(not run)",
+                    CODEX_HOME: "/data/codex-agent",
+                    UNRELATED: "left out"
+                }
+            });
+
+            const [ cwd, ...args ] = output.trimEnd().split("\n");
+            // `dir` is outside HOME, so the launcher moved to HOME first.
+            expect(cwd).toBe(home);
+            expect(args.slice(0, 3)).toEqual([ "--host", "--watch-bus", "--env=PATH=/host/bin:/usr/bin" ]);
+            expect(args.slice(-4)).toEqual([ "/opt/it's/claude", "--print", "two words", "$HOME" ]);
+            expect(args.slice(3, -4).sort()).toEqual([
+                "--env=CLAUDE_CODE_ENTRYPOINT=sdk-ts \"quoted\" $(not run)",
+                "--env=CODEX_HOME=/data/codex-agent"
+            ]);
+        } finally {
+            realFs.rmSync(dir, { recursive: true, force: true });
+        }
     });
 });

@@ -4,6 +4,8 @@ import os from "os";
 import path from "path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { AcpToolCallUpdate } from "./acp_agent.js";
+
 vi.mock("@triliumnext/core", () => ({
     getLog: () => ({ info: vi.fn(), error: vi.fn() }),
     // buildSystemPrompt reads the workspace task states; none in this unit test.
@@ -60,6 +62,10 @@ class FakeAcpClient {
     static lagLeft = 0;
     /** An error `session/new` fails with, when set. */
     static sessionFailure: Error | undefined;
+    /** The model state `session/new` reports, when set; `null` reports none. */
+    static sessionModels: Record<string, unknown> | null | undefined;
+    /** A `session/update` the agent sends while it answers `session/new`, when set. */
+    static notifyOnSessionNew: Record<string, unknown> | undefined;
     /** Runs while session/prompt is answered, as the agent's own notifications and requests do. */
     static onPrompt: ((client: FakeAcpClient) => Promise<void>) | undefined;
 
@@ -92,7 +98,13 @@ class FakeAcpClient {
         if (method === "session/new") {
             if (FakeAcpClient.sessionFailure) throw FakeAcpClient.sessionFailure;
             if (!FakeAcpClient.signedIn || FakeAcpClient.lagLeft-- > 0) throw new FakeAcpError(-32000, "Authentication required");
-            return { sessionId: "sess-1", models: { currentModelId: "gpt-6-luna[medium]", availableModels: REMOTE_MODELS } } as T;
+            if (FakeAcpClient.notifyOnSessionNew) {
+                this.onNotification?.("session/update", { sessionId: "sess-1", update: FakeAcpClient.notifyOnSessionNew });
+            }
+            const models = FakeAcpClient.sessionModels === undefined
+                ? { currentModelId: "gpt-6-luna[medium]", availableModels: REMOTE_MODELS }
+                : FakeAcpClient.sessionModels ?? undefined;
+            return { sessionId: "sess-1", models } as T;
         }
         if (method === "session/prompt") {
             await FakeAcpClient.onPrompt?.(this);
@@ -114,7 +126,8 @@ class FakeAcpClient {
 
 vi.mock("./acp_client.js", () => ({ AcpClient: FakeAcpClient, AcpError: FakeAcpError }));
 
-const { resetAcpAgentStateForTests } = await import("./acp_agent.js");
+const { AnnouncedMcpCalls, resetAcpAgentStateForTests } = await import("./acp_agent.js");
+const { ToolApprovals } = await import("@triliumnext/core/src/services/llm/tool_approval.js");
 const { buildCodexModelList, CitationStripper, CodexAgentProvider, decideCodexPermission, resetCodexCatalogForTests } = await import("./codex_agent.js");
 
 /** Part of the catalog codex-acp 1.13.1 reports on session/new for a ChatGPT account. */
@@ -152,6 +165,8 @@ beforeEach(() => {
     FakeAcpClient.accountLag = 0;
     FakeAcpClient.lagLeft = 0;
     FakeAcpClient.sessionFailure = undefined;
+    FakeAcpClient.sessionModels = undefined;
+    FakeAcpClient.notifyOnSessionNew = undefined;
     FakeAcpClient.onPrompt = undefined;
 });
 
@@ -247,6 +262,47 @@ describe("CodexAgentProvider", () => {
         await provider.generateTitle("plan my week");
         expect(pooled?.requests.filter(r => r.method === "session/set_model").at(-1)?.params).toEqual({ sessionId: "sess-1", modelId: "gpt-6-luna[low]" });
     });
+
+    it("titles on a lead model without levels by its id, and on Codex's own default without a catalog", async () => {
+        const titleModelFor = async (sessionModels: Record<string, unknown> | null) => {
+            resetAcpAgentStateForTests();
+            resetCodexCatalogForTests();
+            FakeAcpClient.sessionModels = sessionModels;
+            const provider = new CodexAgentProvider();
+            const chunks = await collect(provider.chatChunks([{ role: "user", content: "hi" }], {}));
+            expect(chunks.at(-1)?.type).toBe("done");
+            await provider.generateTitle("plan my week");
+            return FakeAcpClient.current?.requests.filter(r => r.method === "session/set_model").map(r => (r.params as { modelId?: string }).modelId);
+        };
+
+        expect(await titleModelFor({ availableModels: [ { modelId: "codex-mini", name: "Codex Mini" } ] })).toEqual([ "codex-mini" ]);
+        expect(await titleModelFor({ currentModelId: "gpt-6-luna[medium]", availableModels: [] })).toEqual([]);
+        expect(await titleModelFor(null)).toEqual([]);
+    });
+
+    it("ignores what the agent announces while the catalog is probed", async () => {
+        FakeAcpClient.notifyOnSessionNew = { sessionUpdate: "available_commands_update", availableCommands: [ { name: "review" } ] };
+        const models = await new CodexAgentProvider().listModels();
+        expect(models.map(m => m.id)).toEqual([ "default", "gpt-6-luna", "gpt-5.6-terra", "gpt-5.5" ]);
+    });
+
+    it("hides only the adapter's MCP startup calls, and shows a search without an id by its query", () => {
+        class ExposedCodexAgent extends CodexAgentProvider {
+            isInternal(update: AcpToolCallUpdate) {
+                return this.isInternalToolCall(update);
+            }
+
+            describeBuiltIn(update: AcpToolCallUpdate) {
+                return this.describeBuiltInTool(update);
+            }
+        }
+        const provider = new ExposedCodexAgent();
+        expect(provider.isInternal({ sessionUpdate: "tool_call", toolCallId: "mcp_startup.trilium" })).toBe(true);
+        expect(provider.isInternal({ sessionUpdate: "tool_call", toolCallId: "exec-1" })).toBe(false);
+        expect(provider.isInternal({ sessionUpdate: "tool_call" })).toBe(false);
+        expect(provider.describeBuiltIn({ sessionUpdate: "tool_call", kind: "search", rawInput: { type: "webSearch", query: "kernel" } }))
+            .toEqual({ toolName: "web_search", toolInput: { query: "kernel" } });
+    });
 });
 
 describe("buildCodexModelList", () => {
@@ -282,6 +338,15 @@ describe("buildCodexModelList", () => {
     it("keeps a model without a level in its id as it is", () => {
         expect(buildCodexModelList({ availableModels: [{ modelId: "codex-mini", name: "Codex Mini" }] })[1])
             .toEqual({ id: "codex-mini", name: "Codex Mini", pricing: { input: 0, output: 0 }, isSubscription: true });
+        // An unnamed model goes by its id; Codex's own default entry and one without an id are not listed again.
+        expect(buildCodexModelList({ availableModels: [{ modelId: "default", name: "Default" }, { modelId: "" }, { modelId: "codex-mini" }] }).map(m => [ m.id, m.name ]))
+            .toEqual([ [ "default", "Default" ], [ "codex-mini", "codex-mini" ] ]);
+    });
+
+    it("lists and pre-selects only the default entry for a catalog with no models", () => {
+        const models = buildCodexModelList({});
+        expect(models.map(m => m.id)).toEqual([ "default" ]);
+        expect([...new CodexAgentProvider().recommendedModelIds(models)]).toEqual([ "default" ]);
     });
 });
 
@@ -310,6 +375,20 @@ const ALLOWED = { outcome: { outcome: "selected", optionId: "allow_once" } };
 const DENIED = { outcome: { outcome: "selected", optionId: "cancel" } };
 
 describe("CodexAgentProvider note tools", () => {
+    it("tells the model where its note tools are inside `exec`, only in a chat with note access", async () => {
+        const firstPrompt = async (config: Record<string, unknown>) => {
+            resetAcpAgentStateForTests();
+            await collect(new CodexAgentProvider().chatChunks([{ role: "user", content: "hi" }], config));
+            const prompt = FakeAcpClient.current?.requests.find(r => r.method === "session/prompt")?.params as { prompt?: { text?: string }[] } | undefined;
+            return prompt?.prompt?.map(block => block.text ?? "").join("") ?? "";
+        };
+
+        const withTools = await firstPrompt({ enableNoteTools: true });
+        expect(withTools).toContain("tools.mcp__trilium__get_note_content");
+        expect(withTools.indexOf("tools.mcp__trilium__")).toBeLessThan(withTools.indexOf("</system_instructions>"));
+        expect(await firstPrompt({})).not.toContain("tools.mcp__trilium__");
+    });
+
     it("runs Trilium's note tools, shown by their name and result, and denies calls to any other MCP server", async () => {
         const answers: unknown[] = [];
         FakeAcpClient.onPrompt = async client => {
@@ -341,14 +420,88 @@ describe("CodexAgentProvider note tools", () => {
         ]);
     });
 
-    it("approves a call the adapter could not match to its announcement by the server it names", () => {
+    it("asks the turn's approvals about each note-tool call, and allows a request naming only the server when every waiting call is allowed", async () => {
+        const requests: { toolCallId: string; toolName: string; toolInput: Record<string, unknown> }[] = [];
+        const toolApprovals = new ToolApprovals();
+        // The user allows everything but the deletion.
+        toolApprovals.onRequest = (asked) => {
+            requests.push(asked);
+            queueMicrotask(() => toolApprovals.answer(asked.toolCallId, asked.toolName !== "delete_note"));
+        };
+        const answers: unknown[] = [];
+        const standalone = mcpApproval("elicitation:sess-1:trilium:1", { title: "MCP tool call approval", rawInput: { serverName: "trilium", description: "Allow?" } });
+        FakeAcpClient.onPrompt = async client => {
+            const update = (u: Record<string, unknown>) => client.onNotification?.("session/update", { sessionId: "sess-1", update: u });
+            const ask = async (request: unknown) => answers.push(await client.onAgentRequest?.("session/request_permission", request));
+            const finish = (toolCallId: string) => update({ sessionUpdate: "tool_call_update", toolCallId, status: "completed", rawOutput: "done" });
+
+            update(mcpToolCall("exec-1", "trilium", "get_note", { noteId: "a" }));
+            await ask(mcpApproval("exec-1"));
+            update(mcpToolCall("exec-2", "trilium", "delete_note", { noteId: "b" }));
+            await ask(mcpApproval("exec-2"));
+            finish("exec-1");
+            finish("exec-2");
+
+            // Two calls wait at once, and the adapter cannot tell which one asks.
+            update(mcpToolCall("exec-3", "trilium", "get_note", { noteId: "c" }));
+            update(mcpToolCall("exec-4", "trilium", "rename_note", { noteId: "c", newTitle: "C" }));
+            await ask(standalone);
+            await ask(standalone);
+            finish("exec-3");
+            finish("exec-4");
+
+            update(mcpToolCall("exec-5", "trilium", "get_note", { noteId: "d" }));
+            update(mcpToolCall("exec-6", "trilium", "delete_note", { noteId: "d" }));
+            await ask(standalone);
+        };
+
+        await collect(new CodexAgentProvider().chatChunks([{ role: "user", content: "hi" }], { enableNoteTools: true, toolApprovals }));
+
+        expect(answers).toEqual([ ALLOWED, DENIED, ALLOWED, ALLOWED, DENIED ]);
+        // Each call is asked about once, by the name and arguments it was announced with.
+        expect(requests).toEqual([
+            { toolCallId: "exec-1", toolName: "get_note", toolInput: { noteId: "a" } },
+            { toolCallId: "exec-2", toolName: "delete_note", toolInput: { noteId: "b" } },
+            { toolCallId: "exec-3", toolName: "get_note", toolInput: { noteId: "c" } },
+            { toolCallId: "exec-4", toolName: "rename_note", toolInput: { noteId: "c", newTitle: "C" } },
+            { toolCallId: "exec-5", toolName: "get_note", toolInput: { noteId: "d" } },
+            { toolCallId: "exec-6", toolName: "delete_note", toolInput: { noteId: "d" } }
+        ]);
+    });
+
+    it("asks only about the calls of the session that sends the request", async () => {
+        const mcpCalls = new AnnouncedMcpCalls();
+        const announce = (sessionId: string, toolCallId: string, tool: string) =>
+            mcpCalls.observe("session/update", { sessionId, update: mcpToolCall(toolCallId, "trilium", tool, {}) });
+        announce("sess-1", "exec-1", "get_note");
+        announce("sess-1", "exec-2", "get_note");
+        announce("sess-2", "exec-3", "delete_note");
+        // The same call id in another session is another call.
+        announce("sess-2", "exec-1", "delete_note");
+        const asked: string[] = [];
+        const toolApprovals = new ToolApprovals();
+        toolApprovals.onRequest = (request) => {
+            asked.push(`${request.toolCallId}:${request.toolName}`);
+            queueMicrotask(() => toolApprovals.answer(request.toolCallId, true));
+        };
+
+        const standalone = mcpApproval("elicitation:sess-1:trilium:1", { title: "MCP tool call approval", rawInput: { serverName: "trilium" } });
+        expect(await decideCodexPermission(standalone, "test", { mcpCalls, toolApprovals })).toEqual(ALLOWED);
+        expect(asked).toEqual([ "exec-1:get_note", "exec-2:get_note" ]);
+
+        const fromSecond = { ...mcpApproval("exec-1"), sessionId: "sess-2" };
+        expect(await decideCodexPermission(fromSecond, "test", { mcpCalls, toolApprovals })).toEqual(ALLOWED);
+        expect(asked).toEqual([ "exec-1:get_note", "exec-2:get_note", "exec-1:delete_note" ]);
+    });
+
+    it("outside a chat turn, approves a call the adapter could not match to its announcement by the server it names", async () => {
         const standalone = (serverName: string) => ({
             ...mcpApproval("elicitation:sess-1:trilium:1", { title: "MCP tool call approval", rawInput: { serverName, description: "Allow?" } })
         });
-        expect(decideCodexPermission(standalone("trilium"), "test")).toEqual(ALLOWED);
+        expect(await decideCodexPermission(standalone("trilium"), "test")).toEqual(ALLOWED);
         expect(decideCodexPermission(standalone("codex_apps"), "test")).toEqual(DENIED);
         // No one-shot allow on offer: nothing is approved permanently.
-        expect(decideCodexPermission({ ...standalone("trilium"), options: MCP_APPROVAL_OPTIONS.slice(1) }, "test")).toEqual(DENIED);
+        expect(await decideCodexPermission({ ...standalone("trilium"), options: MCP_APPROVAL_OPTIONS.slice(1) }, "test")).toEqual(DENIED);
     });
 });
 
@@ -422,6 +575,51 @@ describe("CodexAgentProvider web search", () => {
         expect(searching.filter(c => c.type === "citation")).toEqual([
             { type: "citation", citation: { title: "Vremea \u00een Sibiu", url: "https://www.celsium.ro/vremea-sibiu" } }
         ]);
+    });
+});
+
+describe("CodexAgentProvider hook outside a chat turn", () => {
+    class ExposedCodexAgent extends CodexAgentProvider {
+        describeBuiltIn(update: AcpToolCallUpdate) {
+            return this.describeBuiltInTool(update);
+        }
+    }
+    const WEB_SEARCH_OFF = { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: "Web search is turned off for this chat." } };
+    const announced = (toolCallId: string) => ({ sessionUpdate: "tool_call", toolCallId, kind: "search", rawInput: { type: "webSearch", query: "" } });
+
+    async function launchedHook() {
+        const provider = new ExposedCodexAgent();
+        await collect(provider.chatChunks([{ role: "user", content: "hi" }], {}));
+        const hook = getAcpHookEndpointUrlMock.mock.calls.at(-1)?.[1];
+        if (!hook) {
+            throw new Error("the provider registered no hook");
+        }
+        return { provider, hook };
+    }
+
+    it("takes a search's results without keeping them, and shows a page opened by a result id without its URL", async () => {
+        const { provider, hook } = await launchedHook();
+        expect(await hook({
+            hook_event_name: "PostToolUse", session_id: "sess-1", tool_name: "webrun",
+            tool_response: [ { type: "input_text", text: "Kernel (https://www.kernel.org/)\nciteturn1search0" } ]
+        })).toEqual({});
+
+        // With no session, or a session no turn runs in, the result id cannot be looked up.
+        const open = { hook_event_name: "PreToolUse", tool_name: "webrun", tool_input: { open: [ { ref_id: "turn1search0" } ] } };
+        expect(await hook({ ...open, tool_use_id: "web-1" })).toEqual(WEB_SEARCH_OFF);
+        expect(await hook({ ...open, tool_use_id: "web-2", session_id: "sess-1" })).toEqual(WEB_SEARCH_OFF);
+        expect(provider.describeBuiltIn(announced("web-1"))).toEqual({ toolName: "read_web_page", toolInput: {} });
+        expect(provider.describeBuiltIn(announced("web-2"))).toEqual({ toolName: "read_web_page", toolInput: {} });
+    });
+
+    it("forgets the oldest recorded call once more than 200 have not finished", async () => {
+        const { provider, hook } = await launchedHook();
+        for (let i = 0; i <= 200; i++) {
+            await hook({ hook_event_name: "PreToolUse", tool_name: "webrun", tool_use_id: `web-${i}`, tool_input: { search_query: [ { q: `query ${i}` } ] } });
+        }
+        expect(provider.describeBuiltIn(announced("web-0"))).toEqual({ toolName: "web_search", toolInput: {} });
+        expect(provider.describeBuiltIn(announced("web-1"))).toEqual({ toolName: "web_search", toolInput: { query: "query 1" } });
+        expect(provider.describeBuiltIn(announced("web-200"))).toEqual({ toolName: "web_search", toolInput: { query: "query 200" } });
     });
 });
 

@@ -1,16 +1,16 @@
 import { useState } from "preact/hooks";
 
-import { useTriliumEvent } from "../react/hooks.jsx";
-import { ContentLanguagesModal } from "../ribbon/BasicPropertiesTab.jsx";
+import { t } from "../../services/i18n";
+import { useTriliumEvent } from "../react/hooks/events.js";
+import Modal from "../react/Modal";
+import { ContentLanguagesCard } from "../type_widgets/options/content_languages_card";
 
 /**
  * The content-languages modal, summoned by a command rather than owned by whatever offers it.
  *
- * The ribbon and the status bar each hold their own copy behind a `useState`, which works because
- * both are components sitting next to the switcher they belong to. The AI assistant's Translate
- * submenu is neither: it is a CKEditor menu and a right-click menu, both built imperatively, with
- * nowhere to hang a modal. So the dialog joins the registry in `layout_commons`, where a command is
- * all it takes to raise one.
+ * The status bar's language switcher holds its own copy behind a `useState`. The AI assistant's
+ * Translate submenu is built imperatively by CKEditor and the context menu, so it has nowhere to
+ * mount a modal; it raises this one with the `showContentLanguagesDialog` command instead.
  */
 export default function ContentLanguagesDialog() {
     const [ shown, setShown ] = useState(false);
@@ -18,4 +18,17 @@ export default function ContentLanguagesDialog() {
     useTriliumEvent("showContentLanguagesDialog", () => setShown(true));
 
     return <ContentLanguagesModal modalShown={shown} setModalShown={setShown} />;
+}
+
+export function ContentLanguagesModal({ modalShown, setModalShown }: { modalShown: boolean, setModalShown: (shown: boolean) => void }) {
+    return (
+        <Modal
+            className="content-languages-modal"
+            title={t("content_language.title")}
+            show={modalShown} onHidden={() => setModalShown(false)}
+            size="md" scrollable
+        >
+            <ContentLanguagesCard />
+        </Modal>
+    );
 }

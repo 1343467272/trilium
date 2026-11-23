@@ -13,7 +13,7 @@ import tree from "../../services/tree";
 import branches from "../../services/branches";
 import toast from "../../services/toast";
 import NoteList from "../react/NoteList";
-import { useTriliumEvent } from "../react/hooks";
+import { useTriliumEvent } from "../react/hooks/events";
 
 export default function CloneToDialog() {
     const [ clonedNoteIds, setClonedNoteIds ] = useState<string[]>();
@@ -65,7 +65,7 @@ export default function CloneToDialog() {
                 <Button text={t("clone_to.clone_to_selected_note")} keyboardShortcut="Enter" />
             </>}
             onSubmit={onSubmit}
-            onShown={() => autocompleteRef.current?.showRecentNotes()}
+            onShown={() => autocompleteRef.current?.focus()}
             onHidden={() => setShown(false)}
             show={shown}
         >

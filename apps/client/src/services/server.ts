@@ -1,5 +1,8 @@
+import type { StandaloneApi } from "@triliumnext/commons";
+
 import { t } from "./i18n.js";
 import { getSetupAuthToken } from "./setup_auth.js";
+import { takeStartupResponse } from "./startup_requests.js";
 import utils, { isShare } from "./utils.js";
 import ValidationError from "./validation_error.js";
 
@@ -48,21 +51,46 @@ async function getWithSilentNotFound<T>(url: string, componentId?: string) {
 
 /**
  * @param raw if `true`, the value will be returned as a string instead of a JavaScript object if JSON, XMLDocument if XML, etc.
+ * @param silence suppresses the error toast for a 400, a 404 or a 409, for a caller that shows the
+ * failure itself.
  */
-async function get<T>(url: string, componentId?: string, raw?: boolean) {
-    return await call<T>("GET", url, componentId, { raw });
+async function get<T>(
+    url: string, componentId?: string, raw?: boolean,
+    silence?: Pick<CallOptions, "silentBadRequest" | "silentNotFound" | "silentConflict">
+) {
+    return await call<T>("GET", url, componentId, { raw, ...silence });
+}
+
+/** Gets without an error toast for a 400, 404 or 500, for a caller that handles the failure. */
+async function getWithSilentErrors<T>(url: string, componentId?: string, raw?: boolean) {
+    return await call<T>("GET", url, componentId, {
+        raw, silentBadRequest: true, silentNotFound: true, silentInternalServerError: true
+    });
 }
 
 async function getWithSilentUnauthorized<T>(url: string, componentId?: string) {
     return await call<T>("GET", url, componentId, { silentUnauthorized: true });
 }
 
-async function post<T>(url: string, data?: unknown, componentId?: string) {
-    return await call<T>("POST", url, componentId, { data });
+/** @param silence suppresses the error toast for a 409, for a caller that handles the conflict. */
+async function post<T>(
+    url: string, data?: unknown, componentId?: string, silence?: Pick<CallOptions, "silentConflict">
+) {
+    return await call<T>("POST", url, componentId, { data, ...silence });
 }
 
 async function postWithSilentInternalServerError<T>(url: string, data?: unknown, componentId?: string) {
     return await call<T>("POST", url, componentId, { data, silentInternalServerError: true });
+}
+
+/**
+ * Posts without an error toast for a 400, 404, 409 or 500, for a caller that handles the failure.
+ */
+async function postWithSilentErrors<T>(url: string, data?: unknown, componentId?: string) {
+    return await call<T>("POST", url, componentId, {
+        data, silentBadRequest: true, silentNotFound: true, silentConflict: true,
+        silentInternalServerError: true
+    });
 }
 
 /**
@@ -82,8 +110,11 @@ async function postWithTimeout<T>(url: string, timeoutMs: number, data?: unknown
     return await call<T>("POST", url, componentId, { data, timeoutMs, ...silence });
 }
 
-async function put<T>(url: string, data?: unknown, componentId?: string) {
-    return await call<T>("PUT", url, componentId, { data });
+/** @param silence suppresses the error toast for a 409, for a caller that handles the conflict. */
+async function put<T>(
+    url: string, data?: unknown, componentId?: string, silence?: Pick<CallOptions, "silentConflict">
+) {
+    return await call<T>("PUT", url, componentId, { data, ...silence });
 }
 
 async function patch<T>(url: string, data: unknown, componentId?: string) {
@@ -95,19 +126,14 @@ async function remove<T>(url: string, componentId?: string) {
 }
 
 async function upload(url: string, fileToUpload: File, componentId?: string, method = "PUT") {
-    const formData = new FormData();
-    formData.append("upload", fileToUpload);
-
-    const doUpload = async () => $.ajax({
-        url: window.glob.baseApiUrl + url,
+    const doUpload = async () => uploadForm(url, {
+        method,
         headers: await getHeaders(componentId ? {
             "trilium-component-id": componentId
         } : undefined),
-        data: formData,
-        type: method,
-        timeout: 60 * 60 * 1000,
-        contentType: false, // NEEDED, DON'T REMOVE THIS
-        processData: false // NEEDED, DON'T REMOVE THIS
+        fields: {},
+        file: fileToUpload,
+        timeoutMs: UPLOAD_TIMEOUT
     });
 
     try {
@@ -121,6 +147,107 @@ async function upload(url: string, fileToUpload: File, componentId?: string, met
         }
         throw e;
     }
+}
+
+export interface UploadFormOptions {
+    method: string;
+    headers: Headers;
+    fields: Record<string, string>;
+    /** Sent as the form's `upload` field. */
+    file: File;
+    timeoutMs: number;
+    /** Passed to jQuery, which otherwise picks a parser from the response's content type. */
+    dataType?: "json";
+}
+
+/** What `uploadForm()` rejects with on an error status: the fields of a jqXHR that callers read. */
+export interface UploadFormError {
+    status: number;
+    responseText: string;
+}
+
+const UPLOAD_TIMEOUT = 60 * 60 * 1000;
+
+/**
+ * Sends a multipart form carrying one file and resolves with the parsed response. The standalone
+ * leader tab hands the `File` to its worker through `standaloneApi.localUpload`, so the page never
+ * reads it and an import can read a zip one entry at a time; everywhere else it goes out as an XHR.
+ * Rejects with an {@link UploadFormError} on an error status.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- the parsed body of whatever the route answers, as `$.ajax` gives it
+async function uploadForm(url: string, options: UploadFormOptions): Promise<any> {
+    const headers: Record<string, string> = {};
+    for (const [ name, value ] of Object.entries(options.headers)) {
+        if (value) {
+            headers[name] = value;
+        }
+    }
+
+    const localUpload = getLocalUpload();
+    if (localUpload) {
+        return await localUploadForm(localUpload, url, headers, options);
+    }
+
+    const formData = new FormData();
+    formData.append("upload", options.file);
+    for (const [ name, value ] of Object.entries(options.fields)) {
+        formData.append(name, value);
+    }
+
+    return await $.ajax({
+        url: window.glob.baseApiUrl + url,
+        headers,
+        data: formData,
+        type: options.method,
+        dataType: options.dataType,
+        timeout: options.timeoutMs,
+        contentType: false, // NEEDED, DON'T REMOVE THIS
+        processData: false // NEEDED, DON'T REMOVE THIS
+    });
+}
+
+/** The standalone leader tab's in-page upload to its worker, or `undefined` elsewhere. */
+function getLocalUpload() {
+    return USE_LOCAL_FETCH ? window.standaloneApi?.localUpload : undefined;
+}
+
+async function localUploadForm(
+    localUpload: NonNullable<StandaloneApi["localUpload"]>,
+    url: string,
+    headers: Record<string, string>,
+    options: UploadFormOptions
+): Promise<unknown> {
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+    const expiry = new Promise<never>((_, rej) => {
+        timeoutHandle = setTimeout(
+            () => rej(new Error(`Timed out after ${options.timeoutMs}ms: ${options.method} ${url}`)),
+            options.timeoutMs
+        );
+    });
+
+    let resp: globalThis.Response;
+    try {
+        resp = await Promise.race([
+            localUpload(window.glob.baseApiUrl + url, {
+                method: options.method,
+                headers,
+                fields: options.fields,
+                file: options.file
+            }),
+            expiry
+        ]);
+    } finally {
+        clearTimeout(timeoutHandle);
+    }
+
+    const responseText = await resp.text();
+    if (!resp.ok) {
+        throw { status: resp.status, responseText } satisfies UploadFormError;
+    }
+    if ((resp.headers.get("content-type") ?? "").includes("json")) {
+        return responseText ? JSON.parse(responseText) : null;
+    }
+    return responseText;
 }
 
 let maxKnownEntityChangeId = 0;
@@ -172,6 +299,8 @@ interface CallOptions {
     silentInternalServerError?: boolean;
     /** Suppresses the error toast for a 400, for callers that show the server's message themselves. */
     silentBadRequest?: boolean;
+    /** Suppresses the error toast for a 409, for callers that handle the conflict themselves. */
+    silentConflict?: boolean;
     /** Suppresses the generic error toast for a 401, for callers that present the failure themselves
      *  (e.g. the OneNote import dialog showing an expired connection inline, with the server's reason). */
     silentUnauthorized?: boolean;
@@ -209,19 +338,43 @@ async function call<T>(method: string, url: string, componentId?: string, option
     });
     const { data } = options;
 
+    if (method === "GET" && !options.raw) {
+        const startup = await takeStartupBody(url);
+        if (startup) return startup.body as T;
+    }
+
     // In Electron the page is loaded from the `trilium-app://` custom
     // protocol, whose handler routes everything through the same Express
     // app the browser build talks to over HTTP. So a single $.ajax path
     // covers both — no IPC bridge needed.
     const resp = await ajax(url, method, data, headers, options);
-
-    const maxEntityChangeIdStr = resp.headers["trilium-max-entity-change-id"];
-
-    if (maxEntityChangeIdStr && maxEntityChangeIdStr.trim()) {
-        maxKnownEntityChangeId = Math.max(maxKnownEntityChangeId, parseInt(maxEntityChangeIdStr));
-    }
+    recordMaxEntityChangeId(resp.headers["trilium-max-entity-change-id"]);
 
     return resp.body as T;
+}
+
+/**
+ * The body of the request `index.ts` started for `url` as the app started, if it did and the
+ * request succeeded; otherwise `call()` sends the request itself, reporting any failure.
+ */
+async function takeStartupBody(url: string): Promise<{ body: unknown } | undefined> {
+    const request = takeStartupResponse(url);
+    if (!request) return;
+
+    try {
+        const response = await request;
+        if (!response.ok) return;
+        recordMaxEntityChangeId(response.headers.get("trilium-max-entity-change-id"));
+        return { body: await response.json() };
+    } catch {
+        return;
+    }
+}
+
+function recordMaxEntityChangeId(header: string | null | undefined) {
+    if (header?.trim()) {
+        maxKnownEntityChangeId = Math.max(maxKnownEntityChangeId, parseInt(header));
+    }
 }
 
 function ajax(url: string, method: string, data: unknown, headers: Headers, opts: CallOptions): Promise<Response> {
@@ -289,6 +442,8 @@ function ajax(url: string, method: string, data: unknown, headers: Headers, opts
                 } else if (opts.silentUnauthorized && jqXhr.status === 401) {
                     // report nothing
                 } else if (opts.silentBadRequest && jqXhr.status === 400) {
+                    // report nothing
+                } else if (opts.silentConflict && jqXhr.status === 409) {
                     // report nothing
                 } else {
                     try {
@@ -386,7 +541,8 @@ async function localAjax(
         const silenced = (opts.silentNotFound && resp.status === 404)
             || (opts.silentInternalServerError && resp.status === 500)
             || (opts.silentUnauthorized && resp.status === 401)
-            || (opts.silentBadRequest && resp.status === 400);
+            || (opts.silentBadRequest && resp.status === 400)
+            || (opts.silentConflict && resp.status === 409);
 
         if (!silenced) {
             try {
@@ -447,16 +603,20 @@ async function reportError(method: string, url: string, statusCode: number, resp
 export default {
     get,
     getWithSilentNotFound,
+    getWithSilentErrors,
     getWithSilentUnauthorized,
     getWithTimeout,
     post,
+    postWithSilentErrors,
     postWithSilentInternalServerError,
     postWithTimeout,
     put,
     patch,
     remove,
     upload,
+    uploadForm,
     // don't remove, used from CKEditor image upload!
     getHeaders,
+    getLocalUpload,
     getMaxKnownEntityChangeId: () => maxKnownEntityChangeId
 };

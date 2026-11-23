@@ -66,6 +66,7 @@ Getting this wrong is the most common mistake, and `add` warns when a key's sect
 
 - **`entry` exists for weight.** The three pre-login pages call `initLocale(locale, "entry")` and read ~12 KB instead of the app's 226 KB — which matters because the wizard reloads the catalogue every time the user picks a language. Put a `login.*` / `set_password.*` / `setup.*` key in `client` and the pre-login pages simply will not find it.
 - **The app loads both** `client` and `entry` with `fallbackNS: "entry"`, so a call site writes `t("login.password")` without caring which file holds it. Only the *new* key has to go in the right place.
+- **The browser never loads English as a fallback.** `translation-catalogues.mts` (a Vite plugin in `apps/client`, also registered by standalone) serves each `client` and `entry` catalogue completed with the English strings its language lacks, and plural keys get every form the language uses. A build writes the merged files to `dist/translations/`; the dev server merges a catalogue when it is requested. The source files stay exactly Weblate's, so a served catalogue is larger than the file in `src/translations/`, and `initLocale()` sets `fallbackLng: false` with `load: "currentOnly"`.
 - **`server.json` is misnamed** — it is the catalogue for every runtime outside the browser UI. A `t()` call added to `trilium-core` resolves in server, desktop **and** standalone with no extra work (`apps/standalone/vite.config.mts` copies `apps/server/src/assets/**` and the worker loads it with `ns: "server"`). Don't assume a core string needs a fallback to work in the browser build.
 
 Client code imports `t` from `../services/i18n`; server, desktop and core import it from `i18next` directly.
@@ -83,6 +84,12 @@ node $S add client dialog.my_thing "Save changes"
 - **Catalogue routing** — when the key's section doesn't exist in the catalogue you named but does in another.
 
 `add` refuses to overwrite an existing key (`--force` to override) and refuses to nest under one that is already a string.
+
+A menu label ends in "..." when its item opens a dialog, prompt, chooser or confirm (see "Dropdowns: menus and panels" in the `building-client-ui` skill). For that reason, don't reuse a menu label's key as the title of the dialog it opens. Add a second key without the "..." instead, for example `board_view.properties` and `board_view.properties-title`.
+
+A menu label is a noun when its item opens a place or toggles a mode (_Backend log_, _Fullscreen_), and a verb only when it acts (_Reload frontend_, _Log out_). The full rule is in the same section of `building-client-ui`.
+
+**To reword an existing string, change its English value and keep its key**, even when the key names the old text (`global_menu.show_backend_log` → "Backend log"). Renaming the key drops the string from every locale's catalogue, so each one falls back to English until Weblate catches up. Keeping the key leaves the old translations showing until translators update them. Then update the User Guide pages that quote the old text (`docs.mjs impact --diff`, or grep `docs/User Guide` for the old phrase, since a common noun gives `impact` many false hits).
 
 Then use it: `t("dialog.my_thing")`. Only `en/` changes — Weblate carries the string to the other locales, and you should **not** hand-edit the other ~38 locale files.
 
@@ -188,3 +195,4 @@ That is the repo's only translation test: valid JSON, no duplicate keys, plus th
 ## Related
 
 - **translating-locales** — filling in a lagging non-English locale: measuring coverage, exporting work lists, placeholder validation, plural categories per locale, and how Weblate sync works. Use that skill, not this one, when the task is "bring `<locale>` to 100%".
+- **adding-a-display-language** — making a new language selectable: registering it in `LOCALES`, the per-library mappings, and the Electron locale check.

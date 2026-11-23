@@ -14,6 +14,7 @@ import { RESOURCE_DIR } from "@triliumnext/server/src/services/resource_dir.js";
 import WebSocketMessagingProvider from "@triliumnext/server/src/services/ws_messaging_provider.js";
 import BetterSqlite3Provider from "@triliumnext/server/src/sql_provider.js";
 import NodejsZipProvider from "@triliumnext/server/src/zip_provider.js";
+import { spawn } from "child_process";
 import { app, BrowserWindow,globalShortcut } from "electron";
 import electronDebug from "electron-debug";
 import electronDl from "electron-dl";
@@ -41,11 +42,12 @@ import {
 } from "./services/backup_passphrase";
 import { setupOneNoteHandlers } from "./services/onenote";
 import { setupPrintingHandlers } from "./services/printing";
-import ElectronRequestProvider from "./services/request";
+import ElectronRequestProvider, { setupResourceDownloads } from "./services/request";
 import { setupRestoreHandlers } from "./services/restore";
 import { getSecuritySettings, registerSecurityIpcHandlers } from "./services/security_settings";
 import { setupShellHandlers } from "./services/shell";
 import { markStartupMetric, setupStartupMetricsIpc } from "./services/startup_metrics";
+import { setupTranscriptionHandlers } from "./services/transcription";
 import { setupSystemTray } from "./services/tray";
 import windowService, { setupWindowing } from "./services/window";
 
@@ -80,8 +82,7 @@ export async function main() {
     setupTriliumAppProtocol(expressAppPromise);
 
     // Prevent Trilium starting twice on first install and on uninstall for the Windows installer.
-    /* v8 ignore next 3 -- squirrel uses a CJS require() that vi.mock cannot intercept, so the truthy/exit path is un-coverable in unit tests */
-    if ((require("electron-squirrel-startup")).default) {
+    if (handleSquirrelEvent()) {
         process.exit(0);
     }
 
@@ -110,7 +111,14 @@ export async function main() {
 
         // Enable global shortcuts in Flatpak
         // the app runs in a Wayland session.
-        app.commandLine.appendSwitch("enable-features", "GlobalShortcutsPortal");
+        const features = [ "GlobalShortcutsPortal" ];
+        // The Flatpak sandbox has no access to the Secret Service, so `safeStorage` encrypts
+        // with the per-app key of the Secret portal. Data encrypted this way needs the flag
+        // kept on.
+        if (process.env.FLATPAK_ID) {
+            features.push("SecretPortalKeyProviderUseForEncryption");
+        }
+        app.commandLine.appendSwitch("enable-features", features.join(","));
     }
 
     // Quit when all windows are closed, except on macOS. There, it's common
@@ -143,6 +151,8 @@ export async function main() {
     registerSecurityIpcHandlers();
     registerBackupPassphraseIpcHandlers();
     setupStartupMetricsIpc();
+    setupResourceDownloads();
+    setupTranscriptionHandlers();
 
     app.on("will-quit", () => {
         globalShortcut.unregisterAll();
@@ -266,7 +276,7 @@ export async function main() {
         messaging,
         schema: loadCoreSchema(),
         platform: new DesktopPlatformProvider(),
-        translations: (await import("@triliumnext/server/src/services/i18n.js")).initializeTranslations,
+        translations: (await import("@triliumnext/server/src/services/i18n.js")).initializeTranslationsWithParams,
         // demo.zip is a server-owned asset; src/assets is copied to dist/assets
         // by the build script, so the same RESOURCE_DIR-relative path works in
         // both source and bundled-production modes.
@@ -329,6 +339,36 @@ function readDbOption(provider: BetterSqlite3Provider, name: string): string | n
     } catch {
         return null;
     }
+}
+
+/**
+ * Handles the `--squirrel-*` argument the Squirrel.Windows installer launches the app with: on
+ * install, update or uninstall, `Update.exe` (one directory above the versioned app directory)
+ * creates or removes the shortcuts. Returns `true` when the app was launched for such an event and
+ * must exit instead of starting.
+ */
+function handleSquirrelEvent() {
+    if (process.platform !== "win32") {
+        return false;
+    }
+
+    const target = path.basename(process.execPath);
+    const actions: Record<string, string | null> = {
+        "--squirrel-install": `--createShortcut=${target}`,
+        "--squirrel-updated": `--createShortcut=${target}`,
+        "--squirrel-uninstall": `--removeShortcut=${target}`,
+        "--squirrel-obsolete": null
+    };
+    const action = actions[process.argv[1] ?? ""];
+    if (action === undefined) {
+        return false;
+    }
+
+    if (action) {
+        const updateExe = path.resolve(path.dirname(process.execPath), "..", "Update.exe");
+        spawn(updateExe, [ action ], { detached: true });
+    }
+    return true;
 }
 
 /**

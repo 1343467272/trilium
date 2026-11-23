@@ -13,11 +13,11 @@ import { type CryptoProvider, getCrypto, initCrypto } from "./crypto.js";
 // initCrypto() restore the original in afterEach so the rest of the file keeps
 // seeing the real provider.
 
-// scrypt (N=16384) runs in pure JS (scrypt-js) under the browser provider, which is
+// scrypt (N=16384) runs in pure JS (@noble/hashes) under the browser provider, which is
 // ~10x slower under V8 coverage instrumentation than Node's native scryptSync. Give the
-// standalone (happy-dom) suite a larger timeout; the server suite keeps the strict
+// standalone suite a larger timeout; the server suite keeps the strict
 // default. The derived bytes are identical across runtimes — only the speed differs.
-const isBrowserRuntime = typeof window !== "undefined";
+const isBrowserRuntime = typeof self !== "undefined";
 if (isBrowserRuntime) {
     vi.setConfig({ testTimeout: 60000, hookTimeout: 60000 });
 }
@@ -237,5 +237,14 @@ describe("CryptoProvider behaviour (wired-up provider)", () => {
                 crypto.constantTimeCompare(new Uint8Array(0), new Uint8Array(0))
             ).toBe(true);
         });
+    });
+});
+
+describe("getCrypto before initCrypto", () => {
+    it("throws on a fresh module instance", async () => {
+        vi.resetModules();
+        const fresh = await import("./crypto.js");
+
+        expect(() => fresh.getCrypto()).toThrow("Crypto not initialized.");
     });
 });

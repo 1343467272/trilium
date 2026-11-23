@@ -1,6 +1,6 @@
 import { type ComponentChildren, render, type RefObject } from "preact";
 import { act } from "preact/test-utils";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, type Mock, vi } from "vitest";
 
 import type FNote from "../../entities/fnote";
 import type { ViewScope } from "../../services/link";
@@ -9,11 +9,19 @@ const mocks = vi.hoisted(() => ({
     triggerCommand: vi.fn(),
     openInNewTab: vi.fn(),
     openContextWithNote: vi.fn(),
+    registerDetachedContext: vi.fn(),
+    unregisterDetachedContext: vi.fn(),
     getNote: vi.fn(),
     getAttachment: vi.fn(),
     /** Every context the popup created, newest last — one is built per open. */
-    contexts: [] as { setNote: ReturnType<typeof vi.fn>, viewScope?: ViewScope, noteId: string }[],
-    isMobile: vi.fn(() => false)
+    contexts: [] as {
+        setNote: Mock<(notePath: string, opts?: { viewScope?: ViewScope }) => Promise<void>>,
+        notePath?: string, viewScope?: ViewScope, noteId: string, ntxId: string
+    }[],
+    isMobile: vi.fn(() => false),
+    /** The note of every context the popup builds, read by the badges in its header. */
+    contextNote: undefined as unknown,
+    backlinkCount: vi.fn(() => 0)
 }));
 
 vi.mock("../../components/app_context", () => ({
@@ -21,7 +29,9 @@ vi.mock("../../components/app_context", () => ({
         triggerCommand: mocks.triggerCommand,
         tabManager: {
             openInNewTab: mocks.openInNewTab,
-            openContextWithNote: mocks.openContextWithNote
+            openContextWithNote: mocks.openContextWithNote,
+            registerDetachedContext: mocks.registerDetachedContext,
+            unregisterDetachedContext: mocks.unregisterDetachedContext
         }
     }
 }));
@@ -31,13 +41,18 @@ vi.mock("../../components/app_context", () => ({
 vi.mock("../../components/note_context", () => ({
     default: class {
         ntxId: string;
+        notePath: string | undefined;
         noteId = "n1";
         hoistedNoteId = "root";
         viewScope: ViewScope | undefined;
-        note = undefined;
+        note = mocks.contextNote;
         triggerEvent = vi.fn();
-        setNote = vi.fn(async (_notePath: string, opts?: { viewScope?: ViewScope }) => {
-            this.viewScope = opts?.viewScope;
+        setNote = vi.fn(async (notePath: string, opts?: { viewScope?: ViewScope }) => {
+            await this.triggerEvent("beforeNoteSwitch", { noteContext: this });
+            this.notePath = notePath;
+            this.noteId = notePath.split("/").at(-1) ?? "";
+            this.viewScope = { viewMode: "default", ...opts?.viewScope };
+            await this.triggerEvent("noteSwitched", { noteContext: this, notePath });
         });
 
         constructor(ntxId: string) {
@@ -70,9 +85,23 @@ vi.mock("../../services/utils", async (importActual) => {
 
 vi.mock("../../services/experimental_features", () => ({ isExperimentalFeatureEnabled: () => false }));
 
+vi.mock("../../services/keyboard_actions", async (importActual) => {
+    const actual = await importActual<typeof import("../../services/keyboard_actions")>();
+    return {
+        ...actual,
+        default: {
+            ...actual.default,
+            getAction: async (actionName: string) => (actionName === "findInText"
+                ? { actionName, effectiveShortcuts: [ "Ctrl+F" ] }
+                : undefined)
+        }
+    };
+});
+
 // The modal itself is Bootstrap-driven; the popup's own state is what it hands over.
 interface ModalStubProps {
     title?: ComponentChildren;
+    header?: ComponentChildren;
     children?: ComponentChildren;
     show?: boolean;
     customTitleBarButtons?: { onClick: () => void }[];
@@ -82,7 +111,7 @@ interface ModalStubProps {
 }
 
 vi.mock("../react/Modal", () => ({
-    default: ({ title, children, show, customTitleBarButtons, modalRef, onShown, onHidden }: ModalStubProps) => (
+    default: ({ title, header, children, show, customTitleBarButtons, modalRef, onShown, onHidden }: ModalStubProps) => (
         <div ref={modalRef} className="modal-stub" data-shown={String(!!show)}>
             <button
                 className="maximize-stub"
@@ -92,6 +121,7 @@ vi.mock("../react/Modal", () => ({
             <button className="shown-stub" onClick={() => onShown?.()} />
             <button className="hidden-stub" onClick={() => onHidden?.()} />
             {title}
+            {header}
             {children}
         </div>
     )
@@ -100,26 +130,33 @@ vi.mock("../react/Modal", () => ({
 // The popup's body: each is exercised by its own spec, and none of it decides what the popup shows.
 vi.mock("../NoteDetail", () => ({ default: () => <div className="note-detail-stub" /> }));
 vi.mock("../collections/NoteList", () => ({ default: () => null }));
-vi.mock("../FloatingButtons", () => ({ default: () => null }));
-vi.mock("../FloatingButtonsDefinitions", () => ({
-    DESKTOP_FLOATING_BUTTONS: [ "kept", "hidden" ],
-    POPUP_HIDDEN_FLOATING_BUTTONS: [ "hidden" ]
-}));
 vi.mock("../PromotedAttributes", () => ({ default: () => null }));
-vi.mock("../ReadOnlyNoteInfoBar", () => ({ default: () => null }));
+vi.mock("../layout/NoteActions", () => ({ default: () => null }));
+// `BacklinksWidget` has its own spec; this one covers where its links navigate.
+vi.mock("../react/hooks/note", async (importOriginal) => ({
+    ...(await importOriginal<typeof import("../react/hooks/note")>()),
+    useBacklinkCount: mocks.backlinkCount
+}));
+vi.mock("../sidebar/Backlinks", () => ({
+    BacklinksWidget: () => <a className="backlink-stub" href="#root/source">Source</a>
+}));
 vi.mock("../layout/NoteBadges", () => ({ default: () => null }));
 vi.mock("../layout/NoteTypeSwitcher", () => ({
     default: () => <div className="note-type-switcher-stub" />
 }));
-vi.mock("../ribbon/components/StandaloneRibbonAdapter", () => ({ default: () => null }));
-vi.mock("../ribbon/FormattingToolbar", () => ({ default: () => null, showFormattingToolbar: () => false }));
+vi.mock("../layout/FormattingToolbar", () => ({ default: () => null }));
+vi.mock("../scroll_rail", () => ({ default: () => <div className="scroll-rail-stub" /> }));
+vi.mock("../layout/VimStatus", () => ({ VimTitleStatus: () => null }));
 vi.mock("../type_widgets/text/mobile_editor_toolbar", () => ({ default: () => <div className="mobile-toolbar-stub" /> }));
 vi.mock("../note_icon", () => ({ default: () => <div className="note-icon-stub" /> }));
 vi.mock("../note_title", () => ({ default: () => <div className="note-title-stub" /> }));
 
 import Component from "../../components/component";
+import { preloadDropdownPopups } from "../react/Dropdown";
 import { ParentComponent } from "../react/react_utils";
 import PopupEditor from "./PopupEditor";
+
+beforeAll(() => preloadDropdownPopups());
 
 const ATTACHMENT_SCOPE: ViewScope = { viewMode: "attachments", attachmentId: "att-1" };
 /** A view mode of the note itself, as the sidebar's note map card expands into the popup with. */
@@ -136,9 +173,10 @@ function fakeNote(labels: string[] = [], isOptions = false) {
 let container: HTMLDivElement;
 let parent: Component;
 
-async function openPopup(
-    data: { noteIdOrPath: string, viewScope?: ViewScope, showNoteTypeSwitcher?: boolean }
-) {
+async function openPopup(data: {
+    noteIdOrPath: string, viewScope?: ViewScope, showNoteTypeSwitcher?: boolean,
+    selectTitle?: boolean
+}) {
     await act(async () => {
         await parent.handleEvent("openInPopup", data as never);
     });
@@ -150,7 +188,22 @@ async function attachmentsReloaded(attachmentId: string) {
         await parent.handleEvent("entitiesReloaded", {
             loadResults: {
                 getAttachmentRows: () => [ { attachmentId } ],
-                getAttributeRows: () => []
+                getAttributeRows: () => [],
+                isNoteReloaded: () => false
+            }
+        } as never);
+    });
+}
+
+/** An entity reload of one note, deleted or not. */
+async function noteReloaded(noteId: string, isDeleted: boolean) {
+    await act(async () => {
+        await parent.handleEvent("entitiesReloaded", {
+            loadResults: {
+                getAttachmentRows: () => [],
+                getAttributeRows: () => [],
+                isNoteReloaded: (id: string) => id === noteId,
+                getEntityRow: (_entityName: string, id: string) => (id === noteId ? { noteId, isDeleted } : undefined)
             }
         } as never);
     });
@@ -171,6 +224,28 @@ function clickLink(href: string) {
         link?.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
     });
     link?.remove();
+}
+
+/** Follows a link inside the popup and waits for the note switch to finish. */
+async function followLink(href: string) {
+    clickLink(href);
+    await act(async () => {});
+}
+
+function backButton() {
+    return container.querySelector<HTMLElement>(".popup-editor-back");
+}
+
+async function goBack() {
+    const button = backButton();
+    expect(button).not.toBeNull();
+    await act(async () => button?.click());
+    await settle();
+}
+
+/** Waits for a note switch, which runs through the parent component's events past `act()`. */
+async function settle() {
+    await act(() => new Promise<void>((resolve) => { setTimeout(resolve); }));
 }
 
 function modal() {
@@ -218,6 +293,8 @@ describe("PopupEditor", () => {
         });
         expect(modal()?.dataset.shown).toBe("true");
         expect(document.body.classList.contains("popup-editor-open")).toBe(true);
+        // Registered so that a command naming the popup's context can find it.
+        expect(mocks.registerDetachedContext).toHaveBeenCalledWith(lastContext());
 
         mocks.getNote.mockResolvedValue(fakeNote([ "readOnly" ]));
         await openPopup({ noteIdOrPath: "root/n2" });
@@ -324,6 +401,17 @@ describe("PopupEditor", () => {
         expect(modal()?.dataset.shown).toBe("false");
     });
 
+    it("closes when the note it shows is deleted, and only then", async () => {
+        await openPopup({ noteIdOrPath: "root/n1" });
+
+        await noteReloaded("other", true);
+        await noteReloaded("n1", false);
+        expect(modal()?.dataset.shown).toBe("true");
+
+        await noteReloaded("n1", true);
+        expect(modal()?.dataset.shown).toBe("false");
+    });
+
     it("stays put when there is no note to maximize", async () => {
         await openPopup({ noteIdOrPath: "root/n1" });
         const context = lastContext();
@@ -357,6 +445,100 @@ describe("PopupEditor", () => {
         expect(context?.setNote).toHaveBeenCalledTimes(1);
     });
 
+    it("goes back through the notes it navigated to, with no way back from the first", async () => {
+        await openPopup({ noteIdOrPath: "root/n1" });
+        const context = lastContext();
+        expect(backButton()).toBeNull();
+
+        await followLink("#root/note2");
+        expect(backButton()).not.toBeNull();
+        await followLink("#root/note2?viewMode=attachments&attachmentId=att1");
+        await vi.waitFor(() => expect(container.querySelector(".attachment-title")).not.toBeNull());
+        expect(backButton()).not.toBeNull();
+
+        await goBack();
+        expect(context?.setNote).toHaveBeenLastCalledWith("root/note2", {
+            viewScope: { viewMode: "default" },
+            keepActiveDialog: true
+        });
+        expect(backButton()).not.toBeNull();
+
+        // The first note comes back with the scope it was opened with.
+        await goBack();
+        expect(context?.setNote).toHaveBeenLastCalledWith("root/n1", {
+            viewScope: { viewMode: "default", readOnlyTemporarilyDisabled: true },
+            keepActiveDialog: true
+        });
+        expect(backButton()).toBeNull();
+    });
+
+    it("ignores a press of Back while it is still going back", async () => {
+        await openPopup({ noteIdOrPath: "root/n1" });
+        const context = lastContext();
+        await followLink("#root/note2");
+        await followLink("#root/note3");
+
+        let finishSwitch = () => {};
+        const switching = new Promise<void>((resolve) => { finishSwitch = resolve; });
+        const setNote = context?.setNote.getMockImplementation();
+        context?.setNote.mockClear();
+        context?.setNote.mockImplementationOnce(async (notePath, opts) => {
+            await switching;
+            return setNote?.(notePath, opts);
+        });
+
+        await goBack();
+        await goBack();
+        expect(context?.setNote).toHaveBeenCalledTimes(1);
+        expect(context?.setNote).toHaveBeenLastCalledWith("root/note2", {
+            viewScope: { viewMode: "default" },
+            keepActiveDialog: true
+        });
+
+        finishSwitch();
+        await settle();
+        expect(context?.notePath).toBe("root/note2");
+        await goBack();
+        expect(context?.setNote).toHaveBeenLastCalledWith("root/n1", {
+            viewScope: { viewMode: "default", readOnlyTemporarilyDisabled: true },
+            keepActiveDialog: true
+        });
+        expect(backButton()).toBeNull();
+    });
+
+    it("goes back from another view of the note it shows, not from the same view", async () => {
+        await openPopup({ noteIdOrPath: "root/n1" });
+        await openPopup({ noteIdOrPath: "root/n1" });
+        expect(backButton()).toBeNull();
+
+        // Quick edit on a link to an attachment of the note on show.
+        await openPopup({ noteIdOrPath: "root/n1", viewScope: ATTACHMENT_SCOPE });
+        await goBack();
+        expect(lastContext()?.setNote).toHaveBeenLastCalledWith("root/n1", {
+            viewScope: { viewMode: "default", readOnlyTemporarilyDisabled: true },
+            keepActiveDialog: true
+        });
+        expect(backButton()).toBeNull();
+    });
+
+    it("resets its history when it opens, but not for a note opened while on show", async () => {
+        await openPopup({ noteIdOrPath: "root/n1" });
+        await followLink("#root/note2");
+        expect(backButton()).not.toBeNull();
+
+        await act(async () => container.querySelector<HTMLElement>(".hidden-stub")?.click());
+        await openPopup({ noteIdOrPath: "root/n3" });
+        expect(backButton()).toBeNull();
+
+        await openPopup({ noteIdOrPath: "root/n4" });
+        await goBack();
+        expect(lastContext()?.setNote).toHaveBeenLastCalledWith("root/n3", {
+            viewScope: { viewMode: "default", readOnlyTemporarilyDisabled: true },
+            keepActiveDialog: true
+        });
+        expect(backButton()).toBeNull();
+    });
+
     it("reports its lifecycle: focuses the content when shown, and forgets itself when hidden", async () => {
         const handleEvent = vi.spyOn(parent, "handleEvent");
         await openPopup({ noteIdOrPath: "root/n1" });
@@ -367,6 +549,63 @@ describe("PopupEditor", () => {
         await act(async () => container.querySelector<HTMLElement>(".hidden-stub")?.click());
         expect(modal()?.dataset.shown).toBe("false");
         expect(document.body.classList.contains("popup-editor-open")).toBe(false);
+    });
+
+    it("selects the title instead of the content when asked to, for that open only", async () => {
+        const handleEvent = vi.spyOn(parent, "handleEvent");
+        const focusCalls = () =>
+            handleEvent.mock.calls.filter(([ name ]) => name.startsWith("focus"));
+        const selectTitle = [ "focusAndSelectTitle", { isNewNote: true, ntxId: "_popup-editor" } ];
+        const focusContent = [ "focusOnDetail", { ntxId: "_popup-editor" } ];
+
+        await openPopup({ noteIdOrPath: "root/n1", selectTitle: true });
+        expect(focusCalls()).toEqual([]);
+        await act(async () => container.querySelector<HTMLElement>(".shown-stub")?.click());
+        expect(focusCalls()).toEqual([ selectTitle ]);
+
+        // Opened in the popup already on show, which fires no `shown` event.
+        handleEvent.mockClear();
+        await openPopup({ noteIdOrPath: "root/n2" });
+        expect(focusCalls()).toEqual([ focusContent ]);
+
+        handleEvent.mockClear();
+        await openPopup({ noteIdOrPath: "root/n3", selectTitle: true });
+        expect(focusCalls()).toEqual([ selectTitle ]);
+    });
+
+    it("opens a nested popup over itself, which answers only its own command and context", async () => {
+        const nestedContainer = document.body.appendChild(document.createElement("div"));
+        await act(async () => {
+            render(
+                <ParentComponent.Provider value={parent}>
+                    <PopupEditor ntxId="_popup-editor-nested" openCommand="openInNestedPopup" />
+                </ParentComponent.Provider>,
+                nestedContainer
+            );
+        });
+        const nestedModal = nestedContainer.querySelector<HTMLElement>(".modal-stub");
+        expect(nestedModal).not.toBeNull();
+        const isOpen = () => document.body.classList.contains("popup-editor-open");
+
+        await openPopup({ noteIdOrPath: "root/n1" });
+        expect(modal()?.dataset.shown).toBe("true");
+        expect(nestedModal?.dataset.shown).toBe("false");
+
+        await act(async () => {
+            await parent.handleEvent("openInNestedPopup", { noteIdOrPath: "_help_abc" } as never);
+        });
+        expect(nestedModal?.dataset.shown).toBe("true");
+        expect(lastContext()?.ntxId).toBe("_popup-editor-nested");
+        expect(lastContext()?.setNote).toHaveBeenCalledWith("_help_abc", expect.anything());
+
+        // Closing one popup keeps the page's popup layering for the one still open.
+        await act(async () => nestedContainer.querySelector<HTMLElement>(".hidden-stub")?.click());
+        expect(isOpen()).toBe(true);
+        await act(async () => container.querySelector<HTMLElement>(".hidden-stub")?.click());
+        expect(isOpen()).toBe(false);
+
+        render(null, nestedContainer);
+        nestedContainer.remove();
     });
 
     /**
@@ -438,8 +677,34 @@ describe("PopupEditor", () => {
         expect(container.querySelector(".note-type-switcher-stub")).toBeNull();
     });
 
-    it("gives mobile its own toolbar and hides the buttons that make no sense in a popup", async () => {
+    it("offers the note's backlinks in its header, opening them in itself rather than the tab behind", async () => {
+        mocks.contextNote = { noteId: "n1", getLabelValue: () => null, getColorClass: () => "" };
+        await openPopup({ noteIdOrPath: "root/n1" });
+        expect(container.querySelector(".popup-editor-backlinks")).toBeNull();
+
+        mocks.backlinkCount.mockReturnValue(2);
+        await openPopup({ noteIdOrPath: "root/n1" });
+        const toggle = container.querySelector<HTMLElement>(".popup-editor-backlinks button");
+        expect(toggle).not.toBeNull();
+        await act(async () => toggle?.click());
+        const link = document.querySelector<HTMLElement>(".backlink-stub");
+        expect(link).not.toBeNull();
+
+        const context = lastContext();
+        await act(async () => link?.click());
+        expect(context?.setNote).toHaveBeenLastCalledWith("root/source", { viewScope: { viewMode: "default" }, keepActiveDialog: true });
+        expect(document.querySelector(".backlink-stub")).toBeNull();
+        mocks.contextNote = undefined;
+    });
+
+    it("gives desktop the scroll rail, mobile its own toolbar", async () => {
         expect(container.querySelector(".mobile-toolbar-stub")).toBeNull();
+        expect(container.querySelector(".popup-editor-scroll")?.classList.contains("scroll-edge-fade")).toBe(false);
+        // The rail is the scroller's first child, which it takes over.
+        await vi.waitFor(() => {
+            const first = container.querySelector(".popup-editor-scroll")?.firstElementChild;
+            expect(first?.classList.contains("scroll-rail-stub")).toBe(true);
+        });
 
         mocks.isMobile.mockReturnValue(true);
         const mobileContainer = document.body.appendChild(document.createElement("div"));
@@ -452,8 +717,40 @@ describe("PopupEditor", () => {
             );
         });
 
-        expect(mobileContainer.querySelector(".mobile-toolbar-stub")).not.toBeNull();
+        // The fields and the note scroll above the toolbar, which stays at the foot of the dialog
+        // as it does on a text note.
+        const scroll = mobileContainer.querySelector(".popup-editor-scroll");
+        const toolbar = mobileContainer.querySelector(".mobile-toolbar-stub");
+        expect(scroll?.querySelector(".note-detail-stub")).not.toBeNull();
+        expect(scroll?.classList.contains("scroll-edge-fade")).toBe(true);
+        expect(toolbar).not.toBeNull();
+        expect(scroll?.contains(toolbar)).toBe(false);
+        expect(scroll?.nextElementSibling).toBe(toolbar);
+        // The rail's module is loaded by now, so it would render at once.
+        expect(mobileContainer.querySelector(".scroll-rail-stub")).toBeNull();
+
         render(null, mobileContainer);
         mobileContainer.remove();
+    });
+
+    it("searches its own note on Ctrl+F, leaving the tab behind alone", async () => {
+        await openPopup({ noteIdOrPath: "root/n1" });
+        const findBar = modal()?.querySelector(".find-replace-widget");
+        expect(findBar).not.toBeNull();
+        expect(container.querySelector(".popup-editor-scroll")?.contains(findBar ?? null)).toBe(false);
+
+        const onDocument = vi.fn();
+        document.addEventListener("keydown", onDocument);
+        const detail = modal()?.querySelector(".note-detail-stub");
+        expect(detail).not.toBeNull();
+        await vi.waitFor(() => {
+            detail?.dispatchEvent(new KeyboardEvent("keydown", {
+                key: "f", code: "KeyF", ctrlKey: true, bubbles: true, cancelable: true
+            }));
+            expect(mocks.triggerCommand).toHaveBeenCalledWith("findInText", { ntxId: "_popup-editor" });
+        });
+        // The global binding would name the active tab instead.
+        expect(onDocument).not.toHaveBeenCalled();
+        document.removeEventListener("keydown", onDocument);
     });
 });

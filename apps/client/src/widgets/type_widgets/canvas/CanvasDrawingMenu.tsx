@@ -3,10 +3,7 @@ import type { ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
 import type { RefObject } from "preact";
 
 import Icon from "../../react/Icon";
-import { useExcalidrawTranslation } from "./CanvasEmbedTools";
-
-/** The name of Excalidraw's default sidebar, whose first tab is the library. */
-export const LIBRARY_SIDEBAR = "default";
+import { DEFAULT_SIDEBAR, SEARCH_TAB, useExcalidrawTranslation } from "./CanvasEmbedTools";
 
 interface CanvasDrawingMenuProps {
     apiRef: RefObject<ExcalidrawImperativeAPI | null>;
@@ -22,16 +19,36 @@ export default function CanvasDrawingMenu({ apiRef, isEditable }: CanvasDrawingM
             <MainMenu.DefaultItems.LoadScene />
             <MainMenu.DefaultItems.SaveAsImage />
             <MainMenu.Separator />
-            <MainMenu.DefaultItems.SearchMenu />
+            <MainMenu.Item
+                icon={<Icon icon="bx bx-search" />}
+                onSelect={() => apiRef.current?.toggleSidebar({
+                    name: DEFAULT_SIDEBAR, tab: SEARCH_TAB, force: true
+                })}
+            >
+                {t("search.title")}
+            </MainMenu.Item>
             {isEditable && (
                 <MainMenu.Item
                     icon={<Icon icon="bx bx-library" />}
-                    onSelect={() => apiRef.current?.toggleSidebar({ name: LIBRARY_SIDEBAR })}
+                    onSelect={() => apiRef.current?.toggleSidebar({ name: DEFAULT_SIDEBAR })}
                 >
                     {t("toolBar.library")}
                 </MainMenu.Item>
             )}
             <MainMenu.DefaultItems.Help />
+        </MainMenu>
+    );
+}
+
+export function CanvasNoteMenu() {
+    return (
+        <MainMenu>
+            <MainMenu.DefaultItems.LoadScene />
+            <MainMenu.DefaultItems.SaveAsImage />
+            <MainMenu.DefaultItems.SearchMenu />
+            <MainMenu.DefaultItems.Help />
+            <MainMenu.DefaultItems.ClearCanvas />
+            <MainMenu.DefaultItems.ChangeCanvasBackground />
         </MainMenu>
     );
 }

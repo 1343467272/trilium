@@ -29,8 +29,8 @@ vi.mock("../../../services/options", () => ({
     default: { is: () => mocks.encryptionStored }
 }));
 
-vi.mock("../../react/hooks", async (importOriginal) => ({
-    ...(await importOriginal<typeof import("../../react/hooks")>()),
+vi.mock("../../react/hooks/options", async (importOriginal) => ({
+    ...(await importOriginal<typeof import("../../react/hooks/options")>()),
     useTriliumOptionBool: (name: string) => [
         mocks.stored[name] === true,
         async (value: boolean) => void mocks.saved.push([ name, value ])
@@ -93,6 +93,15 @@ describe("what the encryption controls offer", () => {
         expect(button("change-backup-password-button")).toBeNull();
         // Nothing to switch on until there is a passphrase to switch it on with.
         expect(host.querySelector("input.switch-toggle[id^='backup-compression']")).not.toBeNull();
+    });
+
+    it("mounts the password dialog on the body, beside Bootstrap's backdrop", async () => {
+        await open();
+
+        const modal = document.querySelector(".backup-password-modal");
+        expect(modal).not.toBeNull();
+        expect(host.contains(modal)).toBe(false);
+        expect(modal?.parentElement).toBe(document.body);
     });
 
     it("offers to replace the passphrase, and a switch, once one is held", async () => {

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import becca from "../becca/becca.js";
 import type BBranch from "../becca/entities/bbranch.js";
@@ -304,6 +304,113 @@ describe("cloning service (real DB)", () => {
 
             expect(res.success).toBe(false);
             expect(typeof res.message).toBe("string");
+        });
+    });
+
+    describe("cloneNoteBefore", () => {
+        /** The notes under the parent, in the order of their stored positions. */
+        function childOrder(parentNoteId: string) {
+            return getSql().getColumn<string>(/*sql*/`
+                SELECT noteId FROM branches
+                WHERE parentNoteId = ? AND isDeleted = 0
+                ORDER BY notePosition`, [ parentNoteId ]);
+        }
+
+        function branchIdOf({ branch }: { branch: BBranch }) {
+            if (!branch.branchId) {
+                throw new Error("The created branch has no ID.");
+            }
+            return branch.branchId;
+        }
+
+        it("clones the note right before the reference branch", () => {
+            const parent = createNote("root");
+            const first = createNote(parent.note.noteId);
+            const second = createNote(parent.note.noteId);
+            const source = createNote("root");
+
+            const res = getContext().init(() =>
+                cloningService.cloneNoteBefore(source.note.noteId, branchIdOf(second))
+            );
+
+            expect(res.success).toBe(true);
+            const branchId = "branchId" in res ? res.branchId : undefined;
+            expect(becca.getBranch(branchId ?? "")?.parentNoteId).toBe(parent.note.noteId);
+            expect(childOrder(parent.note.noteId))
+                .toEqual([ first.note.noteId, source.note.noteId, second.note.noteId ]);
+        });
+
+        it("keeps the order of several notes cloned before the same branch", () => {
+            const parent = createNote("root");
+            const reference = createNote(parent.note.noteId);
+            const a = createNote("root");
+            const b = createNote("root");
+
+            getContext().init(() => {
+                cloningService.cloneNoteBefore(a.note.noteId, branchIdOf(reference));
+                cloningService.cloneNoteBefore(b.note.noteId, branchIdOf(reference));
+            });
+
+            expect(childOrder(parent.note.noteId))
+                .toEqual([ a.note.noteId, b.note.noteId, reference.note.noteId ]);
+            // becca agrees with the database, which the next clone or move relies on.
+            const beccaOrder = becca.getNoteOrThrow(parent.note.noteId).getChildBranches()
+                .sort((x, y) => x.notePosition - y.notePosition)
+                .map((branch) => branch.noteId);
+            expect(beccaOrder).toEqual(childOrder(parent.note.noteId));
+        });
+
+        it("refuses what cloning after refuses", () => {
+            const source = createNote("root");
+            const parent = createNote("root");
+            const existing = createNote(parent.note.noteId);
+
+            expect(cloningService.cloneNoteBefore("root", branchIdOf(existing))).toMatchObject({
+                success: false,
+                message: "Cloning the note 'root' is forbidden."
+            });
+            expect(cloningService.cloneNoteBefore(source.note.noteId, "missing123")).toMatchObject({
+                success: false,
+                message: "Branch 'missing123' does not exist."
+            });
+            // Already under the parent, which validateParentChild() rejects.
+            const res = cloningService.cloneNoteBefore(existing.note.noteId, branchIdOf(existing));
+            expect(res.success).toBe(false);
+        });
+    });
+
+    describe("edge cases", () => {
+        it("fails when the parent id names an Object.prototype key that is not a note", () => {
+            const { note } = createNote("root");
+
+            expect(cloningService.cloneNoteToParentNote(note.noteId, "toString").message)
+                .toContain("parent note could not be found");
+            expect(cloningService.ensureNoteIsPresentInParent(note.noteId, "toString").message)
+                .toBe("Can't find parent note.");
+        });
+
+        it("ensureNoteIsPresentInParent propagates a validation failure", () => {
+            const { note } = createNote("root");
+
+            const res = cloningService.ensureNoteIsPresentInParent(note.noteId, note.noteId);
+            expect(res).toMatchObject({ success: false, message: "Moving/cloning note here would create cycle." });
+        });
+
+        it("refuses to clone next to the hidden branch or a branch without a live note or parent", () => {
+            const { note, branch } = createNote("root");
+            const hiddenBranch = becca.getBranchFromChildAndParent("_hidden", "root");
+            if (!hiddenBranch) throw new Error("missing hidden branch");
+
+            expect(cloningService.cloneNoteAfter(note.noteId, hiddenBranch.branchId ?? "").message)
+                .toContain("hidden branch");
+            expect(cloningService.cloneNoteAfter("missingNote123", branch.branchId ?? "").message)
+                .toContain("'missingNote123' is deleted");
+            expect(cloningService.cloneNoteAfter(note.noteId, "none_root").message)
+                .toContain("Parent note 'none'");
+
+            vi.spyOn(becca, "getNote").mockReturnValueOnce(null);
+            expect(cloningService.cloneNoteAfter(note.noteId, branch.branchId ?? "").message)
+                .toBe("Can't clone into a search note");
         });
     });
 });

@@ -3,7 +3,7 @@
 
 On desktop, depending on the layout selected, the launcher bar will either be on the left side of the screen with buttons displayed vertically or at the top of the screen. See <a class="reference-link" href="Vertical%20and%20horizontal%20layout.md">Vertical and horizontal layout</a> for more information.
 
-On mobile, the launch bar will always be at the bottom.
+On mobile, the launch bar is at the bottom of the screen on a phone, and on the left side of the screen with buttons displayed vertically on wider screens, such as a tablet in landscape.
 
 If there are too many items in the launch bar to fit the screen, it will become scrollable.
 
@@ -17,22 +17,24 @@ If there are too many items in the launch bar to fit the screen, it will become 
 
 There are two ways to configure the launch bar:
 
-*   Right click in the empty space between launchers on the launch bar and select _Configure Launchbar._
-*   Click on the <a class="reference-link" href="Global%20menu.md">Global menu</a> and select _Configure Launchbar_.
+*   Right click in the empty space between launchers on the launch bar and select _Configure launch bar…_
+*   Click on the <a class="reference-link" href="Global%20menu.md">Global menu</a> and select _Configure launch bar_.
 
 This will open a new tab with the <a class="reference-link" href="Note%20Tree.md">Note Tree</a> listing the launchers.
 
-![](Launch%20Bar_image.png)
+![](Launch%20Bar_image.jpg)
 
 Expanding _Available Launchers_ section will show the list of launchers that are not displayed on the launch bar. The _Visible Launchers_ will show the ones that are currently displayed.
 
 ## Configuring the mobile launch bar
 
-The launch bar on mobile uses a different configuration from the desktop one. The reasoning is that not all desktop icons are available on mobile, and fewer icons fit on a mobile screen.
+The launch bar on a phone uses a different configuration from the desktop one. The reasoning is that not all desktop icons are available on mobile, and fewer icons fit on a phone screen.
 
-To configure the launch bar on mobile, go to <a class="reference-link" href="Global%20menu.md">Global menu</a> and select _Configure Launchbar_.
+A tablet shows the desktop launch bar instead, in either orientation, and its tabs in the tab bar of the desktop version. Launchers marked as desktop-only are shown there too, while the launcher that opens the AI chat in the right sidebar is not, since the mobile layout has no right sidebar. The mobile layout counts as a tablet while the window is at least 744 pixels wide and 600 pixels tall, so a foldable switches between the two launch bars as it unfolds and folds.
 
-The configure the mobile launch bar while on the desktop (especially useful to configure more complicated launchers such as scripts or custom widgets), go to <a class="reference-link" href="Global%20menu.md">Global menu</a> → Advanced → Show Hidden Subtree and look for the _Mobile Launch Bar_ section. While in the hidden subtree, it's also possible to drag launchers between the _Mobile Launch Bar_ and (Desktop) _Launch Bar_ sections.
+To configure the launch bar on mobile, go to <a class="reference-link" href="Global%20menu.md">Global menu</a> and select _Configure launch bar_.
+
+The configure the mobile launch bar while on the desktop (especially useful to configure more complicated launchers such as scripts or custom widgets), go to <a class="reference-link" href="Global%20menu.md">Global menu</a> → Advanced → Hidden notes and look for the _Mobile Launch Bar_ section. While in the hidden subtree, it's also possible to drag launchers between the _Mobile Launch Bar_ and (Desktop) _Launch Bar_ sections.
 
 ### Adding/removing and reordering launchers
 
@@ -42,9 +44,20 @@ Similarly, to remove it from the launch bar, simply look for it in _Visible Laun
 
 Drag-and-drop the items in the tree in order to change their order. See <a class="reference-link" href="Note%20Tree.md">Note Tree</a> for more interaction options, including using keyboard shortcuts.
 
+### Adding a note by drag and drop
+
+To add a note to the launch bar, drag it from the <a class="reference-link" href="Note%20Tree.md">Note Tree</a> onto the launch bar. A line between the launchers shows where the note will be placed. If the launch bar is scrollable, hold the note near either end to scroll it. Dropping the note adds a button with the note's title and icon, which opens the note when clicked.
+
+*   Several notes selected in the tree can be dropped at once; they keep their order.
+*   A note that is already on the launch bar, or a launcher dragged from the _Available Launchers_ section, is moved to the new place instead of being added again.
+
+The button is a clone of the note in the _Visible Launchers_ section (see <a class="reference-link" href="../Notes/Cloning%20Notes.md">Cloning Notes</a>), so it always shows the note's current title and icon. Right click it and select _Remove from launch bar_ to remove the clone; the note itself stays where it is in the tree. If the launch bar is the only place the note is in, it's moved to the _Available Launchers_ instead, so that the note isn't deleted.
+
+To list the note's children instead of opening the note, right click the button and check _Show as a folder_, the same way as for a [bookmark folder](../Navigation/Bookmarks.md). To open the note in a new tab, a split, a new window or a quick edit popup instead of the current tab, right click the button and pick a place under _Open mode_, as described in [Bookmarks](../Navigation/Bookmarks.md).
+
 ## Customizing the launcher
 
-*   The icon of a launcher can be changed just like a normal note. See <a class="reference-link" href="../Notes/Note%20Icons%20%26%20Colors.md">Note Icons</a> for more information.
+*   The icon of a launcher can be changed just like a normal note. See [note icons](../Notes/Note%20Icons%20%26%20Colors.md) for more information.
 *   The title of the launcher can also be changed.
 
 ### Resetting

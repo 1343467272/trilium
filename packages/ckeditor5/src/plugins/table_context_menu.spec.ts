@@ -39,6 +39,17 @@ describe("TableContextMenu", () => {
         }
     });
 
+    it("inserts nothing when run in the change block that moves the selection out", () => {
+        const content = `${modelTable([["11", "12"]])}<paragraph>foo</paragraph>`;
+        for (const name of INSERT_COMMANDS) {
+            setModelData(editor.model, content.replace("11", "1[]1"));
+
+            executeLeavingTable(editor, name);
+
+            expect(getModelData(editor.model), name).toBe(content.replace("foo", "[]foo"));
+        }
+    });
+
     describe("insert rows", () => {
         it("inserts one row above or below the caret row", () => {
             setModelData(editor.model, modelTable([["1[]1", "12"], ["21", "22"]]));
@@ -97,6 +108,74 @@ describe("TableContextMenu", () => {
         });
     });
 
+    describe("caret after an insertion", () => {
+        const GRID = modelTable([
+            [ "11", "12", "13" ], [ "21", "2[]2", "23" ], [ "31", "32", "33" ]
+        ]);
+
+        /** The row and column of the cell holding the caret, and whether its paragraph is empty. */
+        function caret() {
+            const selection = editor.model.document.selection;
+            const position = selection.getFirstPosition();
+            const cell = position?.findAncestor("tableCell");
+            return {
+                ...cell && editor.plugins.get(TableUtils).getCellLocation(cell),
+                isCollapsed: selection.isCollapsed,
+                isEmpty: position?.parent.isEmpty
+            };
+        }
+
+        it("moves into the new row or column, in its own column or row", () => {
+            const cases = [
+                [ "triliumInsertTableRowsAbove", 1, 1 ], [ "insertTableRowAbove", 1, 1 ],
+                [ "triliumInsertTableRowsBelow", 2, 1 ], [ "insertTableRowBelow", 2, 1 ],
+                [ "triliumInsertTableColumnsLeft", 1, 1 ], [ "insertTableColumnLeft", 1, 1 ],
+                [ "triliumInsertTableColumnsRight", 1, 2 ], [ "insertTableColumnRight", 1, 2 ]
+            ] as const;
+
+            for (const [ command, row, column ] of cases) {
+                setModelData(editor.model, GRID);
+                editor.execute(command);
+                expect({ command, ...caret() })
+                    .toEqual({ command, row, column, isCollapsed: true, isEmpty: true });
+            }
+        });
+
+        it("goes next to a selection of several cells, by the first of them", () => {
+            setModelData(editor.model, GRID);
+            selectCells(editor, [ 0, 1 ], [ 1, 2 ]);
+            editor.execute("triliumInsertTableRowsAbove");
+            expect(caret()).toEqual({ row: 1, column: 1, isCollapsed: true, isEmpty: true });
+
+            setModelData(editor.model, GRID);
+            selectCells(editor, [ 0, 1 ], [ 1, 2 ]);
+            editor.execute("triliumInsertTableColumnsRight");
+            expect(caret()).toEqual({ row: 0, column: 3, isCollapsed: true, isEmpty: true });
+        });
+
+        it("goes to the first cell of the row that Tab adds in the last cell", async () => {
+            setModelData(editor.model, `${modelTable([ [ "11", "12" ], [ "21", "2[]2" ] ])}`
+                + "<paragraph>after</paragraph>");
+            editor.editing.view.focus();
+            const event = new KeyboardEvent("keydown",
+                { key: "Tab", bubbles: true, cancelable: true });
+            Object.defineProperty(event, "keyCode", { value: 9 });
+            editor.editing.view.getDomRoot()?.dispatchEvent(event);
+            expect(caret()).toMatchObject({ row: 2, column: 0 });
+
+            await Promise.resolve();
+            editor.execute("insertTableRowAbove");
+            expect(caret()).toMatchObject({ row: 2, column: 0, isCollapsed: true, isEmpty: true });
+        });
+
+        it("stays where it is when its own cell spans the new row", () => {
+            setModelData(editor.model,
+                spannedTable([ [ { contents: "a[]", rowspan: 2 }, "b" ], [ "c" ] ]));
+            editor.execute("insertTableRowBelow");
+            expect(getModelData(editor.model)).toContain("<paragraph>a[]</paragraph>");
+        });
+    });
+
     describe("delete table", () => {
         it("is enabled only inside a table", () => {
             setModelData(editor.model, "<paragraph>fo[]o</paragraph>");
@@ -140,6 +219,15 @@ describe("TableContextMenu", () => {
             editor.execute("triliumDeleteTable");
             editor.execute("undo");
             expect(tableData(editor)).toBe(modelTable([["11", "12"]]));
+        });
+
+        it("does nothing when run in the change block that moves the selection out", () => {
+            const content = `${modelTable([["11", "12"]])}<paragraph>foo</paragraph>`;
+            setModelData(editor.model, content.replace("11", "1[]1"));
+
+            executeLeavingTable(editor, "triliumDeleteTable");
+
+            expect(getModelData(editor.model)).toBe(content.replace("foo", "[]foo"));
         });
     });
 
@@ -334,6 +422,15 @@ describe("TableContextMenu", () => {
 
             expect(getModelData(editor.model)).toBe(outer(withEveryCellSelected(inner)));
         });
+
+        it("does nothing when run in the change block that moves the selection out", () => {
+            const content = `${modelTable([["11", "12"]])}<paragraph>foo</paragraph>`;
+            setModelData(editor.model, content.replace("11", "1[]1"));
+
+            executeLeavingTable(editor, COMMAND);
+
+            expect(getModelData(editor.model)).toBe(content.replace("foo", "[]foo"));
+        });
     });
 
     describe("syncSelectionToDomTarget", () => {
@@ -431,6 +528,55 @@ describe("TableContextMenu", () => {
             expect(paragraph && mouseDown(paragraph, 2).defaultPrevented).toBe(false);
         });
     });
+
+    describe("mouse cell selection", () => {
+        it("selects cells only for gestures started with the primary button", () => {
+            const tableSelection = editor.plugins.get(TableSelection);
+            const placeCaret = () =>
+                setModelData(editor.model, modelTable([["1[]1", "12"], ["21", "22"]]));
+            const hasCellSelection = () => tableSelection.getSelectedTableCells() !== null;
+
+            // Middle and right drags.
+            for (const [button, buttons] of [[1, 4], [2, 2]]) {
+                placeCaret();
+                mouseDown(domCell(editor, 0, 0), button, { buttons });
+                mouseMove(domCell(editor, 1, 1), buttons);
+                expect(hasCellSelection(), `button ${button}`).toBe(false);
+                mouseUp(domCell(editor, 1, 1), button);
+            }
+
+            // Shift with the middle button.
+            placeCaret();
+            mouseDown(domCell(editor, 1, 1), 1, { buttons: 4, shiftKey: true });
+            expect(hasCellSelection(), "shift").toBe(false);
+            mouseUp(domCell(editor, 1, 1), 1);
+
+            // Primary drag.
+            placeCaret();
+            mouseDown(domCell(editor, 0, 0), 0, { buttons: 1 });
+            mouseMove(domCell(editor, 1, 1), 1);
+            expect(selectionCells(editor)).toHaveLength(4);
+            mouseUp(domCell(editor, 1, 1), 0);
+        });
+    });
+
+    describe("column resizing", () => {
+        it("starts only for the primary button", async () => {
+            setModelData(editor.model, modelTable([ [ "11", "12" ], [ "21", "22" ] ]));
+            const unresized = tableData(editor);
+
+            // Middle and right drags.
+            for (const [ button, buttons ] of [ [ 1, 4 ], [ 2, 2 ] ]) {
+                const mousedown = dragColumnResizer(editor, button, buttons);
+                expect(mousedown.defaultPrevented).toBe(false);
+                expect(tableData(editor)).toBe(unresized);
+                await waitForResizeThrottle();
+            }
+
+            dragColumnResizer(editor, 0, 1);
+            expect(tableData(editor)).not.toBe(unresized);
+        });
+    });
 });
 
 function modelTable(rows: string[][], attributes = ""): string {
@@ -482,6 +628,21 @@ function selectionCells(editor: ClassicEditor): ModelElement[] {
     return editor.plugins.get(TableUtils).getSelectionAffectedTableCells(editor.model.document.selection);
 }
 
+/**
+ * Runs `command` in the change block that moves the selection into the paragraph after the table,
+ * where the command still has the `isEnabled` of the selection in the table.
+ */
+function executeLeavingTable(editor: ClassicEditor, command: string) {
+    const paragraph = editor.model.document.getRoot()?.getChild(1);
+    if (!paragraph?.is("element", "paragraph")) {
+        throw new Error("No paragraph follows the table.");
+    }
+    editor.model.change((writer) => {
+        writer.setSelection(paragraph, 0);
+        editor.execute(command);
+    });
+}
+
 /** A widget whose raw view element holds a rendered table, like an included note's preview. */
 function RawTableWidget(editor: Editor) {
     editor.model.schema.register("rawTable", { inheritAllFrom: "$blockObject" });
@@ -494,8 +655,40 @@ function RawTableWidget(editor: Editor) {
     });
 }
 
-function mouseDown(target: HTMLElement, button: number): MouseEvent {
-    const event = new MouseEvent("mousedown", { button, bubbles: true, cancelable: true });
+function mouseDown(target: HTMLElement, button: number, init: MouseEventInit = {}): MouseEvent {
+    const event = new MouseEvent("mousedown", { ...init, button, bubbles: true, cancelable: true });
     target.dispatchEvent(event);
     return event;
+}
+
+/**
+ * Drags the column resizer of the first cell 60px to the right with `button` and returns the
+ * `mousedown` event.
+ */
+function dragColumnResizer(editor: ClassicEditor, button: number, buttons: number) {
+    const resizer = domCell(editor, 0, 0).querySelector<HTMLElement>(".ck-table-column-resizer");
+    if (!resizer) {
+        throw new Error("The cell has no column resizer.");
+    }
+
+    const { left, top } = resizer.getBoundingClientRect();
+    const init = { button, buttons, clientY: top, bubbles: true, cancelable: true };
+    const mousedown = new MouseEvent("mousedown", { ...init, clientX: left });
+    resizer.dispatchEvent(mousedown);
+    resizer.dispatchEvent(new MouseEvent("mousemove", { ...init, clientX: left + 60 }));
+    resizer.dispatchEvent(new MouseEvent("mouseup", { ...init, clientX: left + 60 }));
+    return mousedown;
+}
+
+/** Waits out the 50ms throttle of the `mousemove` handler of `TableColumnResizeEditing`. */
+function waitForResizeThrottle() {
+    return new Promise((resolve) => setTimeout(resolve, 60));
+}
+
+function mouseMove(target: HTMLElement, buttons: number) {
+    target.dispatchEvent(new MouseEvent("mousemove", { buttons, bubbles: true }));
+}
+
+function mouseUp(target: HTMLElement, button: number) {
+    target.dispatchEvent(new MouseEvent("mouseup", { button, bubbles: true }));
 }

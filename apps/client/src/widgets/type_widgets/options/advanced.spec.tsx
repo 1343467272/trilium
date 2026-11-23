@@ -28,8 +28,8 @@ vi.mock("../../../services/toast", () => ({
     default: { showMessage: vi.fn(), showError: vi.fn() }
 }));
 
-vi.mock("../../react/hooks", async (importOriginal) => ({
-    ...(await importOriginal<typeof import("../../react/hooks")>()),
+vi.mock("../../react/hooks/options", async (importOriginal) => ({
+    ...(await importOriginal<typeof import("../../react/hooks/options")>()),
     useTriliumOptionJson: () => [ mocks.enabled, (value: string[]) => void mocks.saved.push(value) ]
 }));
 
@@ -41,7 +41,6 @@ let host: HTMLElement;
 
 beforeEach(() => {
     mocks.features = [
-        { id: "new-layout", name: "New layout", description: "…" },
         { id: "llm", name: "AI", description: "…" },
         { id: "spreadsheets", name: "Spreadsheets", description: "…" }
     ];
@@ -69,7 +68,7 @@ describe("the experimental features card", () => {
     it("leaves out the features that are switched somewhere better suited to them", () => {
         open();
 
-        // The layout has its own illustrated choice on Appearance, and the AI switch heads its own page.
+        // The AI switch heads its own page.
         expect(featureSwitches()).toHaveLength(1);
         expect(host.querySelector(".tn-card-option-label")?.firstChild?.textContent).toBe("Spreadsheets");
     });

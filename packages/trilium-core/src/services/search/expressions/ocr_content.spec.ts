@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import becca from "../../../becca/becca.js";
 import type BNote from "../../../becca/entities/bnote.js";
@@ -227,6 +227,18 @@ describe("OCRContentExpression (real DB)", () => {
         expect(exp.toString()).toBe("OCRContent('foo', 'bar')");
     });
 
+    it("leaves out a match whose note is no longer in becca", () => {
+        const note = createNoteWithOcrText("evicted marker");
+        const inputNoteSet = new NoteSet([ note ]);
+        delete becca.notes[note.noteId];
+
+        try {
+            expect(execute(new OCRContentExpression([ "evicted" ]), inputNoteSet).notes).toEqual([]);
+        } finally {
+            becca.notes[note.noteId] = note;
+        }
+    });
+
     describe("protected notes", () => {
         beforeEach(() => protectedSessionService.setDataKey(PROTECTED_KEY));
         afterEach(() => protectedSessionService.resetDataKey());
@@ -253,6 +265,63 @@ describe("OCRContentExpression (real DB)", () => {
 
             expect(result.hasNote(openly)).toBe(true);
             expect(result.hasNote(encrypted)).toBe(true);
+        });
+
+        it("reads only the notes of the input set", () => {
+            const inSet = [
+                createNoteWithOcrText("scopedmarker own"),
+                createNoteWithOcrAttachment("scopedmarker attachment"),
+                createProtectedNoteWithOcrText("scopedmarker protected own"),
+                createProtectedNoteWithOcrAttachment("scopedmarker protected attachment")
+            ];
+            const outOfSet = [
+                createNoteWithOcrText("scopedmarker own"),
+                createNoteWithOcrAttachment("scopedmarker attachment"),
+                createProtectedNoteWithOcrText("scopedmarker protected own"),
+                createProtectedNoteWithOcrAttachment("scopedmarker protected attachment")
+            ];
+
+            const sql = getSql();
+            const getColumn = sql.getColumn.bind(sql);
+            const iterateRows = sql.iterateRows.bind(sql);
+            const readNoteIds = new Set<string>();
+            vi.spyOn(sql, "getColumn").mockImplementation((query, params) => {
+                const column = getColumn<string>(query, params);
+                for (const noteId of column) {
+                    readNoteIds.add(noteId);
+                }
+                return column as never;
+            });
+            vi.spyOn(sql, "iterateRows").mockImplementation(function* (query, params) {
+                for (const row of iterateRows<{ noteId: string }>(query, params)) {
+                    readNoteIds.add(row.noteId);
+                    yield row as never;
+                }
+            });
+
+            const result = execute(new OCRContentExpression([ "scopedmarker" ]), new NoteSet(inSet));
+            vi.restoreAllMocks();
+
+            const inSetIds = inSet.map((note) => note.noteId).sort();
+            expect(noteIds(result)).toEqual(inSetIds);
+            expect([ ...readNoteIds ].sort()).toEqual(inSetIds);
+            for (const note of outOfSet) {
+                expect(readNoteIds.has(note.noteId)).toBe(false);
+            }
+        });
+
+        it("matches a note once however many of its protected blobs match", () => {
+            const note = createProtectedNoteWithOcrAttachment("twice marker one");
+            const second = getContext().init(() => note.saveAttachment({
+                role: "image",
+                mime: "image/png",
+                title: "second-ocr-attachment",
+                content: "second-attachment-binary-placeholder"
+            }));
+            setTextRepresentationForBlob(second.blobId ?? "", blobService.encryptTextRepresentation("twice marker two", true));
+            getSql().execute("UPDATE attachments SET isProtected = 1 WHERE ownerId = ?", [ note.noteId ]);
+
+            expect(noteIds(execute(new OCRContentExpression([ "twice" ])))).toEqual([ note.noteId ]);
         });
 
         it("cannot match a protected note once the session is closed", () => {

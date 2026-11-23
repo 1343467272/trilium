@@ -38,6 +38,7 @@ const serverModule = (await vi.importActual("./server.js")) as {
     default: typeof import("./server.js").default;
 };
 const server = serverModule.default;
+const { requestStartupData } = await import("./startup_requests.js");
 
 type AjaxOptions = JQueryAjaxSettings & {
     success: (body: unknown, textStatus: string, jqXhr: any) => void;
@@ -222,7 +223,22 @@ describe("ajax error handling", () => {
         };
         await expect(server.postWithTimeout("url", 1000, {}, undefined, { silentBadRequest: true }))
             .rejects.toBe(JSON.stringify({ message: "CLI not found" }));
+        await expect(server.get("url", undefined, true, { silentBadRequest: true }))
+            .rejects.toBe(JSON.stringify({ message: "CLI not found" }));
         expect(toastMock.showError).not.toHaveBeenCalled();
+    });
+
+    it("stays silent on 409 from postWithSilentErrors, still rejecting with the body", async () => {
+        const responseText = JSON.stringify({ message: "The headings changed" });
+        (window as any).$.ajax = (opts: AjaxOptions) => {
+            opts.error({ status: 409, responseText });
+        };
+        await expect(server.postWithSilentErrors("url", {})).rejects.toBe(responseText);
+        expect(toastMock.showErrorTitleAndMessage).not.toHaveBeenCalled();
+        expect((window as any).logError).not.toHaveBeenCalled();
+
+        await expect(server.post("url", {})).rejects.toBe(responseText);
+        expect(toastMock.showErrorTitleAndMessage).toHaveBeenCalledOnce();
     });
 
     it("reports validation errors (400) and still rejects when reportError throws", async () => {
@@ -496,7 +512,11 @@ describe("localFetch transport", () => {
         answerWith("The OneNote connection was lost.", { status: 401 });
         await expect(server.getWithSilentUnauthorized("url")).rejects.toBe("The OneNote connection was lost.");
 
+        answerWith("The headings changed", { status: 409 });
+        await expect(server.postWithSilentErrors("url", {})).rejects.toBe("The headings changed");
+
         expect(toastMock.showError).not.toHaveBeenCalled();
+        expect(toastMock.showErrorTitleAndMessage).not.toHaveBeenCalled();
         expect((window as any).logError).not.toHaveBeenCalled();
     });
 
@@ -600,5 +620,177 @@ describe("localFetch transport", () => {
         localFetch.mockRejectedValue(new Error("Worker error: boom"));
 
         await expect(server.get("url")).rejects.toThrow("Worker error: boom");
+    });
+});
+
+describe("uploadForm", () => {
+    const file = new File([ "zip" ], "notes.zip", { type: "application/zip" });
+    const options = {
+        method: "POST",
+        headers: { "x-csrf-token": "tok", "trilium-hoisted-note-id": null },
+        fields: { taskId: "t1" },
+        file,
+        timeoutMs: 1000
+    };
+
+    afterEach(() => {
+        delete (window as any).standaloneApi;
+    });
+
+    it("hands the File to the worker on a tab that owns it, and parses a JSON reply", async () => {
+        const localUpload = vi.fn(async () => new Response(JSON.stringify({ noteId: "n1" }), {
+            headers: { "content-type": "application/json" }
+        }));
+        (window as any).standaloneApi = { localFetch: vi.fn(), localUpload };
+        (window as any).$.ajax = () => {
+            throw new Error("$.ajax was used even though a tab owns the worker");
+        };
+
+        expect(await server.uploadForm("notes/root/notes-import", options)).toEqual({ noteId: "n1" });
+        expect(localUpload).toHaveBeenCalledWith("/api/notes/root/notes-import", {
+            method: "POST",
+            headers: { "x-csrf-token": "tok" },
+            fields: { taskId: "t1" },
+            file
+        });
+    });
+
+    it("answers an empty JSON reply with null and any other reply with its text", async () => {
+        const reply = (response: Response) => {
+            (window as any).standaloneApi = { localUpload: vi.fn(async () => response) };
+            return server.uploadForm("notes/root/notes-import", options);
+        };
+
+        expect(await reply(new Response("", { headers: { "content-type": "application/json" } }))).toBeNull();
+        expect(await reply(new Response("<p>done</p>", { headers: { "content-type": "text/html" } }))).toBe("<p>done</p>");
+        expect(await reply(new Response(new Blob([ "plain" ])))).toBe("plain");
+    });
+
+    it("rejects with the status and text of an error reply, the fields a jqXHR carries", async () => {
+        (window as any).standaloneApi = {
+            localUpload: vi.fn(async () => new Response("Import failed", { status: 500 }))
+        };
+
+        await expect(server.uploadForm("notes/root/notes-import", options))
+            .rejects.toEqual({ status: 500, responseText: "Import failed" });
+    });
+
+    it("rejects when the worker does not answer in time", async () => {
+        vi.useFakeTimers();
+        try {
+            (window as any).standaloneApi = { localUpload: vi.fn(() => new Promise(() => {})) };
+            const pending = expect(server.uploadForm("notes/root/notes-import", options)).rejects.toThrow("Timed out after 1000ms");
+            await vi.advanceTimersByTimeAsync(1000);
+            await pending;
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it("sends a multipart XHR elsewhere, with the file under `upload`", async () => {
+        const ajaxSpy = vi.fn(async () => ({ ok: true }));
+        (window as any).$.ajax = ajaxSpy;
+
+        expect(await server.uploadForm("notes/root/notes-import", { ...options, dataType: "json" })).toEqual({ ok: true });
+        const opts = (ajaxSpy.mock.calls[0] as unknown[])[0] as any;
+        expect(opts).toMatchObject({
+            url: "/api/notes/root/notes-import",
+            type: "POST",
+            dataType: "json",
+            timeout: 1000,
+            headers: { "x-csrf-token": "tok" },
+            contentType: false,
+            processData: false
+        });
+        expect((opts.data as FormData).get("upload")).toBeInstanceOf(File);
+        expect((opts.data as FormData).get("taskId")).toBe("t1");
+    });
+});
+
+describe("requests started at startup", () => {
+    afterEach(() => {
+        vi.unstubAllGlobals();
+    });
+
+    function stubFetch(responses: Record<string, Response>) {
+        const fetchSpy = vi.fn(async (url: string, _init?: RequestInit) => responses[url] ?? new Response("{}"));
+        vi.stubGlobal("fetch", fetchSpy);
+        return fetchSpy;
+    }
+
+    it("sends the startup GETs with the session's headers, and hands each response to the first get()", async () => {
+        const fetchSpy = stubFetch({
+            "/api/options": new Response(JSON.stringify({ theme: "next" }), {
+                headers: { "content-type": "application/json", "trilium-max-entity-change-id": "4242" }
+            })
+        });
+        const ajaxSpy = vi.fn((opts: AjaxOptions) => opts.success({ theme: "from ajax" }, "success", fakeJqXhr("")));
+        (window as any).$.ajax = ajaxSpy;
+
+        requestStartupData();
+        expect(fetchSpy.mock.calls.map(([ url ]) => url)).toEqual([ "/api/options", "/api/tree", "/api/keyboard-actions" ]);
+        expect(fetchSpy.mock.calls[0][1]).toMatchObject({
+            headers: { "trilium-component-id": "comp-glob", "x-csrf-token": "csrf-1" }
+        });
+
+        expect(await server.get("options")).toEqual({ theme: "next" });
+        expect(ajaxSpy).not.toHaveBeenCalled();
+        expect(server.getMaxKnownEntityChangeId()).toBeGreaterThanOrEqual(4242);
+
+        // Taken once: a later call asks again.
+        expect(await server.get("options")).toEqual({ theme: "from ajax" });
+        expect(ajaxSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it("leaves out the options when /bootstrap brought them", () => {
+        const fetchSpy = stubFetch({});
+        (window as any).glob.options = { theme: "next" };
+
+        requestStartupData();
+        expect(fetchSpy.mock.calls.map(([ url ]) => url)).toEqual([ "/api/tree", "/api/keyboard-actions" ]);
+    });
+
+    it("sends the request itself when the startup one failed, or a caller asks for more than its body", async () => {
+        stubFetch({
+            "/api/options": new Response("boom", { status: 500 }),
+            "/api/tree": new Response(JSON.stringify({ notes: [] }), { headers: { "content-type": "application/json" } })
+        });
+        const ajaxSpy = vi.fn((opts: AjaxOptions) => opts.success({ from: "ajax" }, "success", fakeJqXhr("")));
+        (window as any).$.ajax = ajaxSpy;
+
+        requestStartupData();
+        expect(await server.get("options")).toEqual({ from: "ajax" });
+        expect(ajaxSpy.mock.calls[0][0].url).toBe("/api/options");
+
+        // A raw read wants the text as is, which only the ordinary request gives it.
+        expect(await server.get("tree", undefined, true)).toEqual({ from: "ajax" });
+        expect(ajaxSpy).toHaveBeenCalledTimes(2);
+    });
+
+    it("gives up on a stalled startup request after a minute and sends it again", async () => {
+        vi.useFakeTimers();
+        try {
+            // A real fetch rejects once its signal aborts, whether it waits on the response or the body.
+            const signals: AbortSignal[] = [];
+            vi.stubGlobal("fetch", vi.fn((_url: string, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+                const signal = init?.signal;
+                if (signal) signals.push(signal);
+                signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")));
+            })));
+            const ajaxSpy = vi.fn((opts: AjaxOptions) => opts.success({ from: "ajax" }, "success", fakeJqXhr("")));
+            (window as any).$.ajax = ajaxSpy;
+
+            requestStartupData();
+            const tree = server.get("tree");
+            await vi.advanceTimersByTimeAsync(59_000);
+            expect(ajaxSpy).not.toHaveBeenCalled();
+            await vi.advanceTimersByTimeAsync(1_000);
+            expect(await tree).toEqual({ from: "ajax" });
+            expect(ajaxSpy.mock.calls[0][0].url).toBe("/api/tree");
+            expect(signals.length).toBeGreaterThan(0);
+            expect(signals.every((signal) => signal.aborted)).toBe(true);
+        } finally {
+            vi.useRealTimers();
+        }
     });
 });

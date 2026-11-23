@@ -1,5 +1,8 @@
 import "./UserAttributesList.css";
 
+import {
+    extractAttributeDefinitionTypeAndName
+} from "@triliumnext/commons/src/lib/promoted_attribute_definition_parser.js";
 import type { DefinitionObject } from "@triliumnext/commons";
 import { ComponentChildren, CSSProperties } from "preact";
 import { useEffect, useState } from "preact/hooks";
@@ -8,7 +11,7 @@ import FNote from "../../entities/fnote";
 import attributes from "../../services/attributes";
 import { getReadableTextColor } from "../../services/css_class_manager";
 import { formatDateTime } from "../../utils/formatters";
-import { useTriliumEvent } from "../react/hooks";
+import { useTriliumEvent } from "../react/hooks/events";
 import Icon from "../react/Icon";
 import NoteLink from "../react/NoteLink";
 
@@ -142,7 +145,7 @@ function getAttributesWithDefinitions(
     const result: AttributeWithDefinitions[] = [];
     for (const attr of attributeDefintions) {
         const def = attr.getDefinition();
-        const [ type, name ] = attr.name.split(":", 2);
+        const [ type, name ] = extractAttributeDefinitionTypeAndName(attr.name);
         const friendlyName = def?.promotedAlias || name;
         const props: Omit<AttributeWithDefinitions, "value"> = { def, name, type, friendlyName };
 

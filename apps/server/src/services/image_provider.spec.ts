@@ -1,4 +1,6 @@
-import { cls, estimateJpegQuality, type ImageCompressionRequest, options } from '@triliumnext/core';
+import {
+    cls, estimateJpegQuality, getLog, type ImageCompressionRequest, imageCompressionService, options
+} from '@triliumnext/core';
 import { Jimp } from 'jimp';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
@@ -189,6 +191,24 @@ describe('serverImageProvider.processImage', () => {
         expect((await serverImageProvider.processImage(noisyPng, 'a.png', true)).buffer).not.toBe(noisyPng);
     });
 
+    it('stores the original and logs the failure when compression throws something other than an Error', async () => {
+        setOptions({ compressImages: 'true', imageMaxWidthHeight: '100' });
+        const makeRequest = vi.spyOn(imageCompressionService, 'automaticCompressionRequest').mockImplementation(() => {
+            throw 'no request';
+        });
+        const logError = vi.spyOn(getLog(), 'error').mockImplementation(() => {});
+
+        try {
+            const result = await serverImageProvider.processImage(noisyPng, 'odd.png', true);
+
+            expect(result).toEqual({ buffer: noisyPng, format: { ext: 'png', mime: 'image/png' } });
+            expect(logError).toHaveBeenCalledWith("Failed to compress image 'odd.png': no request");
+        } finally {
+            makeRequest.mockRestore();
+            logError.mockRestore();
+        }
+    });
+
     it('uses the octet-stream fallback format when the type cannot be detected', async () => {
         setOptions({ compressImages: 'false' });
 
@@ -248,6 +268,22 @@ describe('serverImageProvider.processImage', () => {
 
         expect(result.format).toEqual({ ext: 'png', mime: 'image/png' });
         expect(result.buffer.byteLength).toBeLessThan(tallPng.byteLength);
+    });
+
+    it('holds only the width of an image shrunk by width, however tall it is', async () => {
+        const sizeOf = async (shrink: boolean | 'width') => {
+            const { bitmap } = await Jimp.read(Buffer.from(
+                (await serverImageProvider.processImage(tallPng, 'tall.png', shrink)).buffer));
+            return [ bitmap.width, bitmap.height ];
+        };
+        setOptions({ imageMaxWidthHeight: '100' });
+        expect(await sizeOf(true)).toEqual([ 33, 100 ]);
+        expect(await sizeOf('width')).toEqual([ 100, 300 ]);
+
+        // 200x600 is within a bound of 300 by width, and a PNG kept as it is has nothing else to gain.
+        setOptions({ imageMaxWidthHeight: '300', imagePngHandling: 'keep' });
+        expect((await serverImageProvider.processImage(tallPng, 'tall.png', 'width')).buffer).toBe(tallPng);
+        expect(await sizeOf(true)).toEqual([ 100, 300 ]);
     });
 
     it('keeps the original buffer when shrinking does not reduce the size', async () => {
@@ -630,6 +666,18 @@ describe('serverImageProvider.compressImage', () => {
         // corruptPng passes format detection as PNG but Jimp cannot read it. The caller turns this
         // into a logged, per-image "error" skip; swallowing it here would hide the failure instead.
         await expect(serverImageProvider.compressImage(corruptPng, request({ maxWidthHeight: 100 }))).rejects.toThrow();
+    });
+});
+
+describe('serverImageProvider.resizeForPreview', () => {
+    it('scales a preview image down to the longest edge asked for', async () => {
+        const outcome = await serverImageProvider.resizeForPreview(tallPng, { maxEdge: 60, jpegQuality: 75 });
+
+        if (!outcome.resized) throw new Error('expected the preview to be resized');
+        const decoded = await Jimp.read(Buffer.from(outcome.bytes));
+        expect([decoded.bitmap.width, decoded.bitmap.height]).toEqual([20, 60]);
+        expect(await serverImageProvider.resizeForPreview(garbageBuffer, { maxEdge: 60, jpegQuality: 75 }))
+            .toEqual({ resized: false, reason: 'undecodable' });
     });
 });
 

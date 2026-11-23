@@ -1,4 +1,5 @@
-import { isProviderOfKind, type LlmAttachmentKind, type LlmModelInfo, type LlmProviderKind } from "@triliumnext/commons";
+import type { LlmAttachmentKind, LlmModelInfo, LlmProviderKind } from "@triliumnext/commons";
+import { isProviderOfKind } from "@triliumnext/commons/src/lib/llm_api.js";
 
 import { formatModelCost } from "./llm_model_cost.js";
 import options from "./options.js";
@@ -64,8 +65,8 @@ export function readSearchProviders(): SearchProviderOption[] {
         .map(({ id, name, provider }) => ({ id, name, provider }));
 }
 
-/** Provider types whose models search the web themselves when `enableWebSearch` is set. */
-const BUILT_IN_WEB_SEARCH = new Set([ "anthropic", "openai", "google", "claude-agent", "antigravity-agent", "codex-agent" ]);
+/** Provider types that search the web with their own service when `enableWebSearch` is set. */
+const BUILT_IN_WEB_SEARCH = new Set([ "anthropic", "openai", "google", "deepseek", "claude-agent", "antigravity-agent", "codex-agent" ]);
 
 /** Provider types that run their own agent loop, which takes no tool from Trilium's chat. */
 const OWN_AGENT_LOOP = new Set([ "claude-agent", "copilot-agent", "antigravity-agent", "codex-agent" ]);

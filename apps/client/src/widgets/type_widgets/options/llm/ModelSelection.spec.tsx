@@ -16,7 +16,7 @@ vi.mock("../../../../services/i18n", async () => {
         lng: "en",
         resources: { en: { translation: { llm: { models_load_failed: "Could not load models: {{error}}" } } } }
     });
-    return { t: (key: string, options?: Record<string, unknown>) => i18next.t(key, options) };
+    return { t: (key: string, options?: Record<string, unknown>) => i18next.t(key, options ?? {}) };
 });
 
 // A lightweight checkbox that records its onChange so we can toggle it directly.
@@ -109,6 +109,23 @@ describe("ModelSelection", () => {
         expect(onChange).toHaveBeenCalledWith([fresh, gone]);
     });
 
+    it("re-seeds the recommended models when the listing carries none of the stored selection", async () => {
+        // A subscription catalog that moved on wholesale (Claude Code after a model generation):
+        // every stored id is gone, and keeping them would leave the chat picker on models the
+        // provider refuses while the new ones sit unticked.
+        const stored: LlmModelInfo[] = [
+            { id: "old-a", name: "Old A" },
+            { id: "old-b", name: "Old B" }
+        ];
+        const onChange = vi.fn();
+
+        await renderSelection({
+            query: { provider: "claude-agent" }, selected: stored, onChange, autoSelectDefaults: false
+        });
+        expect(onChange).toHaveBeenCalledOnce();
+        expect(onChange).toHaveBeenCalledWith([MODELS[0], MODELS[2]]);
+    });
+
     it("leaves an empty selection untouched when auto-select is off", async () => {
         // A provider deliberately emptied to "hide all" — reopening its editor
         // must not silently re-populate it (see shouldSeedDefaultModels).
@@ -172,5 +189,22 @@ describe("ModelSelection", () => {
         fetchProviderModelsMock.mockResolvedValue([]);
         const empty = await renderSelection({ query: { provider: "ollama" }, selected: [], onChange: vi.fn(), troubleshooting });
         expect(empty.textContent).toContain("check the server");
+    });
+
+    it("lists the models again on Retry, after a failure as after an empty listing", async () => {
+        fetchProviderModelsMock.mockRejectedValueOnce(new Error("ECONNREFUSED")).mockResolvedValueOnce([]).mockResolvedValueOnce(MODELS);
+        const el = await renderSelection({ query: { provider: "ollama" }, selected: [], onChange: vi.fn() });
+        expect(el.textContent).toContain("ECONNREFUSED");
+
+        const retry = buttonByLabel(el, "llm.retry");
+        expect(retry).toBeDefined();
+        await act(async () => retry?.click());
+        await act(async () => {});
+        expect(el.textContent).toContain("llm.models_none_available");
+
+        await act(async () => buttonByLabel(el, "llm.retry")?.click());
+        await act(async () => {});
+        expect(fetchProviderModelsMock).toHaveBeenCalledTimes(3);
+        expect(el.querySelectorAll(".checkbox-stub")).toHaveLength(MODELS.length);
     });
 });

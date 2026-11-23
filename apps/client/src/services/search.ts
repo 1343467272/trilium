@@ -1,5 +1,3 @@
-import type { SearchWithTokensResponse } from "@triliumnext/commons";
-
 import type Component from "../components/component.js";
 import froca from "./froca.js";
 import server from "./server.js";
@@ -19,11 +17,12 @@ async function searchForNotes(searchString: string) {
 /**
  * Runs a search restricted to one subtree and returns the matching note ids together with the
  * tokens to highlight and any parse error, for filtering a collection down to the matches.
+ * Archived notes are searched only when `includeArchived` is set.
  */
-async function searchInSubtree(searchString: string, ancestorNoteId: string) {
-    return await server.get<SearchWithTokensResponse>(
-        `search?searchString=${encodeURIComponent(searchString)}`
-        + `&ancestorNoteId=${encodeURIComponent(ancestorNoteId)}&includeTokens=true`);
+async function searchInSubtree(
+    searchString: string, ancestorNoteId: string, includeArchived: boolean
+) {
+    return await froca.searchInSubtree(searchString, ancestorNoteId, includeArchived);
 }
 
 /**

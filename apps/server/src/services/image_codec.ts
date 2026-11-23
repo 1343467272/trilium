@@ -117,7 +117,9 @@ export function planFromBytes(
     // to an image should not cost more than doing it. Dimensions the header does not give up — past
     // the end of a prefix, or behind metadata — leave this open, and the decode settles it.
     const declared = inspectImage(bytes);
-    const declaredEdge = Math.max(declared.width ?? 0, declared.height ?? 0);
+    const declaredEdge = request.widthOnly
+        ? declared.width ?? 0
+        : Math.max(declared.width ?? 0, declared.height ?? 0);
     const mayNeedResize = request.resize && (declaredEdge === 0 || declaredEdge > request.maxWidthHeight);
 
     if (!mayNeedResize && !worthReencoding) {
@@ -209,7 +211,38 @@ export function decodeCostOf({ width, height }: InspectedImage): number | null {
  * them, so passing a memory budget there reads as correct and does nothing at all.
  */
 export function decodeImage(buffer: Uint8Array, budgetMb: number = DECODE_MEMORY_MB) {
-    return Jimp.fromBuffer(asBuffer(buffer), { "image/jpeg": { maxMemoryUsageInMB: budgetMb } });
+    return Jimp.fromBuffer(asBuffer(endAtPngIend(buffer)), { "image/jpeg": { maxMemoryUsageInMB: budgetMb } });
+}
+
+const PNG_SIGNATURE = [ 0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a ];
+const IEND = [ 0x49, 0x45, 0x4e, 0x44 ];
+
+/**
+ * Cuts a PNG off after its `IEND` chunk, because pngjs rejects a file with bytes past it. Image
+ * viewers ignore those bytes, and an editor that overwrites a file without truncating it leaves the
+ * tail of the previous image there. Anything that is not a well-formed PNG up to `IEND` is
+ * returned as is.
+ */
+function endAtPngIend(buffer: Uint8Array): Uint8Array {
+    if (!PNG_SIGNATURE.every((byte, index) => buffer[index] === byte)) {
+        return buffer;
+    }
+
+    const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+    // Each chunk is a 4-byte length, a 4-byte type, the data and a 4-byte CRC.
+    let offset = PNG_SIGNATURE.length;
+
+    while (offset + 12 <= buffer.byteLength) {
+        const end = offset + 12 + view.getUint32(offset);
+
+        if (IEND.every((byte, index) => buffer[offset + 4 + index] === byte)) {
+            return end < buffer.byteLength ? buffer.subarray(0, end) : buffer;
+        }
+
+        offset = end;
+    }
+
+    return buffer;
 }
 
 /** What {@link decodeImage} hands back, for the helpers that work on a decoded image. */
@@ -378,7 +411,8 @@ export async function compressImageBytes(
     const start = Date.now();
     const image = await decodeImage(buffer, budgetMb);
     const { width, height } = image.bitmap;
-    const needsResize = request.resize && Math.max(width, height) > request.maxWidthHeight;
+    const needsResize = request.resize
+        && (request.widthOnly ? width : Math.max(width, height)) > request.maxWidthHeight;
 
     // Only consulted where it changes the answer. JPEG has no alpha channel, so a transparent
     // image cannot be converted — it is optimized instead, that being the best still available
@@ -399,7 +433,7 @@ export async function compressImageBytes(
     }
 
     if (needsResize) {
-        if (width >= height) {
+        if (request.widthOnly || width >= height) {
             image.resize({ w: request.maxWidthHeight });
         } else {
             image.resize({ h: request.maxWidthHeight });

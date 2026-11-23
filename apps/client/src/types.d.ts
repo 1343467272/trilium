@@ -21,7 +21,7 @@ interface CustomGlobals extends BootstrapDefinition {
     getComponentByEl: typeof appContext.getComponentByEl;
     getHeaders: typeof server.getHeaders;
     getReferenceLinkTitle: (href: string) => Promise<string>;
-    getReferenceLinkTitleSync: (href: string) => string;
+    getReferenceLinkTitleSync: (href: string, storedTitle?: string) => string;
     getActiveContextNote: () => FNote | null;
     getThemeStyle: () => "auto" | "light" | "dark";
     ESLINT: Library;
@@ -60,9 +60,17 @@ declare global {
             getPlatform?: () => string;
         };
 
+        /**
+         * Called by the Android app's `MainActivity` on the system back gesture or button; `false`
+         * leaves the app to go to the background. See `services/system_back.ts`.
+         */
+        __triliumHandleBack?: () => boolean;
+
         electronApi?: ElectronApi;
         /** Present only in the standalone build, where the stack runs in this browser. */
         standaloneApi?: StandaloneApi;
+        /** The `/bootstrap` request that `index.html` starts before any module has loaded. */
+        bootstrapRequest?: Promise<Response>;
 
         /**
          * Chromium's Local Font Access API, absent from the DOM typings. Defined only in a secure
@@ -91,29 +99,4 @@ declare global {
     var glob: CustomGlobals;
     //@ts-ignore
     var require: RequireMethod;
-
-    /*
-     * Panzoom
-     */
-
-    function panzoom(el: HTMLElement, opts: {
-        maxZoom: number,
-        minZoom: number,
-        smoothScroll: false,
-        filterKey: (e: { altKey: boolean }, dx: number, dy: number, dz: number) => void;
-    });
-
-    interface PanZoomTransform {
-        x: number;
-        y: number;
-        scale: number;
-    }
-
-    interface PanZoom {
-        zoomTo(x: number, y: number, scale: number);
-        moveTo(x: number, y: number);
-        on(event: string, callback: () => void);
-        getTransform(): PanZoomTransform;
-        dispose(): void;
-    }
 }

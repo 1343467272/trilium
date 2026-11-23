@@ -58,6 +58,28 @@ describe("sanitize", () => {
 
         const dirty = `<figure class="include-note" style="--include-note-height:calc(100vh);--other:1em" data-note-id="abc"></figure>`;
         expect(sanitizeHtml(dirty)).toBe(`<figure class="include-note" data-note-id="abc"></figure>`);
+
+        // An embed that keeps its source in the note is saved as a code block.
+        const inline = `<pre style="--include-note-width:30em;--include-note-height:12.5em" data-box-size="medium"><code class="language-mermaid">graph TD;</code></pre>`;
+        expect(sanitizeHtml(inline)).toBe(inline);
+
+        // A video takes its height from its width.
+        const video = `<section class="link-embed" style="--include-note-width:30em"`
+            + ` data-url="https://youtu.be/dQw4w9WgXcQ" data-embed-type="youtube"`
+            + ` data-position="wrap-left"></section>`;
+        const width = "--include-note-width:30em";
+        expect(sanitizeHtml(video)).toBe(video);
+        expect(sanitizeHtml(video.replace(width, "--include-note-height:12em")))
+            .toBe(video.replace(` style="${width}"`, ""));
+    });
+
+    it("keeps the width and the position of an aside, and drops other variables on it", () => {
+        const width = "--aside-width:18.5em";
+        const aside = `<aside style="${width}" data-position="wrap-right"><p>Text</p></aside>`;
+        expect(sanitizeHtml(aside)).toBe(aside);
+
+        expect(sanitizeHtml(aside.replace(width, "--aside-width:calc(100vh);--other:1em")))
+            .toBe(`<aside data-position="wrap-right"><p>Text</p></aside>`);
     });
 
     it("keeps the hidden-border style on table header cells", () => {

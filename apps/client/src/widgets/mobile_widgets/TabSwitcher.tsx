@@ -1,35 +1,26 @@
 import "./TabSwitcher.css";
 
-import clsx from "clsx";
-import { ComponentChild, createPortal, Fragment } from "preact";
-import { useCallback, useEffect, useRef, useState } from "preact/hooks";
+import { createPortal, type RefObject } from "preact";
+import { useEffect, useRef, useState } from "preact/hooks";
 
-import appContext, { CommandNames } from "../../components/app_context";
-import NoteContext from "../../components/note_context";
-import FNote from "../../entities/fnote";
-import contextMenu from "../../menus/context_menu";
-import { getHue, parseColor } from "../../services/css_class_manager";
-import froca from "../../services/froca";
-import { t } from "../../services/i18n";
-import type { ViewMode, ViewScope } from "../../services/link";
-import { NoteContent } from "../collections/legacy/ListOrGridView";
-import { LaunchBarActionButton, LauncherNoteProps } from "../launch_bar/launch_bar_widgets";
-import { ICON_MAPPINGS } from "../note_bars/CollectionProperties";
-import ActionButton from "../react/ActionButton";
-import { useActiveNoteContext, useNoteIcon, useTriliumEvents } from "../react/hooks";
-import Icon from "../react/Icon";
-import LinkButton from "../react/LinkButton";
-import Modal from "../react/Modal";
+import appContext from "../../components/app_context";
+import type NoteContext from "../../components/note_context";
+import { LaunchBarActionButton, type LauncherNoteProps } from "../launch_bar/launch_bar_widgets";
+import { useTriliumEvents } from "../react/hooks/events";
+import { preloadLazyModule, useLazyModule } from "../react/LazyComponent";
+import { isTabSwipeActive, type SwipeDirection, TabSwipe } from "./tab_swipe";
 
-const VIEW_MODE_ICON_MAPPINGS: Record<Exclude<ViewMode, "default">, string> = {
-    source: "bx bx-code",
-    "contextual-help": "bx bx-help-circle",
-    "note-map": "bx bxs-network-chart",
-    attachments: "bx bx-paperclip"
-};
+/** How far a finger travels sideways across the launch bar before it is taken for a swipe. */
+const SWIPE_START = 10;
+/** How long a finger can rest before release and still count as a flick. */
+const FLICK_WINDOW = 100;
+/** The least travel a whole slide takes, so a press by the edge does not throw the slide across. */
+const MIN_ROOM = 48;
 
 export default function TabSwitcher({ launcherNote }: LauncherNoteProps) {
     const [ shown, setShown ] = useState(false);
+    // The grid stays mounted once opened, so it can animate closed.
+    const [ opened, setOpened ] = useState(false);
     const mainNoteContexts = useMainNoteContexts();
 
     return (
@@ -39,229 +30,203 @@ export default function TabSwitcher({ launcherNote }: LauncherNoteProps) {
                 className="mobile-tab-switcher"
                 icon="bx bx-rectangle"
                 text="Tabs"
-                onClick={() => setShown(true)}
+                onClick={() => {
+                    setOpened(true);
+                    setShown(true);
+                }}
+                onPointerEnter={preloadTabBarModal}
+                onFocus={preloadTabBarModal}
                 data-tab-count={mainNoteContexts.length > 99 ? "∞" : mainNoteContexts.length}
             />
-            {createPortal(<TabBarModal mainNoteContexts={mainNoteContexts} shown={shown} setShown={setShown} />, document.body)}
+            {opened && createPortal(<LazyTabBarModal mainNoteContexts={mainNoteContexts} shown={shown} setShown={setShown} />, document.body)}
         </>
     );
 }
 
-function TabBarModal({ mainNoteContexts, shown, setShown }: {
-    mainNoteContexts: NoteContext[];
-    shown: boolean;
-    setShown: (newValue: boolean) => void;
-}) {
-    const [ fullyShown, setFullyShown ] = useState(false);
-    const selectTab = useCallback((noteContextToActivate: NoteContext) => {
-        appContext.tabManager.activateNoteContext(noteContextToActivate.ntxId);
-        setShown(false);
-    }, [ setShown ]);
+// The grid of tabs, with the previews it renders, loads once the button is about to be tapped.
+const loadTabBarModal = () => import("./TabBarModal");
+const preloadTabBarModal = () => preloadLazyModule(loadTabBarModal);
 
-    return (
-        <Modal
-            className="tab-bar-modal"
-            size="xl"
-            title={t("mobile_tab_switcher.title", { count: mainNoteContexts.length})}
-            show={shown}
-            onShown={() => setFullyShown(true)}
-            customTitleBarButtons={[
-                {
-                    iconClassName: "bx bx-dots-vertical-rounded",
-                    title: t("mobile_tab_switcher.more_options"),
-                    onClick(e) {
-                        contextMenu.show<CommandNames>({
-                            x: e.pageX,
-                            y: e.pageY,
-                            items: [
-                                { title: t("tab_row.new_tab"), command: "openNewTab", uiIcon: "bx bx-plus" },
-                                { title: t("tab_row.reopen_last_tab"), command: "reopenLastTab", uiIcon: "bx bx-undo", enabled: appContext.tabManager.recentlyClosedTabs.length !== 0 },
-                                { kind: "separator" },
-                                { title: t("tab_row.close_all_tabs"), command: "closeAllTabs", uiIcon: "bx bx-trash destructive-action-icon" },
-                            ],
-                            selectMenuItemHandler: ({ command }) => {
-                                if (command) {
-                                    appContext.triggerCommand(command);
-                                }
-                            }
-                        });
-                    },
+function LazyTabBarModal(props: { mainNoteContexts: NoteContext[], shown: boolean, setShown: (shown: boolean) => void }) {
+    const tabBarModal = useLazyModule(loadTabBarModal);
+    return tabBarModal && <tabBarModal.default {...props} />;
+}
+
+interface SwipeGesture {
+    pointerId: number;
+    x: number;
+    y: number;
+    lastX: number;
+    lastTime: number;
+    /** How fast, in px/ms, the finger last moved toward the other tab. */
+    velocity: number;
+    swipe?: TabSwipe;
+    /** How far the finger can travel toward the other tab before it reaches the edge of the screen. */
+    room?: number;
+}
+
+/**
+ * Slides to the next or the previous tab as a finger swipes sideways anywhere on the launch bar, while
+ * the bar fits all its launchers: one that scrolls sideways keeps that drag for scrolling. The click
+ * that ends a swipe reaches none of the bar's buttons. A swipe that starts on the bar follows the
+ * pointer off it, since a mouse, unlike a finger, does not keep sending its events to the bar.
+ */
+/** Lets a finger swipe across the launch bar between tabs, for as long as it is mounted. */
+export function LaunchBarTabSwipe({ containerRef }: { containerRef: RefObject<HTMLElement | null> }) {
+    useLaunchBarTabSwipe(containerRef, true);
+    return null;
+}
+
+export function useLaunchBarTabSwipe(containerRef: RefObject<HTMLElement | null>, enabled: boolean) {
+    const swipe = useTabSwipe();
+    const swipeRef = useRef(swipe);
+    swipeRef.current = swipe;
+
+    useEffect(() => {
+        const container = containerRef.current;
+        if (!enabled || !container) return;
+        const bar = container.closest<HTMLElement>("#launcher-pane") ?? container;
+
+        // The class also sets `touch-action`, which the browser reads before the press reaches us.
+        const updateSwipeable = () => {
+            const isSwipeable = container.scrollWidth <= container.clientWidth;
+            bar.classList.toggle("tab-swipe", isSwipeable);
+            return isSwipeable;
+        };
+        const onPointerDown = (e: PointerEvent) => {
+            const hasOtherTabs = appContext.tabManager.getMainNoteContexts().length > 1;
+            if (updateSwipeable() && hasOtherTabs) swipeRef.current.onPointerDown(e);
+        };
+        const onPointerMove = (e: PointerEvent) => swipeRef.current.onPointerMove(e);
+        const onPointerEnd = (e: PointerEvent) => swipeRef.current.onPointerEnd(e);
+        const onClickCapture = (e: MouseEvent) => {
+            if (!swipeRef.current.takeSwipe()) return;
+            e.preventDefault();
+            e.stopPropagation();
+        };
+
+        const observer = new ResizeObserver(updateSwipeable);
+        observer.observe(container);
+        for (const launcher of container.children) {
+            observer.observe(launcher);
+        }
+        updateSwipeable();
+        bar.addEventListener("pointerdown", onPointerDown);
+        window.addEventListener("pointermove", onPointerMove);
+        window.addEventListener("pointerup", onPointerEnd);
+        window.addEventListener("pointercancel", onPointerEnd);
+        bar.addEventListener("click", onClickCapture, { capture: true });
+        return () => {
+            observer.disconnect();
+            bar.classList.remove("tab-swipe");
+            bar.removeEventListener("pointerdown", onPointerDown);
+            window.removeEventListener("pointermove", onPointerMove);
+            window.removeEventListener("pointerup", onPointerEnd);
+            window.removeEventListener("pointercancel", onPointerEnd);
+            bar.removeEventListener("click", onClickCapture, { capture: true });
+            swipeRef.current.cancel();
+        };
+    }, [ containerRef, enabled ]);
+}
+
+/**
+ * Slides to the next or the previous tab as a finger swipes sideways, following the finger until it
+ * lifts. The click that ends a swipe is not a tap, so `takeSwipe()` tells the caller to drop it.
+ */
+function useTabSwipe() {
+    const gestureRef = useRef<SwipeGesture | null>(null);
+    const swipedRef = useRef(false);
+
+    return {
+        onPointerDown(e: PointerEvent) {
+            swipedRef.current = false;
+            const canSwipe = e.isPrimary && !isTabSwipeActive();
+            gestureRef.current = canSwipe ? {
+                pointerId: e.pointerId,
+                x: e.clientX,
+                y: e.clientY,
+                lastX: e.clientX,
+                lastTime: e.timeStamp,
+                velocity: 0
+            } : null;
+        },
+        onPointerMove(e: PointerEvent) {
+            const gesture = gestureRef.current;
+            if (!gesture || gesture.pointerId !== e.pointerId) return;
+
+            const dx = e.clientX - gesture.x;
+            if (!gesture.swipe) {
+                const dy = e.clientY - gesture.y;
+                const direction = getSwipeDirection(dx, dy, glob.isRtl);
+                if (!direction) {
+                    if (Math.abs(dy) > SWIPE_START) gestureRef.current = null;
+                    return;
                 }
-            ]}
-            footer={<>
-                <LinkButton
-                    text={t("tab_row.new_tab")}
-                    onClick={() => {
-                        appContext.triggerCommand("openNewTab");
-                        setShown(false);
-                    }}
-                />
-            </>}
-            scrollable
-            onHidden={() => {
-                setShown(false);
-                setFullyShown(false);
-            }}
-        >
-            <TabBarModelContent mainNoteContexts={mainNoteContexts} selectTab={selectTab} shown={fullyShown} />
-        </Modal>
-    );
+                gesture.swipe = new TabSwipe(direction);
+                gesture.room = getRoom(gesture.x, gesture.swipe.slide);
+                swipedRef.current = true;
+            }
+
+            const toward = gesture.swipe.slide === "left" ? -1 : 1;
+            const elapsed = e.timeStamp - gesture.lastTime;
+            if (elapsed > 0) gesture.velocity = toward * (e.clientX - gesture.lastX) / elapsed;
+            gesture.lastX = e.clientX;
+            gesture.lastTime = e.timeStamp;
+            gesture.swipe.move(toward * dx / (gesture.room ?? window.innerWidth));
+        },
+        onPointerEnd(e: PointerEvent) {
+            const gesture = gestureRef.current;
+            if (!gesture || gesture.pointerId !== e.pointerId) return;
+            gestureRef.current = null;
+            if (!gesture.swipe) return;
+
+            const isFlick = e.type === "pointerup" && e.timeStamp - gesture.lastTime <= FLICK_WINDOW;
+            gesture.swipe.release(isFlick ? gesture.velocity : 0, gesture.room);
+        },
+        /** Settles a running swipe where it stands, as when the pointer lifts slowly. */
+        cancel() {
+            const gesture = gestureRef.current;
+            gestureRef.current = null;
+            gesture?.swipe?.release(0, gesture.room);
+        },
+        takeSwipe() {
+            const swiped = swipedRef.current;
+            swipedRef.current = false;
+            return swiped;
+        }
+    };
 }
 
-function TabBarModelContent({ mainNoteContexts, selectTab, shown }: {
-    mainNoteContexts: NoteContext[];
-    shown: boolean;
-    selectTab: (noteContextToActivate: NoteContext) => void;
-}) {
-    const activeNoteContext = useActiveNoteContext();
-    const tabRefs = useRef<Record<string, HTMLDivElement | null>>({});
-
-    // Scroll to active tab.
-    useEffect(() => {
-        if (!shown || !activeNoteContext?.ntxId) return;
-        const correspondingEl = tabRefs.current[activeNoteContext.ntxId];
-        requestAnimationFrame(() => {
-            correspondingEl?.scrollIntoView();
-        });
-    }, [ activeNoteContext, shown ]);
-
-    return (
-        <div className="tabs">
-            {mainNoteContexts.map((noteContext) => (
-                <Tab
-                    key={noteContext.ntxId}
-                    noteContext={noteContext}
-                    activeNtxId={activeNoteContext.ntxId}
-                    selectTab={selectTab}
-                    containerRef={el => (tabRefs.current[noteContext.ntxId ?? ""] = el)}
-                />
-            ))}
-        </div>
-    );
+/** The tab a finger moving by `dx`, `dy` swipes toward, once it has moved far and level enough. */
+export function getSwipeDirection(dx: number, dy: number, isRtl: boolean): SwipeDirection | undefined {
+    if (Math.abs(dx) < SWIPE_START || Math.abs(dx) < 2 * Math.abs(dy)) return;
+    // A swipe toward the start brings in the next tab from the end, as in Safari.
+    return (dx < 0) !== isRtl ? "next" : "previous";
 }
 
-function Tab({ noteContext, containerRef, selectTab, activeNtxId }: {
-    containerRef: (el: HTMLDivElement | null) => void;
-    noteContext: NoteContext;
-    selectTab: (noteContextToActivate: NoteContext) => void;
-    activeNtxId: string | null | undefined;
-}) {
-    const { note } = noteContext;
-    const colorClass = note?.getColorClass() || '';
-    const workspaceTabBackgroundColorHue = getWorkspaceTabBackgroundColorHue(noteContext);
-    const subContexts = noteContext.getSubContexts();
-
-    return (
-        <div
-            ref={containerRef}
-            class={clsx("tab-card", {
-                active: noteContext.ntxId === activeNtxId,
-                "with-hue": workspaceTabBackgroundColorHue !== undefined,
-                "with-split": subContexts.length > 1
-            })}
-            onClick={() => selectTab(noteContext)}
-            style={{
-                "--bg-hue": workspaceTabBackgroundColorHue
-            }}
-        >
-            {subContexts.map(subContext => (
-                <Fragment key={subContext.ntxId}>
-                    <TabHeader noteContext={subContext} colorClass={colorClass} />
-                    <TabPreviewContent note={subContext.note} viewScope={subContext.viewScope} />
-                </Fragment>
-            ))}
-        </div>
-    );
+/**
+ * How far a finger pressed at `x` travels for the slide to go all the way to the other tab: up to the
+ * edge it heads for, which can be close by.
+ */
+function getRoom(x: number, slide: "left" | "right") {
+    return Math.max(MIN_ROOM, slide === "left" ? x : window.innerWidth - x);
 }
 
-function TabHeader({ noteContext, colorClass }: { noteContext: NoteContext, colorClass: string }) {
-    const iconClass = useNoteIcon(noteContext.note);
-    const [ navigationTitle, setNavigationTitle ] = useState<string | null>(null);
 
-    // Manage the title for read-only notes
-    useEffect(() => {
-        noteContext?.getNavigationTitle().then(setNavigationTitle);
-    }, [noteContext]);
-
-    return (
-        <header className={colorClass}>
-            {noteContext.note && <Icon icon={iconClass} />}
-            <span className="title">{navigationTitle ?? noteContext.note?.title ?? t("tab_row.new_tab")}</span>
-            {noteContext.isMainContext() && <ActionButton
-                icon="bx bx-x"
-                text={t("tab_row.close_tab")}
-                onClick={(e) => {
-                    // We are closing a tab, so we need to prevent propagation for click (activate tab).
-                    e.stopPropagation();
-                    appContext.tabManager.removeNoteContext(noteContext.ntxId);
-                }}
-            />}
-        </header>
-    );
-}
-
-function TabPreviewContent({ note, viewScope }: {
-    note: FNote | null,
-    viewScope: ViewScope | undefined
-}) {
-    let el: ComponentChild;
-    let isPlaceholder = true;
-
-    if (!note) {
-        el = <PreviewPlaceholder icon="bx bx-plus" />;
-    } else if (note.type === "book") {
-        el = <PreviewPlaceholder icon={ICON_MAPPINGS[note.getLabelValue("viewType") ?? ""] ?? "bx bx-book"} />;
-    } else if (viewScope?.viewMode && viewScope.viewMode !== "default") {
-        el = <PreviewPlaceholder icon={VIEW_MODE_ICON_MAPPINGS[viewScope?.viewMode ?? ""] ?? "bx bx-empty"} />;
-    } else {
-        el = <NoteContent
-            note={note}
-            highlightedTokens={undefined}
-            trim
-            includeArchivedNotes={false}
-        />;
-        isPlaceholder = false;
-    }
-
-    return (
-        <div className={clsx("tab-preview", `type-${note?.type ?? "empty"}`, { "tab-preview-placeholder": isPlaceholder })}>{el}</div>
-    );
-}
-
-function PreviewPlaceholder({ icon}: {
-    icon: string;
-}) {
-    return (
-        <div className="preview-placeholder">
-            <Icon icon={icon} />
-        </div>
-    );
-}
-
-function getWorkspaceTabBackgroundColorHue(noteContext: NoteContext) {
-    if (!noteContext.hoistedNoteId) return;
-    const hoistedNote = froca.getNoteFromCache(noteContext.hoistedNoteId);
-    if (!hoistedNote) return;
-
-    const workspaceTabBackgroundColor = hoistedNote.getWorkspaceTabBackgroundColor();
-    if (!workspaceTabBackgroundColor) return;
-
-    try {
-        const parsedColor = parseColor(workspaceTabBackgroundColor);
-        if (!parsedColor) return;
-        return getHue(parsedColor);
-    } catch (e) {
-        // Colors are non-critical, simply ignore.
-        console.warn(e);
-    }
-}
-
+/**
+ * The tabs, or none before the startup creates the tab manager, which can come after the launch bar
+ * renders. The tabs it restores then arrive through `newNoteContextCreated`.
+ */
 function useMainNoteContexts() {
-    const [ noteContexts, setNoteContexts ] = useState(appContext.tabManager.getMainNoteContexts());
+    const [ noteContexts, setNoteContexts ] = useState(getMainNoteContexts);
 
     useTriliumEvents([ "newNoteContextCreated", "noteContextRemoved" ] , () => {
-        setNoteContexts(appContext.tabManager.getMainNoteContexts());
+        setNoteContexts(getMainNoteContexts());
     });
 
     return noteContexts;
+}
+
+function getMainNoteContexts() {
+    return appContext.tabManager?.getMainNoteContexts() ?? [];
 }

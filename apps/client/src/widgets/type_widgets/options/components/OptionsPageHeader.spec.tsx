@@ -7,8 +7,8 @@ const mocks = vi.hoisted(() => ({
     note: undefined as { title: string; getIcon: () => string } | undefined
 }));
 
-vi.mock("../../../react/hooks", async (importOriginal) => ({
-    ...(await importOriginal<typeof import("../../../react/hooks")>()),
+vi.mock("../../../react/hooks/note_context", async (importOriginal) => ({
+    ...(await importOriginal<typeof import("../../../react/hooks/note_context")>()),
     useNoteContext: () => ({ note: mocks.note })
 }));
 
@@ -23,6 +23,14 @@ describe("OptionsPageHeader", () => {
 
         expect(container.querySelector(".options-page-header-title")?.textContent).toBe("Appearance");
         expect(container.querySelector(".options-page-header-icon")?.className).toContain("bx-palette");
+    });
+
+    it("shows a badge beside the page's name, as part of the name", () => {
+        mocks.note = NOTE;
+        const container = renderInto(<OptionsPageHeader badge={<span className="beta">Beta</span>} />);
+
+        expect(container.querySelector(".options-page-header-titles .beta")?.textContent).toBe("Beta");
+        expect(container.querySelector(".options-page-header")?.className).toContain("options-page-header-title-only");
     });
 
     it("marks itself as carrying nothing but the name, which a phone shows elsewhere", () => {

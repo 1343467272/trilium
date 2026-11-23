@@ -1,9 +1,10 @@
 import { type TaskStateDef } from "@triliumnext/commons";
 import { Tooltip } from "bootstrap";
-import { _setModelData as setModelData, ClassicEditor, Essentials, keyCodes, List, Paragraph, TodoList, type ModelElement } from "ckeditor5";
+import { _setModelData as setModelData, ClassicEditor, type Editor, env, Essentials, HorizontalLine, keyCodes, LinkEditing, List, Paragraph, TodoList, type ModelElement } from "ckeditor5";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { userEvent } from "vitest/browser";
 
-import { createTestEditor } from "../../../test/editor-kit.js";
+import { createTestEditor, pressKey } from "../../../test/editor-kit.js";
 import TodoListUncheckOnEnter from "../todo_list_uncheck_on_enter.js";
 import TodoListMultistateEditing, { buildTooltipTitle, getActiveTaskStates, getConfiguredTaskStates, TASK_STATE_ATTRIBUTE } from "./todo_list_multistate_editing.js";
 
@@ -401,6 +402,37 @@ describe("TodoListMultistateEditing", () => {
             if (input) {
                 expect(Tooltip.getInstance(input)).toBeNull();
             }
+        });
+    });
+
+    describe("Ctrl+Enter on a link in a to-do item", () => {
+        beforeEach(async () => {
+            editor = await createTestEditor(
+                [Essentials, Paragraph, List, TodoList, LinkEditing, ReferenceStandIn, TodoListMultistateEditing]);
+        });
+
+        it("leaves the key to following the link and toggles the item elsewhere (#12561)", () => {
+            const root = editor.editing.view.getDomRoot();
+            const host = root?.parentElement;
+            if (!root || !host) {
+                throw new Error("The editor has no editing root.");
+            }
+            let bubbled = 0;
+            host.addEventListener("keydown", () => bubbled++);
+            const todo = (content: string) =>
+                `<paragraph listIndent="0" listItemId="a" listType="todo">${content}</paragraph>`;
+            const ctrl = env.isMac ? { metaKey: true } : { ctrlKey: true };
+
+            for (const content of [ "<$text linkHref=\"x\">Li[]nk</$text>", "[<reference></reference>]" ]) {
+                setModelData(editor.model, todo(content));
+                pressKey(editor, "Enter", { keyCode: keyCodes.enter, ...ctrl });
+                expect(getBlock(editor, 0).hasAttribute(TODO_LIST_CHECKED_ATTRIBUTE), content).toBe(false);
+            }
+            expect(bubbled).toBe(2);
+
+            setModelData(editor.model, todo("Task[]"));
+            pressKey(editor, "Enter", { keyCode: keyCodes.enter, ...ctrl });
+            expect(getBlock(editor, 0).getAttribute(TODO_LIST_CHECKED_ATTRIBUTE)).toBe(true);
         });
     });
 
@@ -901,3 +933,94 @@ describe("TodoListMultistateEditing", () => {
         });
     });
 });
+
+describe("toggling a checkbox of an editor without a selection of its own", () => {
+    async function createEditorWithObjectFirst(): Promise<ClassicEditor> {
+        const editor = await createTestEditor([Essentials, Paragraph, HorizontalLine, List, TodoList, TodoListMultistateEditing]);
+        setModelData(editor.model, "<horizontalLine></horizontalLine>"
+            + '<paragraph listIndent="0" listItemId="t-a" listType="todo">Task</paragraph>'
+            + '<paragraph listIndent="0" listItemId="t-b" listType="todo">Other</paragraph>');
+        return editor;
+    }
+
+    function toggle(editor: ClassicEditor, index: number) {
+        const inputs = editor.editing.view.getDomRoot()?.querySelectorAll<HTMLInputElement>('.todo-list__label input[type="checkbox"]');
+        const input = inputs?.[index];
+        expect(input).toBeDefined();
+        if (!input) return;
+        input.checked = !input.checked;
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+
+    it("leaves the selection in the toggled item rather than on the object ahead of the list", async () => {
+        const editor = await createEditorWithObjectFirst();
+        editor.model.change((writer) => writer.setSelection(null));
+        const selection = editor.model.document.selection;
+        expect(selection.hasOwnRange).toBe(false);
+        expect(selection.getSelectedElement()?.name).toBe("horizontalLine");
+
+        toggle(editor, 1);
+        expect(getBlock(editor, 2).getAttribute(TODO_LIST_CHECKED_ATTRIBUTE)).toBe(true);
+        expect(selection.getSelectedElement()).toBeNull();
+        expect(selection.getFirstPosition()?.parent).toBe(getBlock(editor, 2));
+    });
+
+    it("restores a selection of its own, as upstream does", async () => {
+        const editor = await createEditorWithObjectFirst();
+        editor.model.change((writer) => writer.setSelection(getBlock(editor, 1), 2));
+
+        toggle(editor, 1);
+        expect(getBlock(editor, 2).getAttribute(TODO_LIST_CHECKED_ATTRIBUTE)).toBe(true);
+        const position = editor.model.document.selection.getFirstPosition();
+        expect(position?.parent).toBe(getBlock(editor, 1));
+        expect(position?.offset).toBe(2);
+    });
+});
+
+describe("clicking a checkbox", () => {
+    it("toggles the item and leaves the focus and the caret in the editable", async () => {
+        const editor = await createEditor();
+        setModelData(editor.model,
+            '<paragraph listIndent="0" listItemId="t-a" listType="todo">Ta[]sk</paragraph>'
+            + '<paragraph listIndent="0" listItemId="t-b" listType="todo">Other</paragraph>');
+        editor.editing.view.focus();
+        const root = editor.editing.view.getDomRoot();
+        const checkboxes = () =>
+            root?.querySelectorAll<HTMLInputElement>('.todo-list__label input[type="checkbox"]');
+        const input = checkboxes()?.[1];
+        expect(root).toBeDefined();
+        expect(input).toBeDefined();
+        if (!root || !input) return;
+        expect(document.activeElement).toBe(root);
+        const focused: EventTarget[] = [];
+        root.addEventListener("focusin", (event) => focused.push(event.target ?? root));
+
+        await userEvent.click(input);
+        expect(getBlock(editor, 1).getAttribute(TODO_LIST_CHECKED_ATTRIBUTE)).toBe(true);
+        expect(focused).toEqual([]);
+        expect(document.activeElement).toBe(root);
+        const position = editor.model.document.selection.getFirstPosition();
+        expect(position?.parent).toBe(getBlock(editor, 0));
+        expect(position?.offset).toBe(2);
+
+        // Only a left-button press on a checkbox of a focused editor keeps the focus.
+        const rightPress = new MouseEvent("mousedown", { button: 2, bubbles: true, cancelable: true });
+        checkboxes()?.[0]?.dispatchEvent(rightPress);
+        const textPress = new MouseEvent("mousedown", { button: 0, bubbles: true, cancelable: true });
+        root.querySelector(".todo-list__label__description")?.dispatchEvent(textPress);
+        root.blur();
+        expect(editor.editing.view.document.isFocused).toBe(false);
+        const blurredPress = new MouseEvent("mousedown",
+            { button: 0, bubbles: true, cancelable: true });
+        checkboxes()?.[0]?.dispatchEvent(blurredPress);
+        expect(rightPress.defaultPrevented).toBe(false);
+        expect(textPress.defaultPrevented).toBe(false);
+        expect(blurredPress.defaultPrevented).toBe(false);
+    });
+});
+
+/** Stands in for the note reference that the internal link plugin inserts. */
+function ReferenceStandIn(editor: Editor) {
+    editor.model.schema.register("reference", { inheritAllFrom: "$inlineObject" });
+    editor.conversion.elementToElement({ model: "reference", view: "span" });
+}

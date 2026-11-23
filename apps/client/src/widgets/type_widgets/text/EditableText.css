@@ -8,24 +8,39 @@ body.desktop.electron .note-detail-editable-text {
     letter-spacing: -0.01px;
 }
 
-body.mobile .note-detail-editable-text {
-    padding-inline-start: 4px;
+@media (max-width: 991px) {
+    body.mobile .note-detail-editable-text {
+        padding-inline-start: 4px;
+    }
 }
 
-.note-detail-editable-text a:hover {
-    cursor: pointer;
+.note-detail-editable-text-editor:not(.ck-format-painter-active) a:where(:not(.excalidraw *)) {
+    cursor: default;
+
+    &:read-write {
+        cursor: text;
+    }
+
+    :root.follow-link-key-held & {
+        cursor: pointer;
+    }
 }
 
-.note-detail-editable-text :is(a[href^="http://"], a[href^="https://"]):where(:not(.excalidraw *)) {
-    cursor: text !important;
+@scope (.include-note-content) to (.note-detail-editable-text-editor) {
+    /* As specific as the rule above, which a scoped rule outweighs. */
+    .note-detail-editable-text-editor :scope a:where(:not(.excalidraw *)) {
+        cursor: pointer;
+    }
 }
 
-.note-detail-editable-text *:not(figure, .include-note, hr, .excalidraw *):first-child {
+.note-detail-editable-text
+    :first-child:not(figure, .include-note, hr, .excalidraw *, .cm-editor *) {
     margin-top: 0 !important;
 }
 
 /* `:where(:not(.excalidraw *))` leaves out the UI of an embedded canvas drawing. */
 .note-detail-editable-text :where(:not(.excalidraw *)) {
+    &:is(h1) { font-size: 1.8em; }
     &:is(h2) { font-size: 1.6em; }
     &:is(h3) { font-size: 1.4em; }
     &:is(h4) { font-size: 1.2em; }
@@ -33,19 +48,21 @@ body.mobile .note-detail-editable-text {
     &:is(h6) { font-size: 1.0em; }
 
     body.heading-style-markdown & {
+        &:is(h1)::before { content: "#\2004"; }
         &:is(h2)::before { content: "##\2004"; }
         &:is(h3)::before { content: "###\2004"; }
         &:is(h4):not(.include-note-title)::before { content: "####\2004"; }
         &:is(h5)::before { content: "#####\2004"; }
         &:is(h6)::before { content: "######\2004"; }
 
-        &:is(h2, h3, h5, h6)::before,
+        &:is(h1, h2, h3, h5, h6)::before,
         &:is(h4):not(.include-note-title)::before {
             color: var(--muted-text-color);
         }
     }
 
     body.heading-style-underline & {
+        &:is(h1),
         &:is(h2),
         &:is(h3),
         &:is(h4):not(.include-note-title),

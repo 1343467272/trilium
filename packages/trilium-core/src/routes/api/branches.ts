@@ -4,6 +4,7 @@ import eventService from "../../services/events.js";
 import type { Request } from "../../http_interface";
 
 import becca from "../../becca/becca.js";
+import type BBranch from "../../becca/entities/bbranch.js";
 import entityChangesService from "../../services/entity_changes.js";
 import { getLog } from "../../services/log.js";
 import TaskContext from "../../services/task_context.js";
@@ -164,103 +165,56 @@ function setExpanded(req: Request<{ branchId: string, expanded: string }>) {
 
         if (branch) {
             branch.isExpanded = !!expanded;
-        }
 
-        eventService.emit(eventService.ENTITY_CHANGED, {
-            entityName: "branches",
-            entity: branch
-        });
+            eventService.emit(eventService.ENTITY_CHANGED, {
+                entityName: "branches",
+                entity: branch
+            });
+        }
     }
 }
 
 function setExpandedForSubtree(req: Request<{ branchId: string, expanded: string }>) {
     const { branchId } = req.params;
-    const expanded = req.params.expanded === "1" ? 1 : 0;
-    const sql = getSql();
+    const isExpanded = req.params.expanded === "1";
 
-    // The state filter sits outside the recursion so that the walk reaches every descendant;
-    // `none_root` is excluded because the root is always expanded.
-    const branchIds = sql.getColumn<string>(/*sql*/`
-        WITH RECURSIVE
-            tree(branchId, noteId) AS (
-                SELECT branchId, noteId FROM branches WHERE branchId = ?
-                UNION
-                SELECT branches.branchId, branches.noteId
-                FROM branches
-                    JOIN tree ON branches.parentNoteId = tree.noteId
-                WHERE branches.isDeleted = 0
-            )
-        SELECT tree.branchId
-        FROM tree
-            JOIN branches USING (branchId)
-        WHERE branches.isExpanded != ?
-            AND tree.branchId != 'none_root'`,
-        [ branchId, expanded ]
-    );
+    // Walks becca rather than the `branches` table, so that the virtual branches a provider
+    // injects are reached too; `none_root` is skipped because the root is always expanded.
+    const changedBranches: BBranch[] = [];
+    const visitedNoteIds = new Set<string>();
+    const startBranch = becca.branches[branchId];
+    const pending = startBranch ? [ startBranch ] : [];
 
-    sql.executeMany(
-        /*sql*/`UPDATE branches SET isExpanded = ${expanded} WHERE branchId IN (???)`,
-        branchIds
-    );
+    for (let branch = pending.pop(); branch; branch = pending.pop()) {
+        if (branch.branchId !== "none_root" && branch.isExpanded !== isExpanded) {
+            changedBranches.push(branch);
+        }
 
-    for (const branchId of branchIds) {
-        const branch = becca.branches[branchId];
-
-        if (branch) {
-            branch.isExpanded = !!expanded;
+        if (!visitedNoteIds.has(branch.noteId)) {
+            visitedNoteIds.add(branch.noteId);
+            for (const childBranch of branch.childNote.getChildBranches()) {
+                /* v8 ignore else -- `getChildBranches()` maps each child to its branch */
+                if (childBranch) {
+                    pending.push(childBranch);
+                }
+            }
         }
     }
 
+    getSql().executeMany(
+        /*sql*/`UPDATE branches SET isExpanded = ${isExpanded ? 1 : 0} WHERE branchId IN (???)`,
+        changedBranches.filter((branch) => !branch.isVirtual).map((branch) => branch.branchId)
+    );
+
+    for (const branch of changedBranches) {
+        branch.isExpanded = isExpanded;
+    }
+
     return {
-        branchIds
+        branchIds: changedBranches.map((branch) => branch.branchId)
     };
 }
 
-/**
- * @swagger
- * /api/branches/{branchId}:
- *   delete:
- *     summary: Delete branch (note clone)
- *     operationId: branches-delete
- *     parameters:
- *       - name: branchId
- *         in: path
- *         required: true
- *         schema:
- *           $ref: "#/components/schemas/BranchId"
- *       - name: taskId
- *         in: query
- *         required: true
- *         schema:
- *           type: string
- *         description: Task group identifier
- *       - name: eraseNotes
- *         in: query
- *         schema:
- *           type: boolean
- *         required: false
- *         description: Whether to erase the note immediately
- *       - name: last
- *         in: query
- *         schema:
- *           type: boolean
- *         required: true
- *         description: Whether this is the last request of this task group
- *     responses:
- *       '200':
- *         description: Branch successfully deleted
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 noteDeleted:
- *                   type: boolean
- *                   description: Whether the last note clone was deleted
- *     security:
- *       - session: []
- *     tags: ["data"]
- */
 function deleteBranch(req: Request<{ branchId: string }>) {
     const last = req.query.last === "true";
     const eraseNotes = req.query.eraseNotes === "true";

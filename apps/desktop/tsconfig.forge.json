@@ -12,20 +12,25 @@
     "tsBuildInfoFile": "dist/tsconfig.forge.tsbuildinfo"
   },
   "include": [
-    "**/*.ts",
+    "electron-forge/**/*.ts",
     "electron-forge/**/*.mts",
+    "e2e/**/*.ts",
+    "playwright.config.ts",
     "../server/src/*.d.ts",
-    "package.json"
+    "package.json",
+    "electron-forge/electron-locales.json"
   ],
   "exclude": [
     "eslint.config.js",
     "eslint.config.cjs",
     "eslint.config.mjs",
-    "scripts/**",
-    "spec/**",
+    "electron-forge/**/*.spec.ts",
     "dist/**"
   ],
   "references": [
+    {
+      "path": "./tsconfig.app.json"
+    },
     {
       "path": "../server/tsconfig.app.json"
     },

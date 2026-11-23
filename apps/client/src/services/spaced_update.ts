@@ -31,6 +31,8 @@ interface PendingCommit<T> {
 }
 
 const MAX_RETRY_DELAY = 60_000;
+/** The longest that `resetUpdateTimer()` can postpone a pending change, in intervals. */
+const MAX_POSTPONED_INTERVALS = 10;
 
 export default class SpacedUpdate<T = void> {
     private bindingKey: string | null;
@@ -38,6 +40,8 @@ export default class SpacedUpdate<T = void> {
     private commit: CommitCallback<T>;
     private lastUpdated: number;
     private changed: boolean;
+    /** When the oldest change that is not snapshotted yet was made. */
+    private changedSince = 0;
     private updateInterval: number;
     private changeForbidden?: boolean;
     private stateCallback?: StateCallback;
@@ -51,6 +55,8 @@ export default class SpacedUpdate<T = void> {
     private pendingCommits = new Map<string | null, PendingCommit<T>>();
     /** Snapshots whose asynchronous `prepare` is still running — captured but not yet queued. */
     private pendingSnapshots = new Set<Promise<void>>();
+    /** How often `discard()` dropped the changes to each key, which voids older snapshots. */
+    private discardCounts = new Map<string | null, number>();
     private drainPromise: Promise<void> | null = null;
     private debounceTimer?: ReturnType<typeof setTimeout>;
     private retryTimer?: ReturnType<typeof setTimeout>;
@@ -77,6 +83,9 @@ export default class SpacedUpdate<T = void> {
 
     scheduleUpdate() {
         if (!this.changeForbidden) {
+            if (!this.changed) {
+                this.changedSince = Date.now();
+            }
             this.changed = true;
             this.onStateChanged("unsaved");
             this.armDebounceTimer();
@@ -111,9 +120,39 @@ export default class SpacedUpdate<T = void> {
         this.commit = commit;
     }
 
-    /** Flushes the pending change (if any) and waits until all queued snapshots are persisted. */
-    updateNowIfNecessary(): Promise<void> {
-        return this.drain();
+    /**
+     * Flushes the pending change (if any) and waits until all queued snapshots are persisted, with
+     * the changes made while they save. The pending change is read at once, also while another
+     * save runs, so its source can go away.
+     */
+    async updateNowIfNecessary(): Promise<void> {
+        do {
+            if (this.drainPromise) {
+                // The running save waits for an asynchronous snapshot and handles its failure.
+                const snapshotted = this.snapshotPending();
+                if (snapshotted instanceof Promise) {
+                    snapshotted.catch(() => {});
+                }
+            }
+            await this.drain();
+        } while (this.changed);
+    }
+
+    /**
+     * Drops the changes to `key` that are not saved yet, a snapshot still being taken included,
+     * once a revision keeps them instead.
+     */
+    discard(key: string | null) {
+        this.pendingCommits.delete(key);
+        this.discardCounts.set(key, (this.discardCounts.get(key) ?? 0) + 1);
+        if (key === this.bindingKey) {
+            this.changed = false;
+        }
+    }
+
+    /** Whether a change made under the current binding is not saved yet. */
+    hasUnsavedChanges() {
+        return this.changed || this.pendingCommits.has(this.bindingKey);
     }
 
     isAllSavedAndTriggerUpdate() {
@@ -132,6 +171,8 @@ export default class SpacedUpdate<T = void> {
     /**
      * Normally {@link scheduleUpdate()} would actually trigger the update only once per {@link updateInterval}. If the method is called 200 times within 20s, it will execute only 20 times.
      * Sometimes, if the updates are continuous this would cause a performance impact. Resetting the time ensures that the calls to the update have stopped before actually triggering an update.
+     * A pending change is still saved at most {@link MAX_POSTPONED_INTERVALS} intervals after it
+     * was made.
      */
     resetUpdateTimer() {
         this.lastUpdated = Date.now();
@@ -171,7 +212,7 @@ export default class SpacedUpdate<T = void> {
             return;
         }
 
-        const delay = Math.max(1, this.updateInterval - (Date.now() - this.lastUpdated));
+        const delay = Math.max(1, this.getTimeUntilDue());
         this.debounceTimer = setTimeout(() => {
             this.debounceTimer = undefined;
 
@@ -179,7 +220,7 @@ export default class SpacedUpdate<T = void> {
                 return;
             }
 
-            if (Date.now() - this.lastUpdated >= this.updateInterval) {
+            if (this.getTimeUntilDue() <= 0) {
                 this.drain().catch(() => {
                     // Failures are logged in runDrain and retried.
                 });
@@ -187,6 +228,18 @@ export default class SpacedUpdate<T = void> {
                 this.armDebounceTimer();
             }
         }, delay);
+    }
+
+    /**
+     * Milliseconds until the pending change is due: one interval after the last update or reset,
+     * but no later than {@link MAX_POSTPONED_INTERVALS} intervals after the change.
+     */
+    private getTimeUntilDue() {
+        const now = Date.now();
+        return Math.min(
+            this.updateInterval - (now - this.lastUpdated),
+            this.updateInterval * MAX_POSTPONED_INTERVALS - (now - this.changedSince)
+        );
     }
 
     /**
@@ -206,6 +259,7 @@ export default class SpacedUpdate<T = void> {
         const { bindingKey, commit } = this;
         const restoreOnError = (e: unknown): never => {
             this.changed = true;
+            this.changedSince = Date.now();
             this.onStateChanged("error");
             // Said out loud, as a failed commit is. Every caller of this path swallows what is
             // rethrown, so a snapshot that cannot be taken would otherwise show as a failing save
@@ -227,12 +281,15 @@ export default class SpacedUpdate<T = void> {
         }
 
         if (result instanceof Promise) {
+            const discardCount = this.discardCounts.get(bindingKey);
             // Track the in-flight snapshot so drain() and isAllSavedAndTriggerUpdate() don't
             // consider everything saved before the snapshot has been queued for commit.
             const snapshot: Promise<void> = result
                 .then(
                     (data) => {
-                        this.pendingCommits.set(bindingKey, { data, commit });
+                        if (this.discardCounts.get(bindingKey) === discardCount) {
+                            this.pendingCommits.set(bindingKey, { data, commit });
+                        }
                     },
                     restoreOnError
                 )
@@ -263,6 +320,7 @@ export default class SpacedUpdate<T = void> {
     }
 
     private async runDrain(): Promise<void> {
+        let isFirstPass = true;
         while (true) {
             // Wait for snapshots that were started elsewhere (e.g. by rebind) to be queued.
             // Their failures restore the `changed` flag and are handled by the fold below.
@@ -271,10 +329,14 @@ export default class SpacedUpdate<T = void> {
             }
 
             // Fold any pending change into the queue first, so a queued snapshot and a newer
-            // pending change for the same key result in a single save, not two.
-            const snapshotted = this.snapshotPending();
-            if (snapshotted instanceof Promise) {
-                await snapshotted;
+            // pending change for the same key result in a single save, not two. Changes made
+            // after the first pass wait for the debounce timer.
+            if (isFirstPass) {
+                isFirstPass = false;
+                const snapshotted = this.snapshotPending();
+                if (snapshotted instanceof Promise) {
+                    await snapshotted;
+                }
             }
 
             if (this.pendingCommits.size === 0) {
@@ -319,6 +381,9 @@ export default class SpacedUpdate<T = void> {
         // successes would shorten the backoff of a still-failing sibling key.
         this.retryCount = 0;
         this.onStateChanged(this.changed ? "unsaved" : "saved");
+        if (this.changed) {
+            this.armDebounceTimer();
+        }
     }
 
     private scheduleRetry() {

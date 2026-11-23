@@ -160,6 +160,7 @@ describe("ws service (real DB)", () => {
         ws.syncFailed();
         ws.syncHashCheckFailed(["blobs/9"]);
         ws.reloadFrontend("because");
+        ws.reloadFroca("repaired");
 
         const types = sentAll.map((m) => m.type);
         expect(types).toEqual(expect.arrayContaining([
@@ -178,6 +179,7 @@ describe("ws service (real DB)", () => {
             type: "sync-pull-in-progress", lastSyncedPush: 42, progress: { pulled: 3, total: 10 }
         });
         expect(sentAll.find((m) => m.type === "sync-hash-check-failed")).toMatchObject({ sectors: ["blobs/9"] });
+        expect(sentAll.find((m) => m.type === "reload-froca")).toEqual({ type: "reload-froca", reason: "repaired" });
     });
 
     it("sends a ping frontend-update when there are no pending entity changes", () => {
@@ -215,6 +217,52 @@ describe("ws service (real DB)", () => {
         // note_reordering for root carries the child branch positions map.
         const reorder = changes.find((c) => c.entityName === "note_reordering" && c.entityId === "root");
         expect(reorder?.positions).toBeTypeOf("object");
+    });
+
+    it("decrypts empty protected titles, keeps found attachments and passes other entities through", () => {
+        const now = dateUtils.utcNowDateTime();
+        const blobId = getSql().getValue<string>("SELECT blobId FROM blobs LIMIT 1");
+        cls.init(() => {
+            getSql().execute(
+                `INSERT INTO notes (noteId, title, isProtected, type, mime, isDeleted, dateCreated, dateModified, utcDateCreated, utcDateModified)
+                 VALUES ('wsUntitledProt', '', 1, 'text', 'text/html', 0, ?, ?, ?, ?)`,
+                [ now, now, now, now ]
+            );
+            getSql().execute(
+                `INSERT INTO attachments (attachmentId, ownerId, role, mime, title, isProtected, position, blobId, dateModified, utcDateModified, isDeleted)
+                 VALUES (?, 'root', 'file', 'text/plain', ?, ?, 0, ?, ?, ?, ?)`,
+                [ "wsUntitledAtt", "", 1, blobId, now, now, 1 ]
+            );
+            getSql().execute(
+                `INSERT INTO attachments (attachmentId, ownerId, role, mime, title, isProtected, position, blobId, dateModified, utcDateModified, isDeleted)
+                 VALUES (?, 'root', 'file', 'text/plain', ?, ?, 0, ?, ?, ?, ?)`,
+                [ "wsLiveAtt", "live", 0, blobId, now, now, 0 ]
+            );
+        });
+        const decrypt = vi.spyOn(protectedSessionService, "decryptString").mockReturnValue("decrypted");
+        vi.spyOn(becca, "getBranchFromChildAndParent").mockReturnValue(null);
+        const ids = [
+            insertEntityChange("notes", "wsUntitledProt"),
+            insertEntityChange("attachments", "wsUntitledAtt"),
+            insertEntityChange("attachments", "wsLiveAtt"),
+            insertEntityChange("etapi_tokens", "wsToken"),
+            existingEntityChangeId("note_reordering", "root")
+        ];
+
+        cls.init(() => {
+            cls.set("entityChangeIds", ids);
+            ws.sendTransactionEntityChangesToAllClients();
+        });
+
+        const message = sentAll[sentAll.length - 1];
+        if (message.type !== "frontend-update") throw new Error("expected frontend-update");
+        const change = (entityId: string) => message.data.entityChanges.find((c) => c.entityId === entityId);
+        expect(decrypt.mock.calls).toEqual([ [ "" ], [ "" ] ]);
+        expect(change("wsUntitledProt")?.entity).toMatchObject({ title: "decrypted" });
+        expect(change("wsUntitledAtt")?.entity).toMatchObject({ title: "decrypted" });
+        expect(change("wsLiveAtt")?.entity).toMatchObject({ attachmentId: "wsLiveAtt", title: "live" });
+        expect(change("wsToken")?.entity).toBeUndefined();
+        expect(message.data.entityChanges.find((c) => c.entityName === "note_reordering")?.positions).toEqual({});
     });
 
     it("swallows errors thrown while filling in a single entity change", () => {

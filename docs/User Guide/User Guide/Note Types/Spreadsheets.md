@@ -29,11 +29,10 @@ Starting with v0.104.0, Trilium provides a level of data intercompatibility betw
 Both [import and export](../Basic%20Concepts%20and%20Features/Import%20%26%20Export.md) are supported, as follows:
 
 *   To import a file, simply drag it into the <a class="reference-link" href="../Basic%20Concepts%20and%20Features/UI%20Elements/Note%20Tree.md">Note Tree</a> and it will be converted into a spreadsheet note.
-    *   To avoid this behavior (e.g. to import a .xlsx file as an actual <a class="reference-link" href="File.md">File</a>), uncheck the corresponding option in the [Import dialog](../Basic%20Concepts%20and%20Features/Import%20%26%20Export.md).
+    *   To avoid this behavior (e.g. to import a .xlsx file as an actual <a class="reference-link" href="File.md">File</a>), uncheck the corresponding option in the [Import dialog](../Basic%20Concepts%20and%20Features/Import%20%26%20Export.md). Such a file is shown in a read-only spreadsheet (see <a class="reference-link" href="File/Office%20documents.md">Office documents</a>).
     *   Multiple files can be imported at the same time, including a mixture of .csv and .xlsx files. Folder structure can be preserved by using a .zip file.
 *   Unlike importing, exporting is on a per-note basis:
-    *   In the <a class="reference-link" href="../Basic%20Concepts%20and%20Features/UI%20Elements/Note%20buttons.md">Note buttons</a>, choose the _Export to Excel_ or _Export to CSV_ options for the <a class="reference-link" href="../Basic%20Concepts%20and%20Features/UI%20Elements/New%20Layout.md">New Layout</a>.
-    *   For the old layout, choose the corresponding buttons in the <a class="reference-link" href="../Basic%20Concepts%20and%20Features/UI%20Elements/Floating%20buttons.md">Floating buttons</a> area.
+    *   In the <a class="reference-link" href="../Basic%20Concepts%20and%20Features/UI%20Elements/Note%20menu.md">Note menu</a>, choose the _Export to Excel_ or _Export to CSV_ options.
     *   If exported as a single file via <a class="reference-link" href="../Basic%20Concepts%20and%20Features/Import%20%26%20Export.md">Import &amp; Export</a>, the resulting file will be a custom `.triliumsheet` file that preserves the spreadsheet as-is.
         *   The export is intentionally a different process than the normal <a class="reference-link" href="../Basic%20Concepts%20and%20Features/Import%20%26%20Export.md">Import &amp; Export</a> functionality because it does conversion to multiple formats with varying degrees of compatibility.
 

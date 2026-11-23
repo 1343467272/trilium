@@ -37,14 +37,18 @@
 }
 
 /* Font Picker Modal */
-body.desktop .modal.font-picker-modal {
+:is(body.desktop, body.mobile.tablet) .modal.font-picker-modal {
+    .modal-dialog {
+        --bs-modal-width: 50rem;
+    }
+
     .modal-content-with-sidebar {
         height: 60vh;
     }
 
     /* On the sidebar rather than on the list, which a search matching nothing takes away. */
     .modal-sidebar {
-        width: 280px;
+        width: 17.5rem;
     }
 
     /* The title is hidden beside a sidebar (see `style.css`) and grows to fill the header, which
@@ -55,6 +59,26 @@ body.desktop .modal.font-picker-modal {
 
     .font-picker-targets {
         margin-inline-end: auto;
+    }
+}
+
+body.mobile:not(.tablet) .modal.font-picker-modal {
+    .modal-dialog {
+        height: 85vh;
+    }
+
+    .modal-content {
+        flex: 1 1 0;
+        min-height: 0;
+    }
+
+    .modal-content-with-sidebar > .modal-main {
+        flex: 0 0 auto;
+    }
+
+    .modal-content-with-sidebar > .modal-sidebar {
+        flex: 1 1 0;
+        height: auto;
     }
 }
 
@@ -93,7 +117,7 @@ body.desktop .modal.font-picker-modal {
         overflow: auto;
 
         .dropdown-item {
-            font-size: 14px;
+            font-size: .875rem;
 
             /* Each row names a family the browser has to resolve to lay the row out, and the list
                runs to every family the device has. Skipping the rows out of view keeps that off the
@@ -128,13 +152,13 @@ body.desktop .modal.font-picker-modal {
     label {
         font-weight: 500;
         color: var(--muted-text-color);
-        font-size: 12px;
+        font-size: .75rem;
         text-transform: uppercase;
     }
 
     .font-size-description {
         color: var(--muted-text-color);
-        font-size: 12px;
+        font-size: .75rem;
     }
 }
 
@@ -147,7 +171,7 @@ body.desktop .modal.font-picker-modal {
         flex: 1;
     }
 
-    /* The pair sizes itself (see `theme-next/forms.css`), so the slider takes what is left. */
+    /* The pair sizes itself (see FormTextBox.css), so the slider takes what is left. */
     .tn-number-unit-pair {
         flex: 0 0 auto;
     }
@@ -169,7 +193,7 @@ body.desktop .modal.font-picker-modal {
     label {
         font-weight: 500;
         color: var(--muted-text-color);
-        font-size: 12px;
+        font-size: .75rem;
         text-transform: uppercase;
     }
 }

@@ -1,6 +1,11 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { buildShareLink } from "./share_link";
+import { buildNote } from "../test/easy-froca";
+import froca from "./froca";
+import options from "./options";
+import {
+    buildShareLink, getNoteShareLink, getSharedPageLink, getShareScope
+} from "./share_link";
 
 describe("buildShareLink", () => {
     const originalGlob = window.glob;
@@ -8,15 +13,26 @@ describe("buildShareLink", () => {
     afterEach(() => {
         window.glob = originalGlob;
         history.replaceState({}, "", "/");
+        vi.unstubAllGlobals();
     });
 
     function setGlob(patch: Record<string, unknown>) {
         window.glob = { ...patch } as unknown as typeof window.glob;
     }
 
-    it("uses the configured sync server host when set (regardless of the local origin)", () => {
+    it("uses the configured sync server host on the desktop and in standalone", () => {
+        vi.stubGlobal("electronApi", {});
         setGlob({ httpBaseUrl: "http://127.0.0.1:37742" });
         expect(buildShareLink("abc123", "https://notes.example.com")).toBe("https://notes.example.com/share/abc123");
+
+        vi.unstubAllGlobals();
+        setGlob({ isStandalone: true });
+        expect(buildShareLink("abc123", "https://notes.example.com")).toBe("https://notes.example.com/share/abc123");
+    });
+
+    it("ignores the sync server host on a server, which serves the shared page itself", () => {
+        setGlob({});
+        expect(buildShareLink("abc123", "http://10.0.0.5:8080")).toBe("http://localhost:3000/share/abc123");
     });
 
     it("uses the injected loopback origin on the desktop renderer (not the trilium-app:// location)", () => {
@@ -48,6 +64,7 @@ describe("buildShareLink", () => {
     });
 
     it("keeps the subpath when the sync server is reverse-proxied below the domain root", () => {
+        vi.stubGlobal("electronApi", {});
         setGlob({ httpBaseUrl: "http://127.0.0.1:37742" });
 
         const subpath = "https://notes.example.com/trilium";
@@ -60,6 +77,7 @@ describe("buildShareLink", () => {
     });
 
     it("drops a query or fragment carried by the configured sync server address", () => {
+        vi.stubGlobal("electronApi", {});
         setGlob({ httpBaseUrl: "http://127.0.0.1:37742" });
 
         const subpath = "https://notes.example.com/trilium";
@@ -74,11 +92,76 @@ describe("buildShareLink", () => {
         const encoded = "my%20alias%22%2F%3Fx";
         const syncServerHost = "https://notes.example.com";
 
+        vi.stubGlobal("electronApi", {});
         setGlob({ httpBaseUrl: "http://127.0.0.1:37742" });
         expect(buildShareLink(shareId, syncServerHost)).toBe(`${syncServerHost}/share/${encoded}`);
         expect(buildShareLink(shareId, undefined)).toBe(`http://127.0.0.1:37742/share/${encoded}`);
 
         setGlob({});
         expect(buildShareLink(shareId, null)).toBe(`http://localhost:3000/share/${encoded}`);
+    });
+});
+
+describe("getNoteShareLink", () => {
+    afterEach(() => {
+        vi.unstubAllGlobals();
+    });
+
+    it("links a shared note to its shared page, by its alias or its id", () => {
+        vi.stubGlobal("electronApi", {});
+        const host = "https://notes.example.com";
+        options.load({ syncServerHost: host });
+        const shareRoot = buildNote({
+            id: "_share",
+            title: "Shared notes",
+            children: [
+                { id: "sharedAlias", title: "Aliased", "#shareAlias": "my-page" },
+                { id: "sharedPlain", title: "Plain" }
+            ]
+        });
+        const unshared = buildNote({ title: "Private" });
+
+        expect(getNoteShareLink(froca.notes.sharedAlias)).toBe(`${host}/share/my-page`);
+        expect(getNoteShareLink(froca.notes.sharedPlain)).toBe(`${host}/share/sharedPlain`);
+        expect(getNoteShareLink(shareRoot)).toBeNull();
+        expect(getNoteShareLink(unshared)).toBeNull();
+    });
+
+    it("gives no link in the mobile app without a sync server", () => {
+        vi.stubGlobal("Capacitor", { isNativePlatform: () => true });
+        const shareRoot = buildNote({
+            id: "_share",
+            title: "Shared notes",
+            children: [ { title: "Shared" } ]
+        });
+        const shared = froca.notes[shareRoot.children[0]];
+
+        options.load({ syncServerHost: "" });
+        expect(getNoteShareLink(shared)).toBeNull();
+
+        options.load({ syncServerHost: "https://notes.example.com" });
+        expect(getNoteShareLink(shared)).toBe(`https://notes.example.com/share/${shared.noteId}`);
+    });
+});
+
+describe("getShareScope", () => {
+    it("tells a public share from a local one, a standalone preview and one only an export publishes", () => {
+        const syncServerHost = "https://sync.example.com";
+        const platform = { isElectron: false, isStandalone: false, isMobileApp: false };
+
+        expect(getShareScope({ ...platform, syncServerHost: "" })).toBe("public");
+        expect(getShareScope({ ...platform, isElectron: true, syncServerHost: "" })).toBe("local");
+        expect(getShareScope({ ...platform, isElectron: true, syncServerHost })).toBe("public");
+        expect(getShareScope({ ...platform, isStandalone: true, syncServerHost: "" })).toBe("preview");
+        expect(getShareScope({ ...platform, isStandalone: true, syncServerHost })).toBe("public");
+        expect(getShareScope({ ...platform, isStandalone: true, isMobileApp: true, syncServerHost: "" })).toBe("export-only");
+        expect(getShareScope({ ...platform, isStandalone: true, isMobileApp: true, syncServerHost })).toBe("public");
+    });
+});
+
+describe("getSharedPageLink", () => {
+    it("adds the block parameter, encoded as a link to blocks is", () => {
+        expect(getSharedPageLink("https://notes.example.com/share/abc", "a b:c/d"))
+            .toBe("https://notes.example.com/share/abc?block=a%20b:c%2Fd");
     });
 });

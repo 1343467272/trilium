@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const fetchMock = vi.hoisted(() => vi.fn());
-vi.mock("./providers/fetch.js", () => ({ llmFetch: fetchMock }));
+vi.mock("./providers/fetch.js", async (importOriginal) => ({
+    ...await importOriginal<typeof import("./providers/fetch.js")>(),
+    llmFetch: fetchMock
+}));
 
 const fetchResourceMock = vi.hoisted(() => vi.fn());
 vi.mock("../request.js", async (importOriginal) => {
@@ -86,6 +89,28 @@ describe("searchWeb", () => {
         expect(sources).toEqual([ { ...PAGE, snippet: "From Perplexity" } ]);
     });
 
+    it("posts to DeepSeek's Search API with its key, cut to its query limit, and reads the summaries", async () => {
+        respond({ results: [ { ...PAGE, snippet: "Short", summary: "From DeepSeek", rerank_score: 2 } ] });
+        const sources = await searchWeb({ provider: "deepseek", apiKey: "dk" }, "q".repeat(200));
+
+        const { url, init, headers, body } = request();
+        expect(url).toBe("https://api.deepseek.com/v1/tools/search");
+        expect(init.method).toBe("POST");
+        expect(headers.Authorization).toBe("Bearer dk");
+        expect(body).toEqual({ query: "q".repeat(128), count: 8 });
+        expect(sources).toEqual([ { ...PAGE, snippet: "From DeepSeek" } ]);
+    });
+
+    it("names an empty DeepSeek balance and an endpoint without the Search API", async () => {
+        const deepseek = () => searchWeb({ provider: "deepseek", apiKey: "dk", baseURL: "https://gateway.example/v1" }, "q");
+        respond({}, 402);
+        await expect(deepseek()).rejects.toThrow("top it up");
+        respond({}, 404);
+        await expect(deepseek()).rejects.toThrow("https://api.deepseek.com");
+        respond({}, 500);
+        await expect(deepseek()).rejects.toThrow("The search provider answered HTTP 500.");
+    });
+
     it("asks SearXNG for JSON, sends a key only when there is one, and keeps web URLs only", async () => {
         respond({ results: [ { ...PAGE, content: "Hit" }, { title: "Local", url: "file:///etc/passwd" }, { url: "https://untitled.example" } ] });
         const sources = await searchWeb({ provider: "searxng", apiKey: "", baseURL: "http://localhost:8888/" }, "q");
@@ -142,7 +167,8 @@ describe("searchWeb overrides and sparse answers", () => {
             [ "brave", `${base}/web/search?q=q&count=8` ],
             [ "exa", `${base}/search` ],
             [ "serper", `${base}/search` ],
-            [ "perplexity", `${base}/search` ]
+            [ "perplexity", `${base}/search` ],
+            [ "deepseek", `${base}/tools/search` ]
         ];
         for (const [ provider, expectedUrl ] of cases) {
             fetchMock.mockReset();
@@ -167,7 +193,11 @@ describe("searchWeb overrides and sparse answers", () => {
         expect(await run()).toMatchObject({ searchProvider: { type: "tavily", name: "tavily" } });
 
         fetchMock.mockRejectedValueOnce("offline");
-        expect(await run()).toMatchObject({ error: "offline" });
+        expect(await run()).toMatchObject({ error: "Could not reach the search provider: offline" });
+
+        // `requestJson()` wraps a failure of `llmFetch()`, not one of `response.json()`.
+        fetchMock.mockResolvedValueOnce({ ok: true, json: () => Promise.reject("stream closed") });
+        expect(await run()).toMatchObject({ error: "stream closed" });
     });
 });
 
@@ -185,6 +215,10 @@ describe("createWebSearchTool", () => {
             searchProvider: { type: "tavily", name: "My Tavily" },
             sources: [ { ...PAGE, snippet: "Hit" } ]
         });
+
+        respond({ results: [ { ...PAGE, summary: "Hit" } ] });
+        expect(await run(createWebSearchTool({ provider: "deepseek", apiKey: "dk" }, { builtIn: true }), "trilium"))
+            .toEqual({ query: "trilium", sources: [ { ...PAGE, snippet: "Hit" } ] });
     });
 
     it("points the model at read_web_page after any failure, and has it report one only the user can fix", async () => {
@@ -206,6 +240,15 @@ describe("createWebSearchTool", () => {
         const transient = await failure({ provider: "brave", apiKey: "bk" }, 500);
         expect(transient).toEqual({ error: expect.stringContaining("HTTP 500"), instruction: readPage });
         expect(transient).not.toEqual(expect.objectContaining({ instruction: expect.stringContaining("tell the user") }));
+    });
+
+    it("names the network error when the search provider cannot be reached", async () => {
+        fetchMock.mockRejectedValueOnce(new TypeError("fetch failed", { cause: new Error("connect EHOSTUNREACH 192.168.1.10:8080") }));
+        expect(await run(createWebSearchTool({ provider: "searxng", apiKey: "", baseURL: "http://192.168.1.10:8080" }), "q"))
+            .toEqual({
+                error: "Could not reach the search provider: connect EHOSTUNREACH 192.168.1.10:8080",
+                instruction: expect.stringContaining("read_web_page")
+            });
     });
 
     it("cancels the search request when the turn is stopped", async () => {
@@ -291,5 +334,11 @@ describe("readWebPage", () => {
         const tool = createReadWebPageTool();
         expect(await tool.execute?.({ url: "http://169.254.169.254/" }, { toolCallId: "1", messages: [], context: {} }))
             .toEqual({ error: "URLs pointing to private/internal networks are not allowed" });
+    });
+
+    it("hands the model a failure that is not an Error as its text", async () => {
+        fetchResourceMock.mockRejectedValueOnce("socket hang up");
+        expect(await createReadWebPageTool().execute?.({ url: "https://a.example/" }, { toolCallId: "1", messages: [], context: {} }))
+            .toEqual({ error: "socket hang up" });
     });
 });

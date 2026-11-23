@@ -1,4 +1,6 @@
-import { MIME_TYPE_AUTO, MIME_TYPES_DICT, normalizeMimeTypeForCKEditor } from "@triliumnext/commons";
+import {
+    MIME_TYPE_AUTO, MIME_TYPES_DICT, normalizeMimeTypeForCKEditor, resolveEnabledMimeTypes
+} from "@triliumnext/commons/src/lib/mime_type.js";
 import { describe, expect, it, vi } from "vitest";
 
 // Wrap the real `normalizeMimeTypeForCKEditor` in a spy so we can observe how many
@@ -6,8 +8,8 @@ import { describe, expect, it, vi } from "vitest";
 // type while the map is being built and not at all on cached lookups, which is how
 // we prove the map is constructed exactly once.
 const normalizeSpy = vi.hoisted(() => vi.fn());
-vi.mock("@triliumnext/commons", async (importOriginal) => {
-    const actual = await importOriginal<typeof import("@triliumnext/commons")>();
+vi.mock("@triliumnext/commons/src/lib/mime_type.js", async (importOriginal) => {
+    const actual = await importOriginal<typeof import("@triliumnext/commons/src/lib/mime_type.js")>();
     normalizeSpy.mockImplementation(actual.normalizeMimeTypeForCKEditor);
     return {
         ...actual,
@@ -15,8 +17,12 @@ vi.mock("@triliumnext/commons", async (importOriginal) => {
     };
 });
 
+vi.mock("./i18n.js", () => ({ t: (key: string) => key }));
+
 import options from "./options.js";
-import mimeTypesService, { getHighlightJsNameForMime } from "./mime_types.js";
+import mimeTypesService, {
+    getHighlightJsNameForMime, orderEnabledMimeTypes
+} from "./mime_types.js";
 
 describe("mime_types service", () => {
     it("getMimeTypes loads lazily, defaults to the dict's `default` set, and always enables text/plain", () => {
@@ -101,10 +107,77 @@ describe("mime_types service", () => {
         expect(normalizeSpy).not.toHaveBeenCalled();
     });
 
+    it("translates the titles that name a Trilium format rather than a language", () => {
+        options.getJson = vi.fn(() => null) as typeof options.getJson;
+        mimeTypesService.loadMimeTypes();
+        const titleOf = (mime: string) =>
+            mimeTypesService.getMimeTypes().find((mt) => mt.mime === mime)?.title;
+
+        expect(titleOf("text/x-trilium-log")).toBe("code_mime_types.trilium_log");
+        expect(titleOf("text/x-trilium-search")).toBe("code_mime_types.trilium_search_query");
+    });
+
+    it("getEnabledMimeTypes follows the stored order unless sorting is on", () => {
+        options.getJson = vi.fn(() => [ "text/x-python", "text/css" ]) as typeof options.getJson;
+        mimeTypesService.loadMimeTypes();
+
+        options.is = vi.fn(() => false) as typeof options.is;
+        expect(mimeTypesService.getEnabledMimeTypes().map((mt) => mt.mime))
+            .toEqual([ "text/plain", "text/x-python", "text/css" ]);
+
+        options.is = vi.fn(() => true) as typeof options.is;
+        expect(mimeTypesService.getEnabledMimeTypes().map((mt) => mt.mime))
+            .toEqual([ "text/plain", "text/css", "text/x-python" ]);
+    });
+
+    it("getCodeBlockMimeTypes leaves out the Trilium script variants of JavaScript", () => {
+        const enabled = [
+            "text/javascript", "application/javascript;env=backend",
+            "application/javascript;env=frontend", "text/css"
+        ];
+        options.getJson = vi.fn(() => enabled) as typeof options.getJson;
+        options.is = vi.fn(() => false) as typeof options.is;
+        mimeTypesService.loadMimeTypes();
+
+        expect(mimeTypesService.getEnabledMimeTypes()).toHaveLength(5);
+        expect(mimeTypesService.getCodeBlockMimeTypes().map((mt) => mt.mime))
+            .toEqual([ "text/plain", "text/javascript", "text/css" ]);
+    });
+
     it("re-exports MIME_TYPE_AUTO and the public helpers", () => {
         expect(mimeTypesService.MIME_TYPE_AUTO).toBe(MIME_TYPE_AUTO);
         expect(typeof mimeTypesService.getMimeTypes).toBe("function");
         expect(typeof mimeTypesService.loadMimeTypes).toBe("function");
         expect(mimeTypesService.getHighlightJsNameForMime).toBe(getHighlightJsNameForMime);
+    });
+});
+
+describe("orderEnabledMimeTypes", () => {
+    const ordered = (order: (string | null)[] | null, isSortedAlphabetically: boolean) =>
+        orderEnabledMimeTypes(resolveEnabledMimeTypes(order), order, isSortedAlphabetically)
+            .map((mt) => mt.mime);
+
+    it("sorts by title with plain text first, wherever the stored order places it", () => {
+        expect(ordered([ "text/x-python", "text/plain", "text/css", "text/x-csrc" ], true))
+            .toEqual([ "text/plain", "text/x-csrc", "text/css", "text/x-python" ]);
+    });
+
+    it("keeps the stored order, with plain text first unless it was placed elsewhere", () => {
+        expect(ordered([ "text/x-python", "text/css" ], false))
+            .toEqual([ "text/plain", "text/x-python", "text/css" ]);
+        expect(ordered([ "text/x-python", "text/plain", "text/css" ], false))
+            .toEqual([ "text/x-python", "text/plain", "text/css" ]);
+    });
+
+    it("leaves out unknown and repeated entries", () => {
+        expect(ordered([ "text/x-python", null, "text/x-unknown", "text/x-python" ], false))
+            .toEqual([ "text/plain", "text/x-python" ]);
+    });
+
+    it("sorts the default MIME types when nothing is stored", () => {
+        const mimes = ordered(null, false);
+        expect(mimes[0]).toBe("text/plain");
+        expect(mimes).toContain("text/x-python");
+        expect(mimes.slice(1)).toEqual(ordered(null, true).slice(1));
     });
 });

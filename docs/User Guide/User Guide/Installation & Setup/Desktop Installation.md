@@ -5,6 +5,8 @@ To install Trilium on your desktop, follow these steps:
 2.  **Extract the Package**: Unzip the downloaded package to a location of your choice.
 3.  **Run the Application**: Launch Trilium by executing the `trilium` executable found within the unzipped folder.
 
+On Ubuntu 23.10 and later, the Linux `.zip` archive needs an extra setup step before it starts; see <a class="reference-link" href="Desktop%20Installation/Troubleshooting.md">Troubleshooting</a>. The `.deb` package and the Flathub version work without it.
+
 ## Installing from Flathub
 
 On Linux, Trilium is also available on [Flathub](https://flathub.org/en/apps/org.triliumnotes.Trilium), for both x86\_64 and ARM (aarch64). Install it from your software center (e.g. GNOME Software or KDE Discover), or from a terminal:
@@ -27,6 +29,8 @@ The Flathub version runs in a sandbox and keeps its [data directory](Data%20dire
 3.  Start the Flatpak version.
 
 If `~/.var/app/org.triliumnotes.Trilium/data/trilium-data` already exists because the Flatpak version was started before, remove or rename it first.
+
+The sandbox also hides the command-line tools that the [subscription-based AI providers](../AI/Providers/Subscription-based%20providers.md) run (Claude Code, GitHub Copilot, OpenAI Codex, Google Antigravity); that page describes the permission that lets the Flatpak start them.
 
 ## Startup Scripts
 

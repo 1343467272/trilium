@@ -1,4 +1,6 @@
-import { cls, consistency_checks, getConfig, getSql, note_service as noteService, routes, sql_init } from "@triliumnext/core";
+import {
+    becca, cls, consistency_checks, getConfig, getSql, note_service as noteService, routes, sql_init
+} from "@triliumnext/core";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { BrowserRouter } from "./browser_router.js";
@@ -82,6 +84,13 @@ describe("registerRoutes (real wiring)", () => {
         expect(parseJson(res.body)).toBeTypeOf("object");
     });
 
+    // `search()` writes `res.locals` for the server's request log, as any handler can on Express.
+    it("passes a response to an apiRoute handler", async () => {
+        const res = await router.dispatch("GET", "http://localhost/api/search?searchString=root");
+        expect(res.status).toBe(200);
+        expect(parseJson(res.body)).toBeInstanceOf(Array);
+    });
+
     it("returns the full bootstrap payload when the database is initialized", async () => {
         const data = parseJson((await router.dispatch("GET", "http://localhost/bootstrap")).body) as Record<string, unknown>;
         expect(data.isStandalone).toBe(true);
@@ -121,7 +130,8 @@ describe("registerRoutes (real wiring)", () => {
         });
 
         expect(res.status).toBe(200);
-        expect(parseJson(res.body)).toEqual({ uploaded: true });
+        expect(parseJson(res.body))
+            .toStrictEqual({ uploaded: true, blobId: becca.getNoteOrThrow(noteId).blobId });
         expect(text((await router.dispatch("GET", `http://localhost/api/notes/${noteId}/open`)).body)).toBe("uploaded");
     });
 
@@ -143,6 +153,39 @@ describe("registerRoutes (real wiring)", () => {
         expect(res.headers["Accept-Ranges"]).toBe("bytes");
     });
 
+    // The share routes load their subsystem on the first request, so only a dispatch proves the
+    // lazy import resolves and the reply reaches the router already formatted.
+    it("serves the share routes, adding the slash to a bare /share", async () => {
+        const bare = await router.dispatch("GET", "http://localhost/share");
+        expect(bare.status).toBe(302);
+        expect(bare.headers.location).toBe("../share/");
+
+        const missing = await router.dispatch("GET", "http://localhost/share/api/notes/noSuchNote", undefined, {
+            accept: "application/json"
+        });
+        expect(missing.status).toBe(404);
+        expect(missing.headers.location).toBeUndefined();
+    });
+
+    it("hands a share route the request's headers, which carry its credentials", async () => {
+        const noteId = cls.init(() => {
+            const note = noteService.createNewNote({
+                parentNoteId: "_share",
+                title: "Guarded",
+                type: "text",
+                content: "<p>guarded</p>"
+            }).note;
+            note.setLabel("shareCredentials", "user:secret");
+            return note.noteId;
+        });
+        const url = `http://localhost/share/api/notes/${noteId}`;
+
+        expect((await router.dispatch("GET", url)).status).toBe(401);
+        const allowed = await router.dispatch("GET", url, undefined, { authorization: `Basic ${btoa("user:secret")}` });
+        expect(allowed.status).toBe(200);
+        expect((parseJson(allowed.body) as { noteId: string }).noteId).toBe(noteId);
+    });
+
     it("returns the setup payload when the database is not initialized", async () => {
         vi.spyOn(sql_init, "isDbInitialized").mockReturnValue(false);
         const data = parseJson((await router.dispatch("GET", "http://localhost/bootstrap")).body) as Record<string, unknown>;
@@ -157,6 +200,7 @@ describe("registerRoutes (real wiring)", () => {
 describe("route wrapper branches (via controlled handlers)", () => {
     type RouteCtx = Parameters<typeof routes.buildSharedApiRoutes>[0];
     let ctx: RouteCtx;
+    const receivedFiles: { import?: unknown; upload?: unknown } = {};
 
     function buildRouter(): BrowserRouter {
         vi.spyOn(routes, "buildSharedApiRoutes").mockImplementation((received: RouteCtx) => {
@@ -174,6 +218,13 @@ describe("route wrapper branches (via controlled handlers)", () => {
                 res.set("A", "1").setHeader("B", "2").removeHeader("A").status(206).send("body");
             });
             route("get", "/t/r-sendstatus", [], (_req: unknown, res: MockRes) => { res.sendStatus(204); });
+            route("get", "/t/r-redirect", [], (_req: unknown, res: MockRes) => { res.redirect("../elsewhere"); });
+            route("get", "/t/r-problem", [], (_req: unknown, res: MockRes) => {
+                res.setHeader("content-type", "application/problem+json").json({ title: "nope" });
+            });
+            route("get", "/t/r-header", [], (req: { get(name: string): string | undefined }) => ({
+                header: req.get("X-Trilium-Test")
+            }));
             route("get", "/t/r-stream", [], (_req: unknown, res: MockRes) => { res.write("chunk1"); res.write("chunk2"); res.end(); });
             route("get", "/t/r-customrh", [], () => ({ x: 1 }), (_req: unknown, res: { setHeader(n: string, v: string): void; result: unknown }, result: unknown) => {
                 res.setHeader("X-Custom", "y");
@@ -184,6 +235,13 @@ describe("route wrapper branches (via controlled handlers)", () => {
             asyncRoute("get", "/t/async-res", [], async (_req: unknown, res: MockRes) => { res.send("async-body"); });
             asyncRoute("get", "/t/async-noresult", [], async () => ({ done: true }));
             asyncRouteWithoutTransaction("get", "/t/async-no-tx", [], async () => ({ bare: true }), apiResultHandler);
+
+            asyncRoute("post", "/t/import", [ received.importMiddlewareWithErrorHandling ], async (req: { file?: unknown }) => {
+                receivedFiles.import = req.file;
+            }, apiResultHandler);
+            route("post", "/t/upload", [ received.uploadMiddlewareWithErrorHandling ], (req: { file?: unknown }) => {
+                receivedFiles.upload = req.file;
+            }, apiResultHandler);
         });
         return createConfiguredRouter();
     }
@@ -195,14 +253,16 @@ describe("route wrapper branches (via controlled handlers)", () => {
         status(c: number): MockRes;
         send(b: unknown): MockRes;
         sendStatus(c: number): MockRes;
+        redirect(url: string): void;
+        json(b: unknown): MockRes;
         write(c: string): boolean;
         end(): MockRes;
     }
 
     it("runs transactional and non-transactional api routes (and reads originalUrl)", async () => {
         const router = buildRouter();
-        const apiRes = await router.dispatch("GET", "http://localhost/t/api");
-        expect((parseJson(apiRes.body) as { url: string }).url).toBe("http://localhost/t/api");
+        const apiRes = await router.dispatch("GET", "http://localhost/t/api?x=1");
+        expect((parseJson(apiRes.body) as { url: string }).url).toBe("/t/api?x=1");
         expect(parseJson((await router.dispatch("GET", "http://localhost/t/asyncapi")).body)).toEqual({ ok: true });
     });
 
@@ -247,6 +307,21 @@ describe("route wrapper branches (via controlled handlers)", () => {
 
         expect((await router.dispatch("GET", "http://localhost/t/r-sendstatus")).status).toBe(204);
         expect(text((await router.dispatch("GET", "http://localhost/t/r-stream")).body)).toBe("chunk1chunk2");
+
+        const redirect = await router.dispatch("GET", "http://localhost/t/r-redirect");
+        expect(redirect.status).toBe(302);
+        expect(redirect.headers.Location).toBe("../elsewhere");
+
+        // A type the handler chose survives json(), whatever case it was written in.
+        const problem = await router.dispatch("GET", "http://localhost/t/r-problem");
+        expect(problem.headers).toEqual({ "content-type": "application/problem+json" });
+        expect(parseJson(problem.body)).toEqual({ title: "nope" });
+    });
+
+    it("reads request headers case-insensitively through req.get()", async () => {
+        const router = buildRouter();
+        const res = await router.dispatch("GET", "http://localhost/t/r-header", undefined, { "x-trilium-test": "42" });
+        expect(parseJson(res.body)).toEqual({ header: "42" });
     });
 
     it("invokes a custom result handler that sets a header", async () => {
@@ -267,6 +342,18 @@ describe("route wrapper branches (via controlled handlers)", () => {
         expect(parseJson((await router.dispatch("GET", "http://localhost/api/script/widgets")).body)).toEqual([]);
         expect(parseJson((await router.dispatch("GET", "http://localhost/api/script/startup")).body)).toEqual([]);
         expect(parseJson((await router.dispatch("GET", "http://localhost/api/system-checks")).body)).toEqual({ isCpuArchMismatch: false });
+    });
+
+    it("leaves a posted File unread for the import routes and reads it for the others", async () => {
+        const router = buildRouter();
+        const file = new File([ "abc" ], "vault.zip", { type: "application/zip" });
+        const body = { type: "upload", fields: {}, file };
+
+        await router.dispatch("POST", "http://localhost/t/import", body);
+        await router.dispatch("POST", "http://localhost/t/upload", body);
+
+        expect(receivedFiles.import).toEqual({ originalname: "vault.zip", mimetype: "application/zip", blob: file });
+        expect(receivedFiles.upload).toMatchObject({ buffer: new TextEncoder().encode("abc") });
     });
 
     it("provides no-op middleware and an init guard", async () => {
@@ -297,7 +384,7 @@ describe("custom request handlers and resource providers", () => {
         cls.init(() => {
             createHandler("Greeter", "greet/([a-z]+)", `api.res.status(200).send("handled:" + api.pathParams[0]);`);
             createHandler("Thrower", "explode", `throw new Error("boom in handler");`);
-            createHandler("Echo", "echo", `api.res.json({ method: api.req.method, body: api.req.body });`);
+            createHandler("Echo", "echo", `api.res.json({ method: api.req.method, url: api.req.url, body: api.req.body });`);
             // A handler that answers after an await: what the server gets for free by holding the
             // connection open, this runtime has to wait for.
             createHandler("Deferred", "deferred", `
@@ -343,15 +430,17 @@ return (async () => {
         expect(text(res.body)).toBe("handled:world");
     });
 
-    it("reaches a handler over a method other than GET, carrying the parsed body", async () => {
+    it("reaches a handler over a method other than GET, carrying the URL and the parsed body", async () => {
         const body = new TextEncoder().encode(JSON.stringify({ hello: "there" })).buffer as ArrayBuffer;
-        const res = await router.dispatch("POST", "http://localhost/custom/echo", body, {
+        const res = await router.dispatch("POST", "http://localhost/custom/echo?x=1", body, {
             "content-type": "application/json"
         });
 
         expect(res.status).toBe(200);
         expect(res.headers["Content-Type"]).toContain("application/json");
-        expect(parseJson(res.body)).toEqual({ method: "POST", body: { hello: "there" } });
+        expect(parseJson(res.body)).toEqual({
+            method: "POST", url: "/custom/echo?x=1", body: { hello: "there" }
+        });
     });
 
     // `send()` leaving a number in the body would reach BrowserRouter as something it cannot

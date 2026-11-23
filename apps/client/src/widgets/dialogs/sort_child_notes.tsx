@@ -1,21 +1,19 @@
 import "./sort_child_notes.css";
 
-import {
-    ATTRIBUTE_NAME_PATTERN,
-    serializeSortCriteria,
-    type SortCriterion
-} from "@triliumnext/commons";
+import type { SortCriterion } from "@triliumnext/commons";
+import { ATTRIBUTE_NAME_PATTERN } from "@triliumnext/commons/src/lib/attribute_names.js";
+import { serializeSortCriteria } from "@triliumnext/commons/src/lib/sort_criteria.js";
 import { useState } from "preact/hooks";
 
 import { t } from "../../services/i18n";
 import server from "../../services/server";
 import ActionButton from "../react/ActionButton";
 import Button from "../react/Button";
-import { Card, CardSection, OptionCardSection } from "../react/Card";
+import { Card, CardSection, ItemCreationRow, OptionCardSection } from "../react/Card";
 import FormSelect from "../react/FormSelect";
 import FormTextBox from "../react/FormTextBox";
 import FormToggle from "../react/FormToggle";
-import { useTriliumEvent } from "../react/hooks";
+import { useTriliumEvent } from "../react/hooks/events";
 import Modal from "../react/Modal";
 import SegmentedChoice, { type SegmentedChoiceOption } from "../react/SegmentedChoice";
 
@@ -146,15 +144,11 @@ export default function SortChildNotesDialog() {
                     </CardSection>
                 ))}
 
-                <CardSection className="sort-level-add-row">
-                    <Button
-                        className="sort-level-add"
-                        icon="bx-plus"
-                        text={t("sort_child_notes.add_level")}
-                        size="small"
-                        onClick={() => setLevels([ ...levels, NEW_LEVEL ])}
-                    />
-                </CardSection>
+                <ItemCreationRow buttons={[ {
+                    label: t("sort_child_notes.add_level"),
+                    icon: "bx bx-plus",
+                    onClick: () => setLevels([ ...levels, NEW_LEVEL ])
+                } ]} />
             </Card>
 
             <Card>
@@ -197,7 +191,11 @@ export function serializeSortLevels(levels: SortLevel[]) {
     for (const level of levels) {
         const key = level.kind === "label" ? level.labelName.trim() : level.kind;
         if (key) {
-            criteria.push({ key, descending: level.direction === "desc" });
+            criteria.push({
+                key,
+                isLabel: level.kind === "label",
+                descending: level.direction === "desc"
+            });
         }
     }
     return serializeSortCriteria(criteria);

@@ -113,11 +113,16 @@ describe("handlers", () => {
 
         it("re-sorts the parent only when the changed label is one of the #sorted levels", () => {
             buildNote({ id: "ml-par", children: [{ id: "ml-chld" }] });
-            addAttribute("ml-par", "label", "sorted", "priority desc, dueDate");
+            addAttribute("ml-par", "label", "sorted", "#priority desc, #dueDate, title");
 
             const unrelated = addAttribute("ml-chld", "label", "priorityNote", "x");
             eventService.emit(eventService.ENTITY_CHANGED, {
                 entityName: "attributes", entity: unrelated
+            });
+            // A bare `title` is the note's title, not a label.
+            const titleLabel = addAttribute("ml-chld", "label", "title", "x");
+            eventService.emit(eventService.ENTITY_CHANGED, {
+                entityName: "attributes", entity: titleLabel
             });
             expect(sortNotesIfNeeded).not.toHaveBeenCalledWith("ml-par");
 
@@ -136,6 +141,41 @@ describe("handlers", () => {
             eventService.emit(eventService.ENTITY_CHANGED, { entityName: "attributes", entity: topAttr });
             expect(sortNotesIfNeeded).toHaveBeenCalledWith("par");
         });
+
+        it("re-sorts the parents of notes that inherit a change to a #sorted label", () => {
+            buildNote({ id: "ai-tpl" });
+            buildNote({ id: "ai-folder", children: [{ id: "ai-clone" }] });
+            buildNote({
+                id: "ai-par",
+                "#sorted": "#archived last",
+                children: [{ id: "ai-chld", "~template": "ai-tpl" }, { id: "ai-other" }]
+            });
+            buildNote({ id: "ai-plain", "#sorted": "", children: [{ id: "ai-plain-chld" }] });
+            new BBranch({
+                noteId: "ai-clone", parentNoteId: "ai-par", branchId: "ai-par_ai-clone"
+            });
+            new BBranch({
+                noteId: "ai-clone", parentNoteId: "ai-plain", branchId: "ai-plain_ai-clone"
+            });
+
+            const templateArchived = addAttribute("ai-tpl", "label", "archived", "");
+            eventService.emit(eventService.ENTITY_CHANGED, {
+                entityName: "attributes", entity: templateArchived
+            });
+            expect(sortNotesIfNeeded).toHaveBeenCalledWith("ai-par");
+            sortNotesIfNeeded.mockClear();
+
+            const folderArchived = new BAttribute({
+                noteId: "ai-folder", attributeId: randomString(12), type: "label",
+                name: "archived", value: "", position: 0, isInheritable: true
+            });
+            eventService.emit(eventService.ENTITY_CHANGED, {
+                entityName: "attributes", entity: folderArchived
+            });
+            expect(sortNotesIfNeeded).toHaveBeenCalledWith("ai-par");
+            // `ai-plain` also holds the clone, but its #sorted does not name #archived.
+            expect(sortNotesIfNeeded).not.toHaveBeenCalledWith("ai-plain");
+        });
     });
 
     describe("ENTITY_CREATED (template relation)", () => {
@@ -153,12 +193,84 @@ describe("handlers", () => {
         });
     });
 
+    describe("template re-sorting", () => {
+        it("re-sorts the parents of notes reached through inherited and chained templates", () => {
+            buildNote({ id: "tc-tpl" });
+            buildNote({ id: "tc-tpl2", "~template": "tc-tpl" });
+            buildNote({ id: "tc-folder", children: [{ id: "tc-chld" }] });
+            new BAttribute({
+                noteId: "tc-folder", attributeId: randomString(12), type: "relation",
+                name: "template", value: "tc-tpl", position: 0, isInheritable: true
+            });
+            buildNote({ id: "tc-par", "#sorted": "#archived last" });
+            new BBranch({ noteId: "tc-chld", parentNoteId: "tc-par", branchId: "tc-par_tc-chld" });
+            buildNote({
+                id: "tc-par2", "#sorted": "#archived last",
+                children: [{ id: "tc-user", "~template": "tc-tpl2" }]
+            });
+
+            const archived = addAttribute("tc-tpl", "label", "archived", "");
+            eventService.emit(eventService.ENTITY_CHANGED, {
+                entityName: "attributes", entity: archived
+            });
+            expect(sortNotesIfNeeded).toHaveBeenCalledWith("tc-par");
+            expect(sortNotesIfNeeded).toHaveBeenCalledWith("tc-par2");
+        });
+    });
+
+    describe("folder re-sorting", () => {
+        it("re-sorts the parents grouping folders when a note gains or loses its only child", () => {
+            // The becca loader removes a deleted branch from its parent's children only once loaded.
+            becca.loaded = true;
+            buildNote({
+                id: "fd-ff", "#sorted": "", "#sortFoldersFirst": "", children: [{ id: "fd-note" }]
+            });
+            buildNote({ id: "fd-key", "#sorted": "folders last, title" });
+            buildNote({ id: "fd-plain", "#sorted": "title" });
+            for (const parentNoteId of ["fd-key", "fd-plain"]) {
+                new BBranch({ noteId: "fd-note", parentNoteId, branchId: `${parentNoteId}_fd-note` });
+            }
+            buildNote({ id: "fd-c1" });
+            buildNote({ id: "fd-c2" });
+
+            const first = new BBranch({
+                noteId: "fd-c1", parentNoteId: "fd-note", branchId: "fd-note_fd-c1"
+            });
+            eventService.emit(eventService.ENTITY_CREATED, { entityName: "branches", entity: first });
+            expect(sortNotesIfNeeded).toHaveBeenCalledWith("fd-ff");
+            expect(sortNotesIfNeeded).toHaveBeenCalledWith("fd-key");
+            expect(sortNotesIfNeeded).not.toHaveBeenCalledWith("fd-plain");
+            sortNotesIfNeeded.mockClear();
+
+            // A second child leaves `fd-note` a folder, so its parents keep their order.
+            const second = new BBranch({
+                noteId: "fd-c2", parentNoteId: "fd-note", branchId: "fd-note_fd-c2"
+            });
+            eventService.emit(eventService.ENTITY_CREATED, { entityName: "branches", entity: second });
+            eventService.emit(eventService.ENTITY_DELETED, {
+                entityName: "branches", entityId: second.branchId, entity: second
+            });
+            expect(sortNotesIfNeeded).not.toHaveBeenCalledWith("fd-ff");
+
+            eventService.emit(eventService.ENTITY_DELETED, {
+                entityName: "branches", entityId: first.branchId, entity: first
+            });
+            expect(sortNotesIfNeeded).toHaveBeenCalledWith("fd-ff");
+            expect(sortNotesIfNeeded).toHaveBeenCalledWith("fd-key");
+            expect(sortNotesIfNeeded).not.toHaveBeenCalledWith("fd-plain");
+        });
+    });
+
     describe("ENTITY_DELETED", () => {
         it("reschedules a hidden-subtree check when a system ('_') note is deleted", () => {
             const sysNote = buildNote({ id: "_systemDeleted", title: "sys" });
 
             eventService.emit(eventService.ENTITY_DELETED, { entityName: "notes", entity: sysNote });
             expect(scheduleExecution).toHaveBeenCalledWith("hidden-subtree-check", expect.any(Number), expect.any(Function));
+
+            const [ , , check ] = scheduleExecution.mock.calls[0];
+            check();
+            expect(hiddenSubtreeService.checkHiddenSubtree).toHaveBeenCalledOnce();
         });
     });
 
@@ -252,6 +364,93 @@ describe("handlers", () => {
 
             eventService.emit(eventService.ENTITY_DELETED, { entityName: "branches", entity: branch });
             expect(executeNoteNoException).toHaveBeenCalledWith(target, expect.anything());
+        });
+    });
+
+    describe("guards against missing notes", () => {
+        it("skips re-sorting for the root, for notes outside the cache and for missing templates or branch children", () => {
+            const root = becca.getNoteOrThrow("root");
+            eventService.emit(eventService.NOTE_TITLE_CHANGED, root);
+
+            buildNote({ "id": "gm-par", "#sorted": "", "children": [ { id: "gm-chld" } ] });
+            const evicted = becca.getNoteOrThrow("gm-chld");
+            const branch = becca.getBranchFromChildAndParent("gm-chld", "gm-par");
+            delete becca.notes["gm-chld"];
+            eventService.emit(eventService.NOTE_TITLE_CHANGED, evicted);
+            expect(sortNotesIfNeeded).not.toHaveBeenCalled();
+
+            eventService.emit(eventService.ENTITY_CHANGED, { entityName: "branches", entity: branch });
+            expect(sortNotesIfNeeded).toHaveBeenCalledWith("gm-par");
+            expect(executeNoteNoException).not.toHaveBeenCalled();
+
+            buildNote({ id: "gm-n", content: "" });
+            const rel = addAttribute("gm-n", "relation", "template", "gm-missing");
+            eventService.emit(eventService.ENTITY_CREATED, { entityName: "attributes", entity: rel });
+            expect(duplicateSubtree).not.toHaveBeenCalled();
+        });
+    });
+
+    describe("inheritable #sorted", () => {
+        it("re-sorts the whole subtree of the note", () => {
+            buildNote({ id: "is-par", children: [ { id: "is-chld", children: [ { id: "is-gchld" } ] } ] });
+            const sorted = new BAttribute({
+                noteId: "is-par", attributeId: randomString(12), type: "label",
+                name: "sorted", value: "", position: 0, isInheritable: true
+            });
+
+            eventService.emit(eventService.ENTITY_CHANGED, { entityName: "attributes", entity: sorted });
+            for (const noteId of [ "is-par", "is-chld", "is-gchld" ]) {
+                expect(sortNotesIfNeeded).toHaveBeenCalledWith(noteId);
+            }
+        });
+    });
+
+    describe("inverse relations", () => {
+        let save: ReturnType<typeof vi.spyOn>;
+        let markAsDeleted: ReturnType<typeof vi.spyOn>;
+
+        beforeEach(() => {
+            save = vi.spyOn(BAttribute.prototype, "save").mockImplementation(function (this: BAttribute) {
+                return this;
+            });
+            markAsDeleted = vi.spyOn(BAttribute.prototype, "markAsDeleted").mockImplementation(() => {});
+        });
+
+        it("creates the missing inverse relation on the target, once", () => {
+            buildNote({ "id": "ir-a", "#relation:friend": "promoted,inverse=friendOf" });
+            buildNote({ id: "ir-b" });
+            const relation = addAttribute("ir-a", "relation", "friend", "ir-b");
+
+            eventService.emit(eventService.ENTITY_CHANGED, { entityName: "attributes", entity: relation });
+            const created = save.mock.contexts.find((attr) => attr instanceof BAttribute && attr.name === "friendOf");
+            expect(created).toMatchObject({ noteId: "ir-b", type: "relation", value: "ir-a" });
+
+            save.mockClear();
+            addAttribute("ir-b", "relation", "friendOf", "ir-a");
+            becca.getNoteOrThrow("ir-b").invalidateThisCache();
+            eventService.emit(eventService.ENTITY_CHANGED, { entityName: "attributes", entity: relation });
+            expect(save.mock.contexts.some((attr) => attr instanceof BAttribute && attr.name === "friendOf")).toBe(false);
+        });
+
+        it("ignores definitions without an inverse name and relations to missing notes", () => {
+            buildNote({ "id": "ir-c", "#relation:plain": "promoted,inverse", "#relation:dangling": "inverse=danglingOf" });
+            buildNote({ id: "ir-d" });
+
+            eventService.emit(eventService.ENTITY_CHANGED, { entityName: "attributes", entity: addAttribute("ir-c", "relation", "plain", "ir-d") });
+            eventService.emit(eventService.ENTITY_CHANGED, { entityName: "attributes", entity: addAttribute("ir-c", "relation", "dangling", "ir-missing") });
+            expect(save.mock.contexts.some((attr) => attr instanceof BAttribute && attr.noteId === "ir-d")).toBe(false);
+        });
+
+        it("deletes the inverse relation pointing back at the note", () => {
+            buildNote({ "id": "ir-e", "#relation:friend": "inverse=friendOf" });
+            buildNote({ id: "ir-f" });
+            buildNote({ id: "ir-other" });
+            const back = addAttribute("ir-f", "relation", "friendOf", "ir-e");
+            addAttribute("ir-f", "relation", "friendOf", "ir-other");
+            const relation = addAttribute("ir-e", "relation", "friend", "ir-f");
+
+            eventService.emit(eventService.ENTITY_DELETED, { entityName: "attributes", entity: relation });
+            expect(markAsDeleted.mock.contexts).toEqual([ back ]);
         });
     });
 });

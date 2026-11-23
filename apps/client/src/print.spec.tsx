@@ -9,21 +9,28 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // also how we reach `App`'s inline `onReady`/`onProgressChanged` callbacks.
 const h = vi.hoisted(() => ({
     getRenderedContent: vi.fn(),
-    noteListProps: null as any
+    noteListProps: null as any,
+    noteListParent: null as unknown
 }));
 
 vi.mock("./services/content_renderer", () => ({
     default: { getRenderedContent: h.getRenderedContent }
 }));
 
-vi.mock("./widgets/collections/NoteList", () => ({
-    useNoteViewType: () => "grid",
-    CustomNoteList: (props: any) => {
-        h.noteListProps = props;
-        return "NOTELIST";
-    }
-}));
+vi.mock("./widgets/collections/NoteList", async () => {
+    const { useContext } = await import("preact/hooks");
+    const { ParentComponent } = await import("./widgets/react/react_utils");
+    return {
+        useNoteViewType: () => "grid",
+        CustomNoteList: (props: any) => {
+            h.noteListProps = props;
+            h.noteListParent = useContext(ParentComponent);
+            return "NOTELIST";
+        }
+    };
+});
 
+import Component from "./components/component";
 import { App, Error404, loadCustomCss, main, SingleNoteRenderer } from "./print";
 import froca from "./services/froca";
 import { buildNote } from "./test/easy-froca";
@@ -42,6 +49,8 @@ function makeImage(complete: boolean) {
     Object.defineProperty(img, "complete", { value: complete, configurable: true });
     return img;
 }
+
+const FONT_CSS = "html:root {--detail-font-family: Arial;}";
 
 const countPageStyles = () =>
     [...document.head.querySelectorAll("style")].filter((s) => (s.textContent ?? "").includes("@page")).length;
@@ -71,12 +80,13 @@ afterEach(() => {
     containers.length = 0;
     document.body.replaceChildren();
     document.head
-        .querySelectorAll('link[href="api/fonts"], link[href^="/api/notes/"]')
+        .querySelectorAll('style[data-font-stylesheet], link[href^="/api/notes/"]')
         .forEach((n) => n.remove());
     [...document.head.querySelectorAll("style")]
         .filter((s) => (s.textContent ?? "").includes("@page"))
         .forEach((n) => n.remove());
     delete (window as any).electronApi;
+    delete window.glob.fontCss;
     window._noteReady = undefined;
     window.location.hash = "";
 });
@@ -137,6 +147,44 @@ describe("App", () => {
         expect(readyListener).toHaveBeenCalledTimes(1);
         window.removeEventListener("note-ready", readyListener);
     });
+
+    it("gives a collection a root component, for the hooks of its view", async () => {
+        buildNote({ id: "root", title: "root", children: [{ id: "app-book-parent", title: "Book", type: "book" }] });
+        const note = await froca.getNote("app-book-parent");
+        renderInto(<App note={note} noteId="app-book-parent" />);
+
+        await vi.waitFor(() => expect(h.noteListProps).toBeTruthy());
+        expect(h.noteListParent).toBeInstanceOf(Component);
+    });
+
+    it("renders CollectionRenderer for a search note, whose results print as a list", async () => {
+        const loadSearchNote = vi.spyOn(froca, "loadSearchNote").mockResolvedValue(undefined);
+        buildNote({ id: "root", title: "root", children: [{ id: "app-search", title: "Search", type: "search" }] });
+        const note = await froca.getNote("app-search");
+        const container = renderInto(<App note={note} noteId="app-search" />);
+
+        await vi.waitFor(() => expect(container.textContent).toContain("NOTELIST"));
+        expect(loadSearchNote).toHaveBeenCalledWith("app-search");
+        expect(document.body.dataset.noteType).toBe("search");
+        loadSearchNote.mockRestore();
+    });
+
+    it("reports a failed saved search instead of printing an empty list", async () => {
+        const loadSearchNote = vi.spyOn(froca, "loadSearchNote").mockResolvedValue({ error: "Unknown label 'year'" });
+        buildNote({ id: "root", title: "root", children: [{ id: "app-search-failed", title: "Broken", type: "search" }] });
+        const note = await froca.getNote("app-search-failed");
+
+        const readyListener = vi.fn();
+        window.addEventListener("note-ready", readyListener);
+        const container = renderInto(<App note={note} noteId="app-search-failed" />);
+
+        await vi.waitFor(() => expect(readyListener).toHaveBeenCalledOnce());
+        expect((readyListener.mock.calls[0]?.[0] as CustomEvent).detail).toEqual({ type: "error", message: "Unknown label 'year'" });
+        expect(container.textContent).not.toContain("NOTELIST");
+
+        window.removeEventListener("note-ready", readyListener);
+        loadSearchNote.mockRestore();
+    });
 });
 
 describe("SingleNoteRenderer", () => {
@@ -178,7 +226,16 @@ describe("SingleNoteRenderer", () => {
         });
         expect(lazyImg.getAttribute("loading")).toBe("eager");
         // Printing preserves full embed nesting via expandNestedEmbeds.
-        expect(h.getRenderedContent).toHaveBeenCalledWith(note, { noChildrenList: true, expandNestedEmbeds: true, mediaEnvironment: "native" });
+        expect(h.getRenderedContent).toHaveBeenCalledWith(note, { noChildrenList: true, expandNestedEmbeds: true, mediaEnvironment: "native", parentComponent: expect.any(Component) });
+    });
+
+    it("gives a render note a root component for its JSX to mount under", async () => {
+        const note = buildNote({ id: "render", title: "Render", type: "render" });
+        const onReady = vi.fn();
+        renderInto(<SingleNoteRenderer note={note} onReady={onReady} onProgressChanged={() => {}} />);
+
+        await vi.waitFor(() => expect(onReady).toHaveBeenCalledWith({ type: "single-note" }));
+        expect(h.getRenderedContent.mock.lastCall?.[1]?.parentComponent).toBeInstanceOf(Component);
     });
 
     it("renders a non-text, non-spreadsheet note via the content renderer", async () => {
@@ -188,7 +245,27 @@ describe("SingleNoteRenderer", () => {
 
         await vi.waitFor(() => expect(onReady).toHaveBeenCalledWith({ type: "single-note" }));
         // Printing preserves full embed nesting via expandNestedEmbeds.
-        expect(h.getRenderedContent).toHaveBeenCalledWith(note, { noChildrenList: true, expandNestedEmbeds: true, mediaEnvironment: "native" });
+        expect(h.getRenderedContent).toHaveBeenCalledWith(note, { noChildrenList: true, expandNestedEmbeds: true, mediaEnvironment: "native", parentComponent: expect.any(Component) });
+    });
+
+    it("reports nothing once it is unmounted, whether the render then succeeds or fails", async () => {
+        const settle: { resolve: () => void; reject: () => void }[] = [];
+        h.getRenderedContent.mockImplementation(() => new Promise((resolve, reject) => settle.push({
+            resolve: () => resolve({ $renderedContent: [] }),
+            reject: () => reject(new Error("render failed"))
+        })));
+        const onReady = vi.fn();
+        for (const id of [ "unmounted-ok", "unmounted-failed" ]) {
+            const note = buildNote({ id, title: id, type: "image" });
+            const container = renderInto(<SingleNoteRenderer note={note} onReady={onReady} onProgressChanged={() => {}} />);
+            render(null, container);
+        }
+        await vi.waitFor(() => expect(settle).toHaveLength(2));
+
+        settle[0]?.resolve();
+        settle[1]?.reject();
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        expect(onReady).not.toHaveBeenCalled();
     });
 });
 
@@ -207,18 +284,20 @@ describe("loadCustomCss", () => {
         const promise = loadCustomCss(note);
 
         const codeLink = await vi.waitFor(() => {
-            const link = document.head.querySelector<HTMLLinkElement>('link[href="/api/notes/css-code/download"]');
+            const link = document.head.querySelector<HTMLLinkElement>('link[href="api/notes/css-code/download"]');
             expect(link).toBeTruthy();
             return link;
         });
-        expect(document.head.querySelector('link[href="/api/notes/css-mime/download"]')).toBeTruthy();
+        expect(document.head.querySelector('link[href="api/notes/css-mime/download"]')).toBeTruthy();
         await promise;
         expect(warn).toHaveBeenCalledWith(expect.stringContaining("css-code"));
         expect(warn).toHaveBeenCalledWith(expect.stringContaining("css-mime"));
         warn.mockRestore();
 
         expect(codeLink?.rel).toBe("stylesheet");
-        expect(document.head.querySelector('link[href="/api/notes/css-text/download"]')).toBeNull();
+        // Relative, so it resolves against the app base when Trilium is served from a subpath
+        expect(codeLink?.getAttribute("href")).toBe("api/notes/css-code/download");
+        expect(document.head.querySelector('link[href="api/notes/css-text/download"]')).toBeNull();
     });
 });
 
@@ -228,15 +307,16 @@ describe("main", () => {
         await expect(main()).resolves.toBeUndefined();
     });
 
-    it("injects @page margins (browser) plus the font link and renders the app", async () => {
+    it("injects @page margins (browser) plus the font options and renders the app", async () => {
         buildNote({ id: "main-note", title: "Main Note", type: "text" });
         window.location.hash = "main-note";
         document.title = "Trilium Notes";
+        window.glob.fontCss = FONT_CSS;
 
         await main();
 
         expect(countPageStyles()).toBeGreaterThan(0);
-        expect(document.head.querySelector('link[href="api/fonts"]')).toBeTruthy();
+        expect(document.head.querySelector("style[data-font-stylesheet]")?.textContent).toBe(FONT_CSS);
         const titles = [...document.body.querySelectorAll("h1")].map((el) => el.textContent);
         expect(titles).toContain("Main Note");
         expect(document.title).toBe("Main Note");

@@ -45,12 +45,12 @@
         # Don't refresh these by hand — `pnpm chore:update-flake-electron` rewrites both
         # bindings from the release's SHASUMS256.txt, and the update-nix-flake workflow
         # opens a PR whenever apps/desktop/package.json moves ahead of the pin.
-        pinnedElectronVersion = "44.5.1";
+        pinnedElectronVersion = "45.3.4";
         pinnedElectronHashes = {
-          x86_64-linux = "5bcd217611d6843ececd6c9e9c1fcd1da3ab066c43d8b1a9e4b44689a1fba6f5";
-          aarch64-linux = "ee1790d743af1abd6a7e3971589dcd8635b58dab51ca1359123ba5216ce3a453";
-          aarch64-darwin = "1d75703019bb16461ae65f3081d7e6f5c0b11e901d0ccb5c343bcf7bcdd6435c";
-          headers = "07qjxn071d21rcadjsawdvq3dj8ypsbkkq0nhr8bj0k4vzxigya0";
+          x86_64-linux = "696689916f56fc12dd3085527351751ff0845c37eda45df420fc0d7aecc841f3";
+          aarch64-linux = "619d0431bc7653acb10af4f803538322b8665926daf0938b87e6139ffb004b9d";
+          aarch64-darwin = "f3ac0124c48a6cc3aa9332caca0e913cc478cd3610a378881729ca33452caa72";
+          headers = "00xi69gfpgiwg9x10gnbv07fzbvzw6vjmyi124w092cng8pwgr8n";
         };
         mkElectronBin = pkgs.callPackage (
           pkgs.path + "/pkgs/development/tools/electron/binary/generic.nix"
@@ -314,6 +314,12 @@
           installCommands = ''
             mkdir -p $out/{bin,share/icons/hicolor/512x512/apps,opt/trilium}
             cp --archive apps/desktop/dist/* $out/opt/trilium
+            ${lib.optionalString stdenv.hostPlatform.isLinux ''
+              # Electron links libc++ statically, so nothing in its process provides the
+              # libstdc++ that prebuilt addons (better-sqlite3, sherpa-onnx) link against.
+              find $out/opt/trilium/node_modules -type f \( -name '*.node' -o -name '*.so' \) \
+                -exec patchelf --add-rpath ${lib.getLib stdenv.cc.cc}/lib {} \;
+            ''}
             cp apps/client/src/assets/icon.png $out/share/icons/hicolor/512x512/apps/trilium.png
             makeShellWrapper ${lib.getExe electron} $out/bin/trilium \
               "''${gappsWrapperArgs[@]}" \
@@ -389,10 +395,6 @@
             # Copy client dist (needed for runtime)
             mkdir -p $out/opt/trilium-build-docs/client
             cp --archive apps/client/dist/* $out/opt/trilium-build-docs/client/
-
-            # Copy share-theme (needed for exports)
-            mkdir -p $out/opt/trilium-build-docs/packages/share-theme
-            cp --archive packages/share-theme/dist/* $out/opt/trilium-build-docs/packages/share-theme/
 
             # Create wrapper script
             makeWrapper ${lib.getExe nodejs} $out/bin/trilium-build-docs \

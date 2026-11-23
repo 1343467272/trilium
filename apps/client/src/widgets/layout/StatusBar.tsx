@@ -1,48 +1,51 @@
 import "./StatusBar.css";
 
-import { getCodeLanguageIcon, Locale, NOTE_TYPE_ICONS, NoteType } from "@triliumnext/commons";
+import type { Tooltip } from "bootstrap";
 import clsx from "clsx";
-import { type ComponentChildren, createPortal, RefObject } from "preact";
-import { useCallback, useContext, useEffect, useMemo, useRef, useState } from "preact/hooks";
+import { createPortal } from "preact";
+import { useContext, useEffect, useMemo, useRef, useState } from "preact/hooks";
 
-import appContext, { CommandNames } from "../../components/app_context";
-import NoteContext from "../../components/note_context";
-import FNote from "../../entities/fnote";
+import type { CommandNames } from "../../components/app_context";
+import type NoteContext from "../../components/note_context";
+import type FNote from "../../entities/fnote";
+import { partitionAttachmentsByGroup } from "../../services/attachment_groups";
 import attributes from "../../services/attributes";
 import { t } from "../../services/i18n";
-import { ATTRIBUTE_HELP_PAGE } from "../../services/in_app_help";
-import { ViewScope } from "../../services/link";
-import { NOTE_TYPES } from "../../services/note_types";
-import server from "../../services/server";
+import type { ViewScope } from "../../services/link";
 import { openInAppHelpFromUrl } from "../../services/utils";
-import { formatDateTime } from "../../utils/formatters";
-import { BacklinksWidget, useBacklinkCount } from "../FloatingButtonsDefinitions";
 import Dropdown, { type DropdownHandle, DropdownPanel, type DropdownPanelProps } from "../react/Dropdown";
-import { FormDropdownDivider, FormListHeader, FormListItem } from "../react/FormList";
-import HelpDropdown from "../react/HelpDropdown";
-import { useActiveNoteContext, useLegacyImperativeHandlers, useNoteLabel, useNoteLabelInt, useNoteLabelOptionalBool, useNoteProperty, useStaticTooltip, useTriliumEvent, useTriliumEvents, useTriliumOptionBool, useTriliumOptionInt, useAttachments } from "../react/hooks";
+import { FormDropdownDivider, FormListItem } from "../react/FormList";
+import { useBodyClass } from "../react/hooks/dom";
+import { useTriliumEvent, useTriliumEvents } from "../react/hooks/events";
+import { useAttachments, useBacklinkCount, useNoteProperty, useSortedNotePaths } from "../react/hooks/note";
+import { useGetContextDataFrom } from "../react/hooks/note_context";
+import { useTriliumOptionBool } from "../react/hooks/options";
+import { useStaticTooltip } from "../react/hooks/tooltip";
+import { useActiveNoteContext } from "../react/hooks/tree";
 import Icon from "../react/Icon";
-import LinkButton from "../react/LinkButton";
+import { preloadLazyModule, WithLazyModule } from "../react/LazyComponent";
 import { ParentComponent } from "../react/react_utils";
-import { codeLanguageItems, ContentLanguagesModal, NoteTypeOptionsModal, useLanguageSwitcher, useMimeTypes } from "../ribbon/BasicPropertiesTab";
-import AttributeEditor, { AttributeEditorImperativeHandlers } from "../ribbon/components/AttributeEditor";
-import AttributeHelp from "../ribbon/components/AttributeHelp";
-import InheritedAttributesTab from "../ribbon/InheritedAttributesTab";
-import { NoteSizeWidget, useNoteMetadata } from "../ribbon/NoteInfoTab";
-import { NotePathsWidget, useSortedNotePaths } from "../ribbon/NotePathsTab";
-import SimilarNotesTab from "../ribbon/SimilarNotesTab";
-import type { RightPaneTabId } from "../sidebar/RightPaneTabs";
 import { useProcessedLocales } from "../type_widgets/options/components/LocaleSelector";
 import Breadcrumb from "./Breadcrumb";
-import { convertIndentation } from "./reindentation";
+import { getLocaleName, useLanguageSwitcher } from "./language_switcher";
+import {
+    useVimStatus, VimCommandLineSlot, VimHintStrip, VimMessagePanel, VimModeBadge, VimStatusLine
+} from "./VimStatus";
 
-interface StatusBarContext {
+export interface StatusBarContext {
     note: FNote;
     noteContext: NoteContext;
     viewScope?: ViewScope;
     hoistedNoteId?: string;
     notePath?: string | null;
 }
+
+const loadPanels = () => import("./StatusBarPanels");
+const loadAttributesPane = () => import("./StatusBarAttributes");
+const loadCodeItems = () => import("./StatusBarCode");
+const loadContentLanguages = () => import("../dialogs/content_languages");
+const loadBacklinks = () => import("../sidebar/Backlinks");
+const loadNotePaths = () => import("../sidebar/NotePaths");
 
 export default function StatusBar() {
     const { note, noteContext, viewScope, hoistedNoteId, notePath } = useActiveNoteContext();
@@ -62,23 +65,51 @@ export default function StatusBar() {
         similarNotesShown: activePane === "similar-notes",
         setSimilarNotesShown: (shown) => setActivePane(shown && "similar-notes")
     };
+    const noteType = useNoteProperty(note, "type");
     const isHiddenNote = note?.isHiddenCompletely();
+    const canEditAttributes = note?.isContentWritable !== false;
+    const vimStatus = useVimStatus(noteContext);
+    const shownVim = useGetContextDataFrom(noteContext, "vimMode");
+    const [ isVimModeOptionOn ] = useTriliumOptionBool("textNoteVimModeEnabled");
+    const isVimBadgeShown = !!shownVim && isVimModeOptionOn;
+    const vimMessage = vimStatus?.message;
+    const vimHints = vimStatus?.hints;
+
+    // The note split comes before the bar in the DOM, so its corner rule keys on a body class.
+    useBodyClass("status-bar-panel-open", !!activePane);
+    // Zen mode keeps the bar for Vim mode, and for its badge while the note has Vim mode off.
+    useBodyClass("vim-status-shown", !!vimStatus || isVimBadgeShown);
 
     return (
-        <div className={clsx("status-bar", {"status-bar-panel-open": !!activePane})}>
-            {attributesContext && <AttributesPane {...attributesContext} />}
-            {noteInfoContext && <SimilarNotesPane {...noteInfoContext} />}
+        <div className={clsx("status-bar", vimStatus?.commandLine && "vim-command-line-open",
+            vimHints && "vim-hints-shown")}>
+            {attributesContext && canEditAttributes && <AttributesPane {...attributesContext} />}
+            {noteInfoContext?.similarNotesShown && (
+                <WithLazyModule load={loadPanels}>
+                    {({ SimilarNotesPane }) => <SimilarNotesPane {...noteInfoContext} />}
+                </WithLazyModule>
+            )}
+            {vimMessage?.isLong && <VimMessagePanel text={vimMessage.text} />}
 
             <div className="status-bar-main-row">
                 {context && attributesContext && noteInfoContext && <>
                     <Breadcrumb />
+                    {vimStatus && <VimCommandLineSlot />}
+                    {vimHints && <VimHintStrip hints={vimHints} />}
 
                     <div className="actions-row">
-                        <CodeNoteSwitcher {...context} />
-                        <TabWidthSwitcher {...context} />
+                        {isVimBadgeShown && (
+                            <VimModeBadge note={context.note} ntxId={context.noteContext.ntxId} />
+                        )}
+                        {vimStatus && <VimStatusLine status={vimStatus} vim={shownVim} />}
+                        {noteType === "code" && (
+                            <WithLazyModule load={loadCodeItems}>
+                                {({ default: CodeItems }) => <CodeItems {...context} />}
+                            </WithLazyModule>
+                        )}
                         <LanguageSwitcher {...context} />
                         {!isHiddenNote && <NotePaths {...context} />}
-                        <AttributesButton {...attributesContext} />
+                        {canEditAttributes && <AttributesButton {...attributesContext} />}
                         <AttachmentCount {...context} />
                         <BacklinksBadge {...context} />
                         <NoteInfoBadge {...noteInfoContext} />
@@ -89,11 +120,13 @@ export default function StatusBar() {
     );
 }
 
-function StatusBarDropdown({ children, icon, text, buttonClassName, dropdownContainerClassName, titleOptions, panel, ...dropdownProps }: Omit<DropdownPanelProps,"hideToggleArrow" | "title" | "titlePosition"> & {
+export function StatusBarDropdown({ children, icon, text, buttonClassName, dropdownContainerClassName, titleOptions, panel, preload, ...dropdownProps }: Omit<DropdownPanelProps,"hideToggleArrow" | "title" | "titlePosition"> & {
     title: string;
     icon?: string;
     /** Opens a {@link DropdownPanel} rather than a menu, for content other than `FormList` rows. */
     panel?: boolean;
+    /** Starts loading what the dropdown shows, as the pointer or the focus reaches its button. */
+    preload?: () => void;
 }) {
     const Component = panel ? DropdownPanel : Dropdown;
     return (
@@ -114,6 +147,7 @@ function StatusBarDropdown({ children, icon, text, buttonClassName, dropdownCont
                 {icon && (<><Icon icon={icon} />&nbsp;</>)}
                 <span className="text">{text}</span>
             </>}
+            buttonProps={preload && { onPointerEnter: preload, onFocus: preload }}
             {...dropdownProps}
         >
             {children}
@@ -128,27 +162,33 @@ interface StatusBarButtonBaseProps {
     text: string | number;
     disabled?: boolean;
     active?: boolean;
+    /** Starts loading what the button opens, as the pointer or the focus reaches it. */
+    preload?: () => void;
 }
 
 type StatusBarButtonWithCommand = StatusBarButtonBaseProps & { triggerCommand: CommandNames; };
 type StatusBarButtonWithClick = StatusBarButtonBaseProps & { onClick: () => void; };
 
-function StatusBarButton({ className, icon, text, title, active, ...restProps }: StatusBarButtonWithCommand | StatusBarButtonWithClick) {
+/** The tooltip options of the status bar items, which open above the bar. */
+export const TOOLTIP_OPTIONS: Partial<Tooltip.Options> = {
+    placement: "top",
+    fallbackPlacements: [ "top" ],
+    popperConfig: { strategy: "fixed" },
+    animation: false
+};
+
+function StatusBarButton({ className, icon, text, title, active, preload, ...restProps }: StatusBarButtonWithCommand | StatusBarButtonWithClick) {
     const parentComponent = useContext(ParentComponent);
     const buttonRef = useRef<HTMLButtonElement>(null);
-    useStaticTooltip(buttonRef, {
-        placement: "top",
-        fallbackPlacements: [ "top" ],
-        popperConfig: { strategy: "fixed" },
-        animation: false,
-        title
-    });
+    useStaticTooltip(buttonRef, { ...TOOLTIP_OPTIONS, title });
 
     return (
         <button
             ref={buttonRef}
             className={clsx("btn select-button focus-outline", className, active && "active")}
             type="button"
+            onPointerEnter={preload}
+            onFocus={preload}
             onClick={() => {
                 if ("triggerCommand" in restProps) {
                     parentComponent?.triggerCommand(restProps.triggerCommand);
@@ -162,34 +202,11 @@ function StatusBarButton({ className, icon, text, title, active, ...restProps }:
     );
 }
 
-/**
- * The way from a panel of the status bar to the sidebar tab holding the fuller version of the same
- * thing: the attributes panel edits a note's attributes as a line of text, the sidebar's card as a
- * list with a control apiece. Worded as what is found there rather than as the pane it opens, and
- * shown in the panel's title bar beside its `?`.
- *
- * A pane the user keeps closed is peeked rather than docked — a glance asked for from the status bar
- * is no reason to reflow the content the note is read in.
- */
-function SidebarLink({ text, tabId, onOpened }: { text: string; tabId: RightPaneTabId; onOpened?: () => void }) {
-    return (
-        <LinkButton
-            className="status-bar-sidebar-link"
-            text={<>
-                <Icon icon="bx bx-sidebar" className="bx-flip-horizontal" />
-                <span class="status-bar-sidebar-link-text">{text}</span>
-            </>}
-            onClick={() => {
-                void appContext.triggerEvent("selectRightPaneTab", { tabId, peek: true });
-                onOpened?.();
-            }}
-        />
-    );
-}
-
 //#region Language Switcher
 function LanguageSwitcher({ note }: StatusBarContext) {
     const [ modalShown, setModalShown ] = useState(false);
+    // The modal stays mounted once opened, so that it can animate its closing.
+    const [ isModalMounted, setModalMounted ] = useState(false);
     const noteType = useNoteProperty(note, "type");
     const { locales, DEFAULT_LOCALE, effectiveLocale, currentNoteLanguage, setCurrentNoteLanguage } = useLanguageSwitcher(note);
     const { processedLocales } = useProcessedLocales(locales, DEFAULT_LOCALE, currentNoteLanguage ?? DEFAULT_LOCALE.id);
@@ -219,25 +236,23 @@ function LanguageSwitcher({ note }: StatusBarContext) {
                     icon="bx bx-help-circle"
                 >{t("note_language.help-on-languages")}</FormListItem>
                 <FormListItem
-                    onClick={() => setModalShown(true)}
+                    onClick={() => {
+                        setModalMounted(true);
+                        setModalShown(true);
+                    }}
                     icon="bx bx-cog"
                 >{t("note_language.configure-languages")}</FormListItem>
             </StatusBarDropdown>}
-            {createPortal(
-                <ContentLanguagesModal modalShown={modalShown} setModalShown={setModalShown} />,
+            {isModalMounted && createPortal(
+                <WithLazyModule load={loadContentLanguages}>
+                    {({ ContentLanguagesModal }) => (
+                        <ContentLanguagesModal modalShown={modalShown} setModalShown={setModalShown} />
+                    )}
+                </WithLazyModule>,
                 document.body
             )}
         </>
     );
-}
-
-export function getLocaleName(locale: Locale | null | undefined) {
-    if (!locale) return "";
-    if (!locale.id) return "-";
-    if (locale.name.length <= 4 || locale.rtl) return locale.name;    // Some locales like Japanese and Chinese look better than their ID.
-    return locale.id
-        .replace("_", "-")
-        .toLocaleUpperCase();
 }
 //#endregion
 
@@ -246,6 +261,8 @@ interface NoteInfoContext extends StatusBarContext {
     similarNotesShown?: boolean;
     setSimilarNotesShown?: (value: boolean) => void;
 }
+
+const preloadPanels = () => preloadLazyModule(loadPanels);
 
 export function NoteInfoBadge(context: NoteInfoContext) {
     const dropdownRef = useRef<DropdownHandle>(null);
@@ -266,68 +283,25 @@ export function NoteInfoBadge(context: NoteInfoContext) {
             dropdownRef={dropdownRef}
             dropdownContainerClassName="dropdown-note-info"
             autoClose="outside"
+            preload={preloadPanels}
             onShown={() => setDropdownShown(true)}
             onHidden={() => setDropdownShown(false)}
         >
-            {dropdownShown && <NoteInfoContent {...context} dropdownRef={dropdownRef} noteType={noteType} />}
+            {dropdownShown && (
+                <WithLazyModule load={loadPanels}>
+                    {({ NoteInfoContent }) => (
+                        <NoteInfoContent {...context} dropdownRef={dropdownRef} noteType={noteType} />
+                    )}
+                </WithLazyModule>
+            )}
         </StatusBarDropdown>
-    );
-}
-
-export function NoteInfoContent({ note, noteType, dropdownRef, setSimilarNotesShown }: Pick<NoteInfoContext, "note" | "setSimilarNotesShown"> & {
-    dropdownRef?: RefObject<DropdownHandle | null>;
-    noteType: NoteType;
-}) {
-    const { metadata, ...sizeProps } = useNoteMetadata(note);
-    const [ originalFileName ] = useNoteLabel(note, "originalFileName");
-    const noteTypeMapping = useMemo(() => NOTE_TYPES.find(t => t.type === noteType), [ noteType ]);
-
-    return (
-        <div className="note-info-content">
-            <ul>
-                {originalFileName && <NoteInfoValue text={t("file_properties.original_file_name")} value={originalFileName} />}
-                <NoteInfoValue text={t("note_info_widget.created")} value={formatDateTime(metadata?.dateCreated)} />
-                <NoteInfoValue text={t("note_info_widget.modified")} value={formatDateTime(metadata?.dateModified)} />
-                {noteTypeMapping && <NoteInfoValue text={t("note_info_widget.type")} value={<><Icon icon={`bx ${noteTypeMapping.icon ?? NOTE_TYPE_ICONS[noteType]}`}/>{" "}{noteTypeMapping?.title}</>} />}
-                {note.mime && <NoteInfoValue text={t("note_info_widget.mime")} value={note.mime} />}
-                <NoteInfoValue text={t("note_info_widget.note_id")} value={<code>{note.noteId}</code>} />
-                <NoteInfoValue text={t("note_info_widget.note_size")} title={t("note_info_widget.note_size_info")} value={<NoteSizeWidget {...sizeProps} />} />
-            </ul>
-
-            {setSimilarNotesShown && <LinkButton
-                text={t("note_info_widget.show_similar_notes")}
-                onClick={() => {
-                    dropdownRef?.current?.hide();
-                    setSimilarNotesShown(true);
-                }}
-            />}
-        </div>
-    );
-}
-
-function NoteInfoValue({ text, title, value }: { text: string; title?: string, value: ComponentChildren }) {
-    return (
-        <li>
-            <strong title={title}>{text}{": "}</strong>
-            <span>{value}</span>
-        </li>
-    );
-}
-
-function SimilarNotesPane({ note, similarNotesShown, setSimilarNotesShown }: NoteInfoContext) {
-    return (similarNotesShown &&
-        <BottomPanel title={t("similar_notes.title")}
-            className="similar-notes-pane"
-            visible={similarNotesShown}
-            setVisible={setSimilarNotesShown}
-        >
-            <SimilarNotesTab note={note} />
-        </BottomPanel>
     );
 }
 //#endregion
 
 //#region Backlinks
+const preloadBacklinks = () => preloadLazyModule(loadBacklinks);
+
 /**
  * What points at the note, in a dropdown of the badge naming them — the same list the sidebar's
  * connections tab holds, which stays the place to keep it open beside the note.
@@ -344,8 +318,11 @@ function BacklinksBadge({ note, viewScope }: StatusBarContext) {
             title={t("status_bar.backlinks_title", { count })}
             dropdownContainerClassName="dropdown-backlinks"
             scrollable
+            preload={preloadBacklinks}
         >
-            <BacklinksWidget note={note} />
+            <WithLazyModule load={loadBacklinks}>
+                {({ BacklinksWidget }) => <BacklinksWidget note={note} />}
+            </WithLazyModule>
         </StatusBarDropdown>
     );
 }
@@ -353,8 +330,7 @@ function BacklinksBadge({ note, viewScope }: StatusBarContext) {
 
 //#region Attachment count
 function AttachmentCount({ note }: StatusBarContext) {
-    const attachments = useAttachments(note);
-    const count = attachments.length;
+    const count = useUserAttachmentCount(note);
 
     return (note && count > 0 &&
         <StatusBarButton
@@ -366,6 +342,14 @@ function AttachmentCount({ note }: StatusBarContext) {
         />
     );
 }
+
+/** The number of attachments placed on the note, leaving out the ones Trilium generates. */
+export function useUserAttachmentCount(note: FNote) {
+    const attachments = useAttachments(note);
+    return useMemo(
+        () => partitionAttachmentsByGroup(attachments, note.type).user.length,
+        [ attachments, note.type ]);
+}
 //#endregion
 
 //#region Attributes
@@ -374,24 +358,10 @@ interface AttributesProps extends StatusBarContext {
     setAttributesShown: (shown: boolean) => void;
 }
 
+const preloadAttributesPane = () => preloadLazyModule(loadAttributesPane);
+
 function AttributesButton({ note, attributesShown, setAttributesShown }: AttributesProps) {
-    const [ count, setCount ] = useState(note.attributes.length);
-
-    const getAttributeCount = useCallback((note: FNote) => {
-        return note.getAttributes().filter(a => !a.isAutoLink).length;
-    }, []);
-
-    // React to note changes.
-    useEffect(() => {
-        setCount(getAttributeCount(note));
-    }, [ note, getAttributeCount ]);
-
-    // React to changes in count.
-    useTriliumEvent("entitiesReloaded", (({loadResults}) => {
-        if (loadResults.getAttributeRows().some(attr => attributes.isAffecting(attr, note))) {
-            setCount(getAttributeCount(note));
-        }
-    }));
+    const count = useAttributeCount(note);
 
     return (
         <StatusBarButton
@@ -400,74 +370,71 @@ function AttributesButton({ note, attributesShown, setAttributesShown }: Attribu
             title={t("status_bar.attributes_title")}
             text={t("status_bar.attributes", { count })}
             active={attributesShown}
+            preload={preloadAttributesPane}
             onClick={() => setAttributesShown(!attributesShown)}
         />
     );
 }
 
-function AttributesPane({ note, noteContext, attributesShown, setAttributesShown }: AttributesProps) {
-    const parentComponent = useContext(ParentComponent);
-    const api = useRef<AttributeEditorImperativeHandlers>(null);
+/** The number of attributes of the note, owned and inherited, leaving out the links its content makes. */
+export function useAttributeCount(note: FNote) {
+    const [ count, setCount ] = useState(() => getAttributeCount(note));
 
-    // The attribute editor pulls in CKEditor, so it is only mounted once the panel has been
-    // opened (and stays mounted afterwards so the imperative handlers keep working).
-    const [ editorMounted, setEditorMounted ] = useState(false);
+    useEffect(() => setCount(getAttributeCount(note)), [ note ]);
+    useTriliumEvent("entitiesReloaded", ({ loadResults }) => {
+        if (loadResults.getAttributeRows().some(attr => attributes.isAffecting(attr, note))) {
+            setCount(getAttributeCount(note));
+        }
+    });
+
+    return count;
+}
+
+function getAttributeCount(note: FNote) {
+    return note.getAttributes().filter(a => !a.isAutoLink).length;
+}
+
+/**
+ * Loads the attributes panel the first time it opens, and keeps it mounted afterwards so that the
+ * imperative handlers of its editor keep working.
+ */
+function AttributesPane({ note, noteContext, attributesShown, setAttributesShown }: AttributesProps) {
+    const [ isMounted, setMounted ] = useState(false);
     useEffect(() => {
         if (attributesShown) {
-            setEditorMounted(true);
+            setMounted(true);
         }
     }, [ attributesShown ]);
 
-    const context = parentComponent && {
-        componentId: parentComponent.componentId,
-        note,
-        hidden: !note
-    };
-
-    // Show on keyboard shortcuts.
-    useTriliumEvents([ "addNewLabel", "addNewRelation" ], () => setAttributesShown(true));
+    // Show on keyboard shortcuts. The editor is not listening until it mounts, so it is handed the first one.
+    const [ initialCommand, setInitialCommand ] = useState<"addNewLabel" | "addNewRelation">();
+    useTriliumEvents([ "addNewLabel", "addNewRelation" ], (_, eventName) => {
+        if (!isMounted) {
+            setInitialCommand(eventName);
+        }
+        setAttributesShown(true);
+    });
     useTriliumEvents([ "toggleRibbonTabOwnedAttributes", "toggleRibbonTabInheritedAttributes" ], () => setAttributesShown(!attributesShown));
 
-    // Auto-focus the owned attributes.
-    useEffect(() => api.current?.focus(), [ attributesShown ]);
-
-    // Interaction with the attribute editor.
-    useLegacyImperativeHandlers(useMemo(() => ({
-        saveAttributesCommand: () => api.current?.save(),
-        reloadAttributesCommand: () => api.current?.refresh(),
-        updateAttributeListCommand: ({ attributes }) => api.current?.renderOwnedAttributes(attributes)
-    }), [ api ]));
-
-    return (context &&
-        <BottomPanel title={t("attributes_panel.title")}
-            className="attribute-list"
-            visible={attributesShown}
-            setVisible={setAttributesShown}
-            buttons={<SidebarLink
-                text={t("attributes_panel.edit_in_sidebar")}
-                tabId="attributes"
-                onOpened={() => setAttributesShown(false)}
-            />}
-            helpPage={ATTRIBUTE_HELP_PAGE}
-            helpContent={<AttributeHelp />}>
-
-            <span class="attributes-panel-label">{t("inherited_attribute_list.title")}</span>
-            <InheritedAttributesTab {...context} emptyListString="inherited_attribute_list.none" />
-
-            {editorMounted && <AttributeEditor
-                {...context}
-                api={api}
-                notePath={noteContext.notePath}
-                ntxId={noteContext.ntxId}
-                // The panel's title bar already carries the same help.
-                hideHelpButton
-            />}
-        </BottomPanel>
+    return (isMounted &&
+        <WithLazyModule load={loadAttributesPane}>
+            {({ default: Pane }) => (
+                <Pane
+                    note={note}
+                    noteContext={noteContext}
+                    attributesShown={attributesShown}
+                    setAttributesShown={setAttributesShown}
+                    initialCommand={initialCommand}
+                />
+            )}
+        </WithLazyModule>
     );
 }
 //#endregion
 
 //#region Note paths
+const preloadNotePaths = () => preloadLazyModule(loadNotePaths);
+
 /**
  * Where the note sits in the tree, in a dropdown of the badge counting the places — the same list the
  * sidebar's connections tab holds, which stays the place to keep it open beside the note.
@@ -489,175 +456,14 @@ function NotePaths({ note, hoistedNoteId, notePath }: StatusBarContext) {
             text={t("status_bar.note_paths", { count })}
             dropdownRef={dropdownRef}
             dropdownContainerClassName="dropdown-note-paths"
+            preload={preloadNotePaths}
         >
-            <NotePathsWidget sortedNotePaths={sortedNotePaths} currentNotePath={notePath} />
+            <WithLazyModule load={loadNotePaths}>
+                {({ NotePathsWidget }) => (
+                    <NotePathsWidget sortedNotePaths={sortedNotePaths} currentNotePath={notePath} />
+                )}
+            </WithLazyModule>
         </StatusBarDropdown>
     );
-}
-//#endregion
-
-//#region Tab width switcher
-const TAB_WIDTH_OPTIONS = [1, 2, 3, 4, 6, 8] as const;
-
-function TabWidthSwitcher({ note, noteContext }: StatusBarContext) {
-    const noteType = useNoteProperty(note, "type");
-    const [ globalTabWidth ] = useTriliumOptionInt("codeNoteTabWidth");
-    const [ globalUseTabs ] = useTriliumOptionBool("codeNoteIndentWithTabs");
-    const [ noteTabWidth, setNoteTabWidth ] = useNoteLabelInt(note, "tabWidth");
-    const [ noteUseTabs, setNoteUseTabs ] = useNoteLabelOptionalBool(note, "indentWithTabs");
-    const effectiveTabWidth = noteTabWidth ?? globalTabWidth ?? 4;
-    const effectiveUseTabs = noteUseTabs ?? globalUseTabs;
-    const hasWidthOverride = noteTabWidth != null;
-    const hasStyleOverride = noteUseTabs != null;
-
-    const reindentTo = async (targetUseTabs: boolean, targetWidth: number) => {
-        const editor = await noteContext.getCodeEditor();
-        if (!editor) return;
-        const converted = convertIndentation(
-            editor.getText(),
-            { useTabs: effectiveUseTabs, width: effectiveTabWidth },
-            { useTabs: targetUseTabs, width: targetWidth }
-        );
-        if (converted !== editor.getText()) {
-            editor.setText(converted);
-        }
-        setNoteTabWidth(targetWidth);
-        setNoteUseTabs(targetUseTabs);
-    };
-
-    const statusText = effectiveUseTabs
-        ? t("status_bar.tab_width_tabs", { width: effectiveTabWidth })
-        : t("status_bar.tab_width_spaces_short", { width: effectiveTabWidth });
-
-    return (noteType === "code" &&
-        <StatusBarDropdown
-            icon="bx bx-right-indent"
-            text={statusText}
-            title={t("status_bar.tab_width_title")}
-        >
-            <FormListHeader text={t("status_bar.tab_width_style_header")} />
-            <FormListItem
-                checked={!effectiveUseTabs}
-                onClick={() => setNoteUseTabs(false)}
-            >
-                {t("status_bar.tab_width_style_spaces")}
-            </FormListItem>
-            <FormListItem
-                checked={effectiveUseTabs}
-                onClick={() => setNoteUseTabs(true)}
-            >
-                {t("status_bar.tab_width_style_tabs")}
-            </FormListItem>
-            {hasStyleOverride &&
-                <FormListItem icon="bx bx-x" onClick={() => setNoteUseTabs(null)}>
-                    {t("status_bar.tab_width_use_default_style", {
-                        style: globalUseTabs ? t("status_bar.tab_width_style_tabs") : t("status_bar.tab_width_style_spaces")
-                    })}
-                </FormListItem>
-            }
-
-            <FormListHeader text={t("status_bar.tab_width_display_header")} />
-            {TAB_WIDTH_OPTIONS.map(size => (
-                <FormListItem
-                    key={`display-${size}`}
-                    checked={effectiveTabWidth === size}
-                    onClick={() => setNoteTabWidth(size)}
-                >
-                    {t("status_bar.tab_width_spaces", { count: size })}
-                </FormListItem>
-            ))}
-            {hasWidthOverride &&
-                <FormListItem icon="bx bx-x" onClick={() => setNoteTabWidth(null)}>
-                    {t("status_bar.tab_width_use_default", { width: globalTabWidth })}
-                </FormListItem>
-            }
-
-            <FormListHeader text={t("status_bar.tab_width_reindent_header")} />
-            {TAB_WIDTH_OPTIONS.map(size => (
-                <FormListItem
-                    key={`reindent-spaces-${size}`}
-                    disabled={!effectiveUseTabs && effectiveTabWidth === size}
-                    onClick={() => reindentTo(false, size)}
-                >
-                    {t("status_bar.tab_width_spaces", { count: size })}
-                </FormListItem>
-            ))}
-            <FormListItem
-                disabled={effectiveUseTabs}
-                onClick={() => reindentTo(true, effectiveTabWidth)}
-            >
-                {t("status_bar.tab_width_style_tabs")}
-            </FormListItem>
-        </StatusBarDropdown>
-    );
-}
-//#endregion
-
-//#region Code note switcher
-function CodeNoteSwitcher({ note }: StatusBarContext) {
-    const [ modalShown, setModalShown ] = useState(false);
-    const noteType = useNoteProperty(note, "type");
-    const currentNoteMime = useNoteProperty(note, "mime");
-    const { enabledMimeTypes, allMimeTypes } = useMimeTypes();
-    const correspondingMimeType = useMemo(() => (
-        allMimeTypes.find(m => m.mime === currentNoteMime)
-    ), [ allMimeTypes, currentNoteMime ]);
-
-    return (noteType === "code" &&
-        <>
-            <StatusBarDropdown
-                icon={getCodeLanguageIcon(correspondingMimeType)}
-                text={correspondingMimeType?.title}
-                title={t("status_bar.code_note_switcher")}
-                dropdownContainerClassName="dropdown-code-note-switcher"
-                filterable
-                items={codeLanguageItems({
-                    currentMimeType: currentNoteMime,
-                    mimeTypes: enabledMimeTypes,
-                    changeNoteType: (type, mime) => void server.put(`notes/${note.noteId}/type`, { type, mime }),
-                    onConfigure: () => setModalShown(true)
-                })}
-            />
-            {createPortal(
-                <NoteTypeOptionsModal modalShown={modalShown} setModalShown={setModalShown} />,
-                document.body
-            )}
-        </>
-    );
-}
-//#endregion
-
-//#region Bottom panel
-
-interface BottomPanelParams {
-    children: ComponentChildren;
-    title: string;
-    visible: boolean;
-    setVisible?: (visible: boolean) => void;
-    className?: string;
-    /**
-     * What the panel offers besides being read and closed, shown in its title bar ahead of the `?`
-     * and the `×` — the same place, and the same name, as a sidebar card's own (see RightPanelWidget).
-     */
-    buttons?: ComponentChildren;
-    helpPage?: string;
-    /** Inline help shown by the title bar's `?`; without it the `?` opens {@link helpPage} directly. */
-    helpContent?: ComponentChildren;
-}
-
-function BottomPanel({ children, title, visible, setVisible, className, buttons, helpPage, helpContent }: BottomPanelParams) {
-    return <div className={clsx("bottom-panel", className, {"hidden-ext": !visible})}>
-        <div className="bottom-panel-title-bar">
-            <span className="bottom-panel-title-bar-caption">{title}</span>
-            {buttons}
-            {helpContent
-                ? <HelpDropdown helpPage={helpPage}>{helpContent}</HelpDropdown>
-                : helpPage && <button class="icon-action bx bx-help-circle" onClick={() => openInAppHelpFromUrl(helpPage)} title={t("open-help-page")} />}
-            <button class="icon-action bx bx-x" onClick={() => setVisible?.(false)} />
-        </div>
-        <div class={clsx("bottom-panel-content")}>
-            {children}
-        </div>
-    </div>;
 }
 //#endregion

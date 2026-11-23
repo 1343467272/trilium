@@ -1,7 +1,6 @@
 import { h } from "preact";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("../services/note_tooltip", () => ({ default: { dismissAllTooltips: vi.fn() } }));
 vi.mock("../services/keyboard_actions", () => ({
     getActionSync: (name: string) => ({
         effectiveShortcuts: name === "copyNotesToClipboard" ? [ "Ctrl+C", "Ctrl+Insert" ] : []
@@ -50,7 +49,9 @@ function menuElement() {
 
 /** The top level's rows, which scroll inside the menu. */
 function menuRows() {
-    return [ ...menuElement()?.querySelector(":scope > .tn-menu-scroll")?.children ?? [] ];
+    const list = menuElement()
+        ?.querySelector(":scope > .tn-menu-scroll, :scope > .tn-menu-filterable > .tn-menu-scroll");
+    return [ ...list?.children ?? [] ];
 }
 
 /** Puts an element on a screen of its own, as the browser reports one. */
@@ -113,6 +114,37 @@ describe("contextMenu", () => {
         // A later click on the page hides nothing, so `onHide` does not run again.
         await contextMenu.hide();
         expect(onHide).toHaveBeenCalledTimes(1);
+    });
+
+    it("hides for `closeOpenPopups()`, as a keyboard shortcut opening a dialog calls it", async () => {
+        buildPage();
+        const contextMenu = await buildContextMenu();
+        const { closeOpenPopups } = await import("../widgets/react/open_popups");
+        const onHide = vi.fn();
+
+        await contextMenu.show({ x: 10, y: 20, items, selectMenuItemHandler: () => {}, onHide });
+        closeOpenPopups();
+        await vi.waitFor(() => expect(menuElement()).toBeNull());
+        expect(contextMenu.isShown).toBe(false);
+
+        closeOpenPopups();
+        expect(onHide).toHaveBeenCalledTimes(1);
+    });
+
+    it("cancels a menu still loading `Menu` for `closeOpenPopups()`", async () => {
+        buildPage();
+        const contextMenu = await buildContextMenu();
+        const { closeOpenPopups } = await import("../widgets/react/open_popups");
+        const onShow = vi.fn();
+
+        const shown = contextMenu.show({ x: 10, y: 20, items, selectMenuItemHandler: () => {}, onShow });
+        closeOpenPopups();
+        await shown;
+
+        expect(onShow).not.toHaveBeenCalled();
+        expect(menuElement()).toBeNull();
+        expect(contextMenu.isShown).toBe(false);
+        expect(document.body.innerHTML).toBe(`<div id="app"></div>`);
     });
 
     it("shows only the last of two menus asked for while `Menu` still loads, and hides it", async () => {
@@ -334,6 +366,78 @@ describe("contextMenu", () => {
                 "h6.dropdown-header Colour",
                 "li.dropdown-item Red"
             ]);
+        });
+
+        it("filters a filterable menu from an input above its scrolling list", async () => {
+            buildPage();
+            const contextMenu = await buildContextMenu();
+
+            await contextMenu.show({
+                x: 10, y: 10, filterable: true, selectMenuItemHandler: () => {},
+                items: [ { title: "Plain text" }, { title: "Python" } ]
+            });
+
+            // The input stays in place above the list its rows scroll in.
+            const box = menuElement()?.querySelector(":scope > .tn-menu-filterable");
+            expect([ ...box?.children ?? [] ].map((child) => child.className))
+                .toEqual([ "tn-menu-filter", "tn-menu-scroll" ]);
+            const input = box?.querySelector<HTMLInputElement>("input.tn-menu-filter-input");
+            if (!input) throw new Error("no filter input");
+            expect(menuRows().map((row) => row.textContent)).toEqual([ "Plain text", "Python" ]);
+            input.value = "pyt";
+            input.dispatchEvent(new Event("input", { bubbles: true }));
+            await vi.waitFor(() => {
+                expect(menuRows().map((row) => row.textContent)).toEqual([ "Python" ]);
+            });
+        });
+
+        it("puts the focus in the filter input of a menu that asks for it", async () => {
+            buildPage();
+            const contextMenu = await buildContextMenu();
+
+            await contextMenu.show({
+                x: 10, y: 10, filterable: true, focusFilter: true, className: "slash-command-menu",
+                selectMenuItemHandler: () => {}, items: [ { title: "Plain text" } ]
+            });
+
+            expect(menuElement()?.className)
+                .toContain("dropdown-menu-sm dropend slash-command-menu");
+            const input = menuElement()?.querySelector("input.tn-menu-filter-input");
+            expect(input).not.toBeNull();
+            await vi.waitFor(() => expect(document.activeElement).toBe(input));
+        });
+
+        it("finds items by description and keywords, drawing their SVG icons", async () => {
+            buildPage();
+            const contextMenu = await buildContextMenu();
+            const svg = `<svg xmlns="http://www.w3.org/2000/svg" class="table-icon"></svg>`;
+
+            await contextMenu.show({
+                x: 10, y: 10, filterable: true, selectMenuItemHandler: () => {},
+                items: [
+                    { title: "Table", description: "Insert a grid of cells", uiIconSvg: svg },
+                    { title: "Numbered list", keywords: [ "ol" ] },
+                    { title: "Quote" }
+                ]
+            });
+
+            expect(menuRows()[0]?.querySelector(".tn-svg-icon svg.table-icon")).not.toBeNull();
+            const input = menuElement()
+                ?.querySelector<HTMLInputElement>("input.tn-menu-filter-input");
+            if (!input) throw new Error("no filter input");
+            const shownRows = () => menuRows().map((row) => [
+                row.querySelector(".tn-menu-filter-title")?.textContent,
+                row.querySelector(".description")?.textContent,
+                !!row.querySelector(".tn-svg-icon svg.table-icon")
+            ]);
+            for (const [ text, rows ] of [
+                [ "grid", [ [ "Table", "Insert a grid of cells", true ] ] ],
+                [ "ol", [ [ "Numbered list", undefined, false ] ] ]
+            ] as const) {
+                input.value = text;
+                input.dispatchEvent(new Event("input", { bubbles: true }));
+                await vi.waitFor(() => expect(shownRows()).toEqual(rows));
+            }
         });
 
         it("shows badges after the title, and a trailing icon at the end of the row", async () => {
@@ -615,17 +719,28 @@ describe("contextMenu", () => {
             });
         });
 
-        it("waits before the first submenu it opens under the pointer, and not before one that replaces it", async () => {
+        it("waits before a submenu it opens under the pointer, unless it replaces one in view", async () => {
+            const layer = () => menuElement()?.querySelector("div.dropdown-submenu > .dropdown-menu");
             /** Whether the open layer skips the stylesheet's opening delay and fade. */
-            const immediate = () => menuElement()?.querySelector("div.dropdown-submenu > .dropdown-menu")?.classList.contains("tn-menu-immediate");
+            const immediate = () => layer()?.classList.contains("tn-menu-immediate");
             await openMenu();
 
             // The pointer might only be passing over the row.
             hover(row("Insert child note"));
-            await vi.waitFor(() => expect(layers()).toHaveLength(1));
+            await vi.waitFor(() => expect(layers()).toEqual([ [ "Text", "Code" ] ]));
             expect(immediate()).toBe(false);
 
-            // One submenu is open, so the user is going through them: its sibling shows at once.
+            // It passed on before that submenu showed, so the next one waits as well.
+            hover(row("Templates"));
+            await vi.waitFor(() => expect(layers()).toEqual([ [ "Meeting" ] ]));
+            expect(immediate()).toBe(false);
+
+            // The browser starts the fade once the delay is over. With a submenu in view, the user
+            // is going through them, so its sibling shows at once, and so does the one after.
+            layer()?.dispatchEvent(new Event("animationstart", { bubbles: true }));
+            hover(row("Insert child note"));
+            await vi.waitFor(() => expect(layers()).toEqual([ [ "Text", "Code" ] ]));
+            expect(immediate()).toBe(true);
             hover(row("Templates"));
             await vi.waitFor(() => expect(layers()).toEqual([ [ "Meeting" ] ]));
             expect(immediate()).toBe(true);
@@ -890,11 +1005,15 @@ describe("contextMenu", () => {
                         { kind: "separator" as const },
                         { title: "Collection", items: [ { title: "Table" }, { title: "Board", badges: [ { title: "New" } ] } ] },
                         { kind: "header" as const, title: "Templates" },
+                        // As `menuName()` boxes a name.
+                        { title: "<span class=\"tn-menu-name\">Weekly review</span>" },
                         { title: "Meeting &amp; <b>notes</b>" }
                     ]
                 }
             ];
-            const unfiltered = [ "Text|", "Code|", "Collection|", "Meeting & notes|" ];
+            const unfiltered = [
+                "Text|", "Code|", "Collection|", "Weekly review|", "Meeting & notes|"
+            ];
 
             async function openFilterable(picked: string[] = []) {
                 buildPage();
@@ -961,6 +1080,10 @@ describe("contextMenu", () => {
                 // There before anything is typed, empty, and with the keys still on the rows.
                 expect(layer()).toEqual({ filter: "", rows: unfiltered, empty: false });
                 expect(document.activeElement).toBe(menuElement());
+                // Above the list the rows scroll in, so it stays in place as they scroll.
+                const box = menuElement()?.querySelector(".dropdown-submenu .tn-menu-filterable");
+                expect([ ...box?.children ?? [] ].map((child) => child.className))
+                    .toEqual([ "tn-menu-filter", "tn-menu-scroll" ]);
 
                 type("p");
                 await vi.waitFor(() => expect(document.activeElement).toBe(filterInput()));
@@ -1029,6 +1152,13 @@ describe("contextMenu", () => {
                 // The title is HTML; what is matched and shown is its text, and none of its markup.
                 await vi.waitFor(() => expect(layer().rows).toEqual([ "Meeting & notes|" ]));
                 expect(menuElement()?.querySelector(".tn-menu-filter-title b")).toBeNull();
+                expect(menuElement()?.querySelector(".tn-menu-filter-title.tn-menu-name")).toBeNull();
+
+                // A name keeps the box that caps its width.
+                edit("week");
+                await vi.waitFor(() => expect(layer().rows).toEqual([ "Weekly review|" ]));
+                expect(menuElement()?.querySelector(".tn-menu-filter-title")?.classList)
+                    .toContain("tn-menu-name");
 
                 edit("& nzz");
                 await vi.waitFor(() => expect(layer().empty).toBe(true));
@@ -1049,6 +1179,24 @@ describe("contextMenu", () => {
                 key("Enter");
                 expect(picked).toEqual([ "Board" ]);
                 expect(contextMenu.isShown).toBe(false);
+            });
+
+            it("keeps the match typed into the input as the pointer leaves the menu", async () => {
+                const picked: string[] = [];
+                await openFilterable(picked);
+                const parent = [ ...menuElement()?.querySelectorAll<HTMLElement>("li.dropdown-submenu") ?? [] ]
+                    .find((row) => row.textContent?.includes("Insert child note"));
+                parent?.dispatchEvent(new PointerEvent("pointerenter"));
+                await vi.waitFor(() => expect(filterInput()).not.toBeNull());
+
+                filterInput()?.focus();
+                edit("boa");
+                await vi.waitFor(() => expect(activeRow()).toMatch(/^Board/));
+                menuElement()?.dispatchEvent(new PointerEvent("pointerleave"));
+                await new Promise((resolve) => setTimeout(resolve));
+                expect(activeRow()).toMatch(/^Board/);
+                key("Enter");
+                expect(picked).toEqual([ "Board" ]);
             });
 
             it("gives Right and Left to the menu where the caret has nowhere to go", async () => {
@@ -1131,7 +1279,41 @@ describe("contextMenu", () => {
                 }
             });
 
-            it("scrolls back to the input when the keys come round to the first row", async () => {
+            it("holds its width while filtered, widening only for a wider match", async () => {
+                // As wide as its longest row, and no narrower than its `min-width`.
+                const width = function (this: HTMLElement) {
+                    if (!this.matches(".dropdown-menu")) return 0;
+                    const rows = [ ...this.querySelectorAll("li.dropdown-item") ].map((row) => row.textContent?.length ?? 0);
+                    return Math.max(parseFloat(this.style.minWidth) || 0, 10 * Math.max(0, ...rows));
+                };
+                vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockImplementation(width);
+                const submenuLayer = () => menuElement()?.querySelector<HTMLElement>("div.dropdown-submenu > .dropdown-menu");
+                try {
+                    await openFilterable();
+                    await openSubmenuByKeys();
+                    // "Meeting & notes".
+                    expect(submenuLayer()?.offsetWidth).toBe(150);
+                    expect(submenuLayer()?.style.minWidth).toBe("");
+
+                    type("py");
+                    await vi.waitFor(() => expect(layer().rows).toEqual([ "Python|Code" ]));
+                    expect(submenuLayer()?.style.minWidth).toBe("150px");
+                    // "Board" with its badge and path, wider than the submenu was.
+                    edit("collection");
+                    await vi.waitFor(() => expect(layer().rows).toHaveLength(2));
+                    edit("tab");
+                    await vi.waitFor(() => expect(layer().rows).toEqual([ "Table|Collection" ]));
+                    expect(submenuLayer()?.style.minWidth).toBe("180px");
+
+                    edit("");
+                    await vi.waitFor(() => expect(layer().rows).toEqual(unfiltered));
+                    expect(submenuLayer()?.style.minWidth).toBe("");
+                } finally {
+                    vi.restoreAllMocks();
+                }
+            });
+
+            it("scrolls the list to the top when the keys wrap to the first row", async () => {
                 await openFilterable();
                 await openSubmenuByKeys();
                 const list = menuElement()?.querySelector<HTMLElement>("div.dropdown-submenu .tn-menu-scroll");
@@ -1145,7 +1327,7 @@ describe("contextMenu", () => {
                 await vi.waitFor(() => expect(activeRow()).toBe("Meeting & notes"));
                 key("ArrowDown");
                 await vi.waitFor(() => expect(activeRow()).toBe("Text"));
-                // As far up as the list goes, so the input above the first row shows again.
+                // As far up as the list goes, so anything above the first row shows too.
                 expect(scrollTo).toHaveBeenLastCalledWith({ top: 0 });
 
                 // From the input, as Up and Down go through the rows from there too.
@@ -1512,6 +1694,39 @@ describe("contextMenu", () => {
             expect([ menu.style.left, menu.style.top ]).toEqual([ "5px", "20px" ]);
         });
 
+        it("opens below or above the element it is anchored to, centered on request", async () => {
+            buildPage();
+            const contextMenu = await buildContextMenu();
+            vi.spyOn(document.documentElement, "clientWidth", "get").mockReturnValue(1000);
+            vi.spyOn(document.documentElement, "clientHeight", "get").mockReturnValue(800);
+            vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockReturnValue(200);
+            vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(300);
+            const button = document.createElement("button");
+            document.body.append(button);
+            let buttonRect = DOMRect.fromRect({ x: 100, y: 200, width: 400, height: 30 });
+            vi.spyOn(button, "getBoundingClientRect").mockImplementation(() => buttonRect);
+
+            /** Where the menu is placed against `button`, which it is hidden again after. */
+            async function placedAt(centered?: boolean) {
+                await contextMenu.show({
+                    anchor: button, centered, items, selectMenuItemHandler: () => {}
+                });
+                const menu = menuElement();
+                if (!menu) throw new Error("expected the menu to render");
+                await vi.waitFor(() => expect(menu.style.visibility).toBe("visible"));
+                const position = [ menu.style.left, menu.style.top ];
+                await contextMenu.hide();
+                return position;
+            }
+
+            expect(await placedAt()).toEqual([ "100px", "230px" ]);
+            expect(await placedAt(true)).toEqual([ "200px", "230px" ]);
+
+            buttonRect = DOMRect.fromRect({ x: 100, y: 600, width: 400, height: 30 });
+            expect(await placedAt()).toEqual([ "100px", "300px" ]);
+            expect(await placedAt(true)).toEqual([ "200px", "300px" ]);
+        });
+
         it("caps its height to the viewport so that it scrolls", async () => {
             const menu = await place({ x: 10, y: 20, width: 200, height: 2000 });
             expect(menu.style.maxHeight).toBe("790px");
@@ -1667,6 +1882,20 @@ describe("contextMenu", () => {
         tooltip.dispose();
         button.remove();
         field.remove();
+    });
+
+    it("tells its listeners that it opens, before the menu is up", async () => {
+        buildPage();
+        const contextMenu = await buildContextMenu();
+        const { onContextMenuShow } = await import("./context_menu");
+        const wasShown: boolean[] = [];
+        onContextMenuShow(() => wasShown.push(contextMenu.isShown));
+
+        await contextMenu.show({ x: 10, y: 10, items, selectMenuItemHandler: () => {} });
+
+        expect(wasShown).toEqual([ false ]);
+        expect(contextMenu.isShown).toBe(true);
+        await contextMenu.hide();
     });
 
     it("says whether it is up, for a host whose own press would otherwise not know", async () => {

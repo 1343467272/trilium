@@ -1,7 +1,10 @@
-import { getContext } from "@triliumnext/core";
+import {
+    ConflictError, ContentNotAvailableError, ForbiddenError, getContext, NotFoundError,
+    ValidationError
+} from "@triliumnext/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { BrowserRouter, createRouter } from "./browser_router.js";
+import { type BrowserRequest, BrowserRouter, createRouter, type UploadedFile } from "./browser_router.js";
 import { dbLock } from "./db_lock.js";
 
 const RAW_RESPONSE = Symbol.for("RAW_RESPONSE");
@@ -154,13 +157,41 @@ describe("BrowserRouter body parsing", () => {
         const buffer = await request.arrayBuffer();
 
         const router = new BrowserRouter();
-        let req: { body?: unknown; file?: { originalname: string; mimetype: string; buffer: Uint8Array } } | undefined;
+        let req: BrowserRequest | undefined;
         router.post("/u", (r) => { req = r; return {}; });
         await router.dispatch("POST", "http://localhost/u", buffer, { "content-type": contentType });
 
         expect(req?.body).toEqual({ title: "hello" });
         expect(typeof req?.file?.originalname).toBe("string");
-        expect(req?.file && Array.from(req.file.buffer)).toEqual([1, 2, 3]);
+        expect(req?.file?.buffer && Array.from(req.file.buffer)).toEqual([1, 2, 3]);
+    });
+
+    it("takes a posted File's fields, and reads its bytes only for a route that does not read it in place", async () => {
+        const file = new File([ new Uint8Array([ 4, 5, 6 ]) ], "notes.zip", { type: "application/zip" });
+        const arrayBuffer = vi.spyOn(file, "arrayBuffer");
+        const body = { type: "upload", fields: { taskId: "t1" }, file };
+
+        const router = new BrowserRouter();
+        let buffered: { body?: unknown; file?: UploadedFile } | undefined;
+        let inPlace: { body?: unknown; file?: UploadedFile } | undefined;
+        router.post("/upload", (r) => { buffered = r; return {}; });
+        router.register("POST", "/import", (r) => { inPlace = r; return {}; }, { readsUploadsInPlace: true });
+
+        await router.dispatch("POST", "http://localhost/import", body);
+        expect(inPlace?.body).toEqual({ taskId: "t1" });
+        expect(inPlace?.file).toEqual({ originalname: "notes.zip", mimetype: "application/zip", blob: file });
+        expect(arrayBuffer).not.toHaveBeenCalled();
+
+        await router.dispatch("POST", "http://localhost/upload", body);
+        expect(buffered?.file?.buffer && Array.from(buffered.file.buffer)).toEqual([ 4, 5, 6 ]);
+
+        const untyped = new File([ new Uint8Array([ 7 ]) ], "blob");
+        await router.dispatch("POST", "http://localhost/import", { type: "upload", fields: {}, file: untyped });
+        expect(inPlace?.file?.mimetype).toBe("application/octet-stream");
+
+        await router.dispatch("POST", "http://localhost/upload", { type: "upload", fields: { taskId: "t2" } });
+        expect(buffered?.body).toEqual({ taskId: "t2" });
+        expect(buffered?.file).toBeUndefined();
     });
 
     it("warns when multipart parsing fails", async () => {
@@ -251,50 +282,39 @@ describe("BrowserRouter result formatting", () => {
 });
 
 describe("BrowserRouter error formatting", () => {
-    class NotFoundError extends Error {}
-    class ValidationError extends Error {}
-
-    it("maps NotFoundError to 404", async () => {
+    async function dispatchThrowing(error: unknown) {
         vi.spyOn(console, "error").mockImplementation(() => {});
         const router = new BrowserRouter();
-        router.get("/nf", () => { throw new NotFoundError("gone"); });
-        const res = await router.dispatch("GET", "http://localhost/nf");
-        expect(res.status).toBe(404);
-        expect(JSON.parse(decodeBody(res.body))).toEqual({ message: "gone" });
-    });
+        router.get("/throws", () => { throw error; });
+        const res = await router.dispatch("GET", "http://localhost/throws");
+        return { status: res.status, body: JSON.parse(decodeBody(res.body)) };
+    }
 
-    it("maps ValidationError to 400", async () => {
-        vi.spyOn(console, "error").mockImplementation(() => {});
-        const router = new BrowserRouter();
-        router.get("/ve", () => { throw new ValidationError("bad"); });
-        const res = await router.dispatch("GET", "http://localhost/ve");
-        expect(res.status).toBe(400);
-        expect(JSON.parse(decodeBody(res.body))).toEqual({ message: "bad" });
+    it("answers the status code of every HttpError, subclasses included", async () => {
+        expect(await dispatchThrowing(new NotFoundError("gone")))
+            .toStrictEqual({ status: 404, body: { message: "gone" } });
+        expect(await dispatchThrowing(new ValidationError("bad")))
+            .toStrictEqual({ status: 400, body: { message: "bad" } });
+        expect(await dispatchThrowing(new ContentNotAvailableError("locked")))
+            .toStrictEqual({ status: 400, body: { message: "locked" } });
+        expect(await dispatchThrowing(new ConflictError("changed")))
+            .toStrictEqual({ status: 409, body: { message: "changed" } });
+        expect(await dispatchThrowing(new ForbiddenError("denied")))
+            .toStrictEqual({ status: 403, body: { message: "denied" } });
     });
 
     it("maps an unknown error to 500", async () => {
-        vi.spyOn(console, "error").mockImplementation(() => {});
-        const router = new BrowserRouter();
-        router.get("/boom", () => { throw new Error("kaput"); });
-        const res = await router.dispatch("GET", "http://localhost/boom");
-        expect(res.status).toBe(500);
-        expect(JSON.parse(decodeBody(res.body))).toEqual({ message: "kaput" });
+        expect(await dispatchThrowing(new Error("kaput")))
+            .toStrictEqual({ status: 500, body: { message: "kaput" } });
     });
 
-    it("falls back to a default message for NotFoundError without a message", async () => {
-        vi.spyOn(console, "error").mockImplementation(() => {});
-        const router = new BrowserRouter();
-        router.get("/nf2", () => { throw new NotFoundError(); });
-        const res = await router.dispatch("GET", "http://localhost/nf2");
-        expect(JSON.parse(decodeBody(res.body))).toEqual({ message: "Not found" });
-    });
-
-    it("falls back to a default message for ValidationError without a message", async () => {
-        vi.spyOn(console, "error").mockImplementation(() => {});
-        const router = new BrowserRouter();
-        router.get("/ve2", () => { throw new ValidationError(); });
-        const res = await router.dispatch("GET", "http://localhost/ve2");
-        expect(JSON.parse(decodeBody(res.body))).toEqual({ message: "Validation error" });
+    it("falls back to a default message for an HttpError without one", async () => {
+        expect(await dispatchThrowing(new NotFoundError("")))
+            .toStrictEqual({ status: 404, body: { message: "Not found" } });
+        expect(await dispatchThrowing(new ValidationError("")))
+            .toStrictEqual({ status: 400, body: { message: "Validation error" } });
+        expect(await dispatchThrowing(new ConflictError("")))
+            .toStrictEqual({ status: 409, body: { message: "" } });
     });
 
     it("stringifies a thrown non-Error value", async () => {

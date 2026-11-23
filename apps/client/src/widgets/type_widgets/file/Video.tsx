@@ -6,12 +6,17 @@ import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import { t } from "../../../services/i18n";
 import { isMobile } from "../../../services/utils";
 import ActionButton from "../../react/ActionButton";
-import { useFullscreen } from "../../react/hooks";
-import NoItems from "../../react/NoItems";
+import { useFullscreen } from "../../react/hooks/dom";
 import ShortcutHintButton from "../../shortcut_hints/shortcut_hint_button";
 import MediaFileActions from "./MediaFileActions";
-import { playerRootClasses, preloadFor, showsFileActions, showsViewportControls, usesCompactControls } from "./media_environment";
-import { claimsKeystroke, MediaPlayerProps, MediaSiblingButton, PlaybackSpeed, PlayModeButton, PlayPauseButton, SeekBar, SkipButton, useMediaPlayerShortcutHints, useMediaPlayMode, useMediaSessionController, VolumeControl } from "./MediaPlayer";
+import {
+    playerRootClasses, preloadFor, showsFileActions, showsViewportControls, usesCompactControls
+} from "./media_environment";
+import {
+    claimsKeystroke, MediaPlayerProps, MediaSiblingButton, PlaybackError, PlaybackSpeed,
+    PlayModeButton, PlayPauseButton, SeekBar, SkipButton, useFocusOnActivation,
+    useMediaPlayerShortcutHints, useMediaPlayMode, useMediaSessionController, VolumeControl
+} from "./MediaPlayer";
 
 const AUTO_HIDE_DELAY = 3000;
 
@@ -69,10 +74,11 @@ export default function VideoPreview({ source, entity, environment, noteContext,
     const { mode: playMode, setMode: setPlayMode } = useMediaPlayMode(noteContext, videoRef, ownerNote?.noteId);
     const siblingNavigation = useMediaSessionController({ source, entity, environment, noteContext, ownerNote, viewScope, isVisible, autoPlay, mimePrefix: "video/", mediaRef: videoRef, playMode });
     useMediaPlayerShortcutHints({ fullscreen: true });
+    useFocusOnActivation(wrapperRef, autoPlay);
     const compact = usesCompactControls(environment);
 
     if (error) {
-        return <NoItems icon="bx bx-video-off" text={t("media.unsupported-format", { mime: source.mime.replace("/", "-") })} />;
+        return <PlaybackError source={source} icon="bx bx-video-off" />;
     }
 
     return (
@@ -82,6 +88,7 @@ export default function VideoPreview({ source, entity, environment, noteContext,
                 class="video-preview"
                 src={source.streamUrl}
                 preload={preloadFor(environment)}
+                poster={source.poster}
                 datatype={source.mime}
                 onPlay={syncPlaying}
                 onPause={syncPlaying}
@@ -102,7 +109,7 @@ export default function VideoPreview({ source, entity, environment, noteContext,
                                 <FullscreenButton targetRef={wrapperRef} />
                             </>
                         )}
-                        {showsFileActions(environment) && <MediaFileActions entity={entity} />}
+                        {entity && showsFileActions(environment) && <MediaFileActions entity={entity} />}
                     </div>
                 ) : (
                     <>

@@ -1,4 +1,4 @@
-import {beforeEach, describe, expect, it, vi} from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import {note, NoteBuilder} from "../test/becca_mocking.js";
 import becca from "../becca/becca.js";
 import BBranch from "../becca/entities/bbranch.js";
@@ -6,26 +6,99 @@ import BNote from "../becca/entities/bnote.js";
 import tree from "./tree.js";
 import {buildNote} from "../test/becca_easy_mocking.js";
 import { getContext } from "./context.js";
+import noteService from "./notes.js";
+import { getSql } from "./sql/index.js";
 
-vi.mock("./sql.js", () => {
-    return {
-        default: {
-            transactional: (cb: Function) => {
-                cb();
-            },
-            execute: () => {},
-            replace: () => {},
-            getMap: () => {}
+describe("Tree (real DB)", () => {
+    function createNote(parentNoteId: string, title: string, type: "text" | "launcher" = "text") {
+        return getContext().init(() => noteService.createNewNote({
+            parentNoteId, title, content: type === "text" ? "<p></p>" : "", type
+        }));
+    }
+
+    function activeBranchesOf(noteId: string) {
+        return getSql().getRows<{ parentNoteId: string; prefix: string | null }>(
+            "SELECT parentNoteId, prefix FROM branches WHERE noteId = ? AND isDeleted = 0", [ noteId ]);
+    }
+
+    it("rejects a 'none' parent, a virtual parent and a launcher parent", () => {
+        const { note: child } = createNote("root", "tree-child");
+        const { note: launcher } = createNote("root", "tree-launcher", "launcher");
+        const { note: virtualParent } = createNote("root", "tree-virtual");
+        Object.defineProperty(virtualParent, "isVirtual", { value: true });
+
+        expect(tree.validateParentChild("none", child.noteId).message).toContain("'none'");
+        expect(tree.validateParentChild(virtualParent.noteId, child.noteId).message)
+            .toContain("cannot receive children");
+        expect(tree.validateParentChild(launcher.noteId, child.noteId)).toMatchObject({
+            success: false, message: "Launcher note cannot have any children."
+        });
+        expect(tree.validateParentChild("_lbBookmarks", child.noteId).success).toBe(true);
+        // A missing child cannot close a cycle.
+        expect(tree.validateParentChild("root", "missingNote123").success).toBe(true);
+    });
+
+    it("throws when sorting a missing note and ignores it when sorting if needed", () => {
+        expect(() => getContext().init(() => tree.sortNotes("missingNote123"))).toThrow("Unable to find note");
+        expect(() => tree.sortNotesIfNeeded("missingNote123")).not.toThrow();
+    });
+
+    it("keeps the hidden subtree after every other root note, in either direction", () => {
+        createNote("root", "aaa-before-hidden");
+        createNote("root", "zzz-after-hidden");
+
+        for (const reverse of [ false, true ]) {
+            getContext().init(() => tree.sortNotes("root", "title", reverse));
+
+            const rows = getSql().getRows<{ noteId: string; notePosition: number }>(
+                "SELECT noteId, notePosition FROM branches WHERE parentNoteId = 'root' AND isDeleted = 0 ORDER BY notePosition");
+            expect(rows.length).toBeGreaterThan(2);
+            expect(rows.at(-1)).toEqual({ noteId: "_hidden", notePosition: 999_999_999 });
+            expect(rows.slice(0, -1).every((row) => row.notePosition < 999_999_999)).toBe(true);
         }
-    };
-});
+    });
 
-vi.mock("./sql_init.js", () => {
-    const mock = {
-        initializeDb: () => {},
-        dbReady: Promise.resolve()
-    };
-    return { default: mock, ...mock };
+    it("setNoteToParent moves, removes and re-prefixes branches", () => {
+        const { note: parentA } = createNote("root", "tree-parent-a");
+        const { note: parentB } = createNote("root", "tree-parent-b");
+        const { note: child } = createNote(parentA.noteId, "tree-moved");
+        getContext().init(() => {
+            const branch = becca.getBranchFromChildAndParent(child.noteId, parentA.noteId);
+            if (!branch) throw new Error("missing branch");
+            branch.prefix = "p";
+            branch.save();
+        });
+
+        // A branch with the prefix moves to the new parent.
+        getContext().init(() => tree.setNoteToParent(child.noteId, "p", parentB.noteId));
+        expect(activeBranchesOf(child.noteId)).toStrictEqual([ { parentNoteId: parentB.noteId, prefix: "p" } ]);
+
+        // An existing branch to the parent gets the new prefix.
+        getContext().init(() => tree.setNoteToParent(child.noteId, "q", parentB.noteId));
+        expect(activeBranchesOf(child.noteId)).toStrictEqual([ { parentNoteId: parentB.noteId, prefix: "q" } ]);
+
+        // Without a branch to the parent, one is created.
+        getContext().init(() => tree.setNoteToParent(child.noteId, "r", parentA.noteId));
+        expect(activeBranchesOf(child.noteId)).toHaveLength(2);
+
+        // An empty parent removes the branch with the prefix; without such a branch nothing happens.
+        getContext().init(() => tree.setNoteToParent(child.noteId, "r", ""));
+        getContext().init(() => tree.setNoteToParent(child.noteId, "none-such", ""));
+        expect(activeBranchesOf(child.noteId)).toStrictEqual([ { parentNoteId: parentB.noteId, prefix: "q" } ]);
+    });
+
+    it("setNoteToParent rejects a missing parent, a missing note and a deleted note", () => {
+        const { note } = createNote("root", "tree-deleted");
+        expect(() => tree.setNoteToParent(note.noteId, "x", "missingNote123")).toThrow("missing parent");
+        expect(() => tree.setNoteToParent("missingNote123", "x", "root")).toThrow("Cannot find note");
+        // The note is still in becca while its deletion is in progress.
+        note.isBeingDeleted = true;
+        try {
+            expect(() => tree.setNoteToParent(note.noteId, "x", "root")).toThrow("which is deleted");
+        } finally {
+            note.isBeingDeleted = false;
+        }
+    });
 });
 
 describe("Tree", () => {
@@ -186,7 +259,7 @@ describe("Tree", () => {
                 {title: "d", "#priority": "1", "#area": "work"},
                 {title: "e", "#priority": "1", "#area": "home"}
             ],
-            "#sorted": "priority desc, area, title desc"
+            "#sorted": "#priority desc, #area, title desc"
         });
         getContext().init(() => {
             tree.sortNotesIfNeeded(note.noteId);
@@ -205,7 +278,7 @@ describe("Tree", () => {
                 {title: "top", "#top": ""},
                 {title: "bottom", "#bottom": ""}
             ],
-            "#sorted": "priority asc, area",
+            "#sorted": "#priority asc, #area",
             "#sortDirection": "desc"
         });
         getContext().init(() => {
@@ -269,7 +342,7 @@ describe("Tree", () => {
             ["desc", ["m", "a", "unlabelled", "also"]]
         ] as const) {
             const note = buildNote({
-                children, "#sorted": "order, area", "#sortDirection": direction
+                children, "#sorted": "#order, #area", "#sortDirection": direction
             });
             getContext().init(() => {
                 tree.sortNotesIfNeeded(note.noteId);
@@ -286,7 +359,7 @@ describe("Tree", () => {
                 {title: "one", "#priority": "1", "#due": "2026-01-15"},
                 {title: "nine", "#priority": "9", "#due": "2026-01-15"}
             ],
-            "#sorted": "due, priority desc"
+            "#sorted": "#due, #priority desc"
         });
         getContext().init(() => {
             tree.sortNotesIfNeeded(note.noteId);
@@ -295,6 +368,160 @@ describe("Tree", () => {
         // and two, ten. #sortNatural is what orders a level's numbers by their value.
         const orderedTitles = note.children.map((child) => child.title);
         expect(orderedTitles).toStrictEqual(["nine", "one", "two", "ten"]);
+    });
+
+    it("groups the children that have a label, whatever its value or the direction", () => {
+        const children: Parameters<typeof buildNote>[0]["children"] = [
+            {title: "b", "#archived": ""},
+            {title: "c"},
+            {title: "d", "#archived": "false"},
+            {title: "a", "#archived": "", "#pinned": ""},
+            {title: "e", "#pinned": "yes"}
+        ];
+        for (const [sorted, direction, expected] of [
+            ["#archived last", "asc", ["c", "e", "a", "b", "d"]],
+            ["#archived last", "desc", ["e", "c", "d", "b", "a"]],
+            ["#pinned first, #archived last", "asc", ["e", "a", "c", "b", "d"]]
+        ] as const) {
+            const note = buildNote({children, "#sorted": sorted, "#sortDirection": direction});
+            getContext().init(() => {
+                tree.sortNotesIfNeeded(note.noteId);
+            });
+            expect(note.children.map((child) => child.title)).toStrictEqual([...expected]);
+        }
+    });
+
+    it("sorts by a label for `#name` and by a property for a bare name", () => {
+        const children: Parameters<typeof buildNote>[0]["children"] = [
+            {title: "b", "#title": "1", "#area": "x"},
+            {title: "a", "#title": "2", "#area": "y"}
+        ];
+        for (const [sorted, expected] of [
+            ["#title", ["b", "a"]],
+            ["title desc", ["b", "a"]],
+            ["#title desc", ["a", "b"]],
+            // A bare word that names no property ties every child, so the title decides.
+            ["area desc", ["a", "b"]]
+        ] as const) {
+            const note = buildNote({children, "#sorted": sorted});
+            getContext().init(() => {
+                tree.sortNotesIfNeeded(note.noteId);
+            });
+            expect(note.children.map((child) => child.title)).toStrictEqual([...expected]);
+        }
+    });
+
+    it("keeps #top and #bottom outside a grouping level unless #sorted names them", () => {
+        const children: Parameters<typeof buildNote>[0]["children"] = [
+            {title: "archived bottom", "#bottom": "", "#archived": ""},
+            {title: "archived top", "#top": "", "#archived": ""},
+            {title: "a", "#archived": ""},
+            {title: "bottom", "#bottom": ""},
+            {title: "b"},
+            {title: "top", "#top": ""}
+        ];
+        for (const [sorted, expected] of [
+            ["#archived last", [
+                "top", "archived top", "b", "a", "bottom", "archived bottom"
+            ]],
+            // A #bottom left unnamed still applies before every level.
+            ["#archived last, #top first", [
+                "top", "b", "archived top", "a", "bottom", "archived bottom"
+            ]],
+            ["#archived last, #top first, #bottom last, title", [
+                "top", "b", "bottom", "archived top", "a", "archived bottom"
+            ]]
+        ] as const) {
+            const note = buildNote({children, "#sorted": sorted});
+            getContext().init(() => {
+                tree.sortNotesIfNeeded(note.noteId);
+            });
+            expect(note.children.map((child) => child.title)).toStrictEqual([...expected]);
+        }
+    });
+
+    it("orders #top and #bottom by their values where #sorted names them", () => {
+        const note = buildNote({
+            children: [
+                {title: "top1", "#top": "1"},
+                {title: "top2", "#top": "2"},
+                {title: "a"},
+                {title: "bottom1", "#bottom": "1"},
+                {title: "bottom2", "#bottom": "2"}
+            ],
+            "#sorted": "#top desc, #bottom last, #bottom, title"
+        });
+        getContext().init(() => {
+            tree.sortNotesIfNeeded(note.noteId);
+        });
+        const orderedTitles = note.children.map((child) => child.title);
+        expect(orderedTitles).toStrictEqual(["top2", "top1", "a", "bottom1", "bottom2"]);
+    });
+
+    it("groups folders right after #top and #bottom, wherever #sorted puts them", () => {
+        const note = buildNote({
+            children: [
+                {title: "archived folder", "#archived": "", children: [{title: "1.1"}]},
+                {title: "archived", "#archived": ""},
+                {title: "folder", children: [{title: "2.1"}]},
+                {title: "leaf"},
+                {title: "bottom", "#bottom": ""},
+                {title: "top", "#top": ""}
+            ],
+            "#sorted": "#archived last, #top first, #bottom last, title",
+            "#sortFoldersFirst": ""
+        });
+        getContext().init(() => {
+            tree.sortNotesIfNeeded(note.noteId);
+        });
+        const orderedTitles = note.children.map((child) => child.title);
+        expect(orderedTitles).toStrictEqual([
+            "top", "folder", "leaf", "bottom", "archived folder", "archived"
+        ]);
+    });
+
+    it("groups folders with `folders first` or `folders last`, overriding #sortFoldersFirst", () => {
+        const children: Parameters<typeof buildNote>[0]["children"] = [
+            {title: "b"},
+            {title: "p2", children: [{title: "2.1"}]},
+            {title: "a"},
+            {title: "p1", children: [{title: "1.1"}]}
+        ];
+        for (const [sorted, direction, expected] of [
+            ["folders first, title", "desc", ["p2", "p1", "b", "a"]],
+            // A bare `folders` puts the notes without children last, as any level does.
+            ["folders, title", "desc", ["p2", "p1", "b", "a"]],
+            ["folders last, title", "asc", ["a", "b", "p1", "p2"]]
+        ] as const) {
+            const note = buildNote({
+                children, "#sorted": sorted, "#sortDirection": direction, "#sortFoldersFirst": ""
+            });
+            getContext().init(() => {
+                tree.sortNotesIfNeeded(note.noteId);
+            });
+            expect(note.children.map((child) => child.title)).toStrictEqual([...expected]);
+        }
+    });
+
+    it("places a folders level where #sorted writes it", () => {
+        const note = buildNote({
+            children: [
+                {title: "archived folder", "#archived": "", children: [{title: "1.1"}]},
+                {title: "archived", "#archived": ""},
+                {title: "folder", children: [{title: "2.1"}]},
+                {title: "leaf"},
+                {title: "bottom folder", "#bottom": "", children: [{title: "3.1"}]},
+                {title: "top", "#top": ""}
+            ],
+            "#sorted": "#archived last, #top first, #bottom last, folders first, title"
+        });
+        getContext().init(() => {
+            tree.sortNotesIfNeeded(note.noteId);
+        });
+        const orderedTitles = note.children.map((child) => child.title);
+        expect(orderedTitles).toStrictEqual([
+            "top", "folder", "leaf", "bottom folder", "archived folder", "archived"
+        ]);
     });
 
     it("orders the same children the same way whatever order they start in", () => {
@@ -311,5 +538,35 @@ describe("Tree", () => {
         });
         expect(orders[0]).toStrictEqual(orders[1]);
         expect(orders[0].slice(0, 4)).toStrictEqual(["Week 1", "Week 10", "Week 11", "Week 12"]);
+    });
+
+    it("sorts by dateModified, keeps _hidden last and sorts titles with their prefix", () => {
+        const note = buildNote({
+            "children": [
+                { id: "_hidden", title: "a hidden" },
+                { title: "late" },
+                { title: "early" }
+            ],
+            "#sorted": "dateModified"
+        });
+        const [ , late, early ] = note.children;
+        late.dateModified = "2024-02-01 00:00:00.000+0000";
+        early.dateModified = "2024-01-01 00:00:00.000+0000";
+        getContext().init(() => {
+            tree.sortNotesIfNeeded(note.noteId);
+        });
+        expect(note.children.map((child) => child.title)).toStrictEqual([ "early", "late", "a hidden" ]);
+        expect(becca.getBranchFromChildAndParent("_hidden", note.noteId)?.notePosition).toBe(999_999_999);
+
+        const prefixed = buildNote({ "children": [ { title: "a" }, { title: "b" } ], "#sorted": "" });
+        const [ a, b ] = prefixed.children;
+        const branchOfA = becca.getBranchFromChildAndParent(a.noteId, prefixed.noteId);
+        if (branchOfA) {
+            branchOfA.prefix = "z";
+        }
+        getContext().init(() => {
+            tree.sortNotesIfNeeded(prefixed.noteId);
+        });
+        expect(prefixed.children).toStrictEqual([ b, a ]);
     });
 });

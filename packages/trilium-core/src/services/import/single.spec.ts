@@ -1,3 +1,4 @@
+import { CANVAS_ATTACHMENT_MIME } from "@triliumnext/commons";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import ExcelJS from "exceljs";
 import fs from "fs";
@@ -97,6 +98,24 @@ describe("processNoteContent", () => {
         expect(content).toContain("Child");
     });
 
+    it("safe import preserves data-trilium-collapsed on headings", async () => {
+        const html = `<h2 data-trilium-collapsed="true">Heading</h2><p>Text under it.</p>`;
+        const { importedNote } = await testImport(
+            "collapsed-heading.html", "text/html", Buffer.from(html), { safeImport: true });
+
+        const content = importedNote.getContent().toString();
+        expect(content).toContain(`<h2 data-trilium-collapsed="true">Heading</h2>`);
+        expect(content).toContain("Text under it.");
+    });
+
+    it("safe import preserves the block ids of a text note", async () => {
+        const html = `<p data-trilium-block-id="p1">Text</p>`;
+        const { importedNote } = await testImport(
+            "blocks.html", "text/html", Buffer.from(html), { safeImport: true });
+
+        expect(importedNote.getContent().toString()).toContain(html);
+    });
+
     it("supports code note with UTF-16", async () => {
         const { importedNote, buffer } = await testImport("UTF-16LE Code Note.json", "application/json");
         expect(importedNote.mime).toBe("application/json");
@@ -130,6 +149,16 @@ describe("processNoteContent", () => {
         // can never appear — even a key that looks like one lands as a harmless label.
         expect(importedNote.getOwnedAttributes().filter((a) => a.type === "relation")).toHaveLength(0);
         expect(importedNote.getOwnedAttributes().every((a) => a.type === "label")).toBe(true);
+    });
+
+    it("disables dangerous front matter labels when safeImport is on", async () => {
+        const md = "---\nrun: frontendStartup\nShare raw: true\nfirst: kept\n---\nBody.";
+        const { importedNote } = await testImport("Dangerous.md", "text/markdown", Buffer.from(md), { safeImport: true });
+        expect(importedNote.getOwnedLabelValue("disabled:run")).toBe("frontendStartup");
+        expect(importedNote.getOwnedLabelValue("disabled:shareRaw")).toBe("true");
+        expect(importedNote.hasOwnedLabel("run")).toBe(false);
+        expect(importedNote.hasOwnedLabel("shareRaw")).toBe(false);
+        expect(importedNote.getOwnedLabelValue("first")).toBe("kept");
     });
 
     it("supports excalidraw note", async () => {
@@ -347,12 +376,19 @@ describe("importAttachment", () => {
             await getContext().init(async () => {
                 single.importAttachment(taskContext, { originalname: "Shot.png", mimetype: "image/png", buffer: imageBuffer }, rootNote);
                 single.importAttachment(taskContext, { originalname: "notes.unknownext", mimetype: "application/x-custom", buffer: Buffer.from("data") }, rootNote);
+                single.importAttachment(taskContext, {
+                    originalname: "Imported.excalidraw",
+                    mimetype: "application/octet-stream",
+                    buffer: Buffer.from("{}")
+                }, rootNote);
             });
 
             expect(saveImageToAttachment).toHaveBeenCalledWith("root", imageBuffer, "Shot.png", true);
 
             const attachment = rootNote.getAttachments().find((a) => a.title === "notes.unknownext");
             expect(attachment).toMatchObject({ mime: "application/x-custom", role: "file" });
+            const drawing = rootNote.getAttachments().find((a) => a.title === "Imported.excalidraw");
+            expect(drawing).toMatchObject({ mime: CANVAS_ATTACHMENT_MIME, role: "file" });
         } finally {
             saveImageToAttachment.mockRestore();
         }

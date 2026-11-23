@@ -1,23 +1,28 @@
-import { useCallback, useContext, useEffect, useState } from "preact/hooks";
+import { useCallback, useContext } from "preact/hooks";
 
-import appContext, { CommandNames } from "../../components/app_context";
+import type { CommandNames } from "../../components/app_context";
 import FNote from "../../entities/fnote";
+import type { MenuItem } from "../../menus/context_menu";
 import date_notes from "../../services/date_notes";
-import { LauncherWidgetDefinitionWithType } from "../../services/frontend_script_api_preact";
 import { t } from "../../services/i18n";
 import toast from "../../services/toast";
-import { getErrorMessage, isMobile } from "../../services/utils";
-import BasicWidget from "../basic_widget";
-import NoteContextAwareWidget from "../note_context_aware_widget";
-import QuickSearch from "../quick_search";
-import { useGlobalShortcut, useLegacyWidget, useNoteLabel, useNoteRelationTarget } from "../react/hooks";
+import { isMobile } from "../../services/utils";
+import type BasicWidget from "../basic_widget";
+import LazyQuickSearch from "../LazyQuickSearch";
+import { useHoldContextMenu } from "../react/hooks/dom";
+import { useNoteLabel } from "../react/hooks/note";
+import { useGlobalShortcut } from "../react/hooks/shortcuts";
 import { ParentComponent } from "../react/react_utils";
 import { CustomNoteLauncher } from "./GenericButtons";
-import { LaunchBarActionButton, LaunchBarContext, launcherContextMenuHandler, LauncherNoteProps, useLauncherIconAndTitle } from "./launch_bar_widgets";
+import {
+    LaunchBarActionButton, LaunchBarContext, launcherContextMenuHandler, LauncherNoteProps,
+    showLauncherContextMenu, useLauncherIconAndTitle
+} from "./launch_bar_widgets";
 
 export function CommandButton({ launcherNote }: LauncherNoteProps) {
     const { icon, title } = useLauncherIconAndTitle(launcherNote);
     const [ command ] = useNoteLabel(launcherNote, "command");
+    const contextMenuProps = useCommandLauncherContextMenu(command, launcherNote);
 
     return command && (
         <LaunchBarActionButton
@@ -25,8 +30,38 @@ export function CommandButton({ launcherNote }: LauncherNoteProps) {
             icon={icon}
             text={title}
             triggerCommand={command as CommandNames}
+            {...contextMenuProps}
         />
     );
+}
+
+/** The menu sections that command launchers list above "Remove from launch bar". */
+const COMMAND_MENU_ITEMS: Partial<Record<string, () => Promise<MenuItem<CommandNames>[]>>> = {
+    showRecentChanges: async () => {
+        const { getRecentlyChangedNotesMenuItems } = await import("../../menus/recent_changes_menu_items");
+        return await getRecentlyChangedNotesMenuItems();
+    }
+};
+
+/**
+ * Returns props that open the launcher menu with the section of `command` from
+ * {@link COMMAND_MENU_ITEMS}, on a right-click or a held press. Returns nothing for a command
+ * without a section.
+ */
+export function useCommandLauncherContextMenu(
+    command: string | null | undefined,
+    launcherNote: FNote
+) {
+    const getMenuItems = command ? COMMAND_MENU_ITEMS[command] : undefined;
+    const handler = useCallback((e: MouseEvent) => {
+        e.preventDefault();
+        void getMenuItems?.().then((extraItems) => {
+            void showLauncherContextMenu(launcherNote, e, { extraItems });
+        });
+    }, [ getMenuItems, launcherNote ]);
+    const holdProps = useHoldContextMenu(handler);
+
+    return getMenuItems ? holdProps : undefined;
 }
 
 // we're intentionally displaying the launcher title and icon instead of the target,
@@ -96,65 +131,14 @@ export function TodayLauncher({ launcherNote }: LauncherNoteProps) {
 
 export function QuickSearchLauncherWidget({ launcherNote }: LauncherNoteProps) {
     const { isHorizontalLayout } = useContext(LaunchBarContext);
-    const parentComponent = useContext(ParentComponent) as BasicWidget | null;
+    // A `BasicWidget` only in the mobile layout, which wraps the launch bar in one.
+    const parentComponent = useContext(ParentComponent) as Partial<BasicWidget> | null;
     const isEnabled = isHorizontalLayout && !isMobile();
-    parentComponent?.contentSized();
+    parentComponent?.contentSized?.();
 
     return (
         <div onContextMenu={launcherContextMenuHandler(launcherNote)}>
-            {isEnabled && <QuickSearch />}
+            {isEnabled && <LazyQuickSearch />}
         </div>
     );
-}
-
-export function CustomWidget({ launcherNote }: LauncherNoteProps) {
-    const [ widgetNote ] = useNoteRelationTarget(launcherNote, "widget");
-    const [ widget, setWidget ] = useState<BasicWidget | NoteContextAwareWidget | LauncherWidgetDefinitionWithType>();
-
-    const parentComponent = useContext(ParentComponent) as BasicWidget | null;
-    parentComponent?.contentSized();
-
-    useEffect(() => {
-        (async function() {
-            let widget: BasicWidget;
-            try {
-                widget = await widgetNote?.executeScript();
-            } catch (e) {
-                toast.showError(t("toast.bundle-error.message", {
-                    id: widgetNote?.noteId,
-                    title: widgetNote?.title,
-                    message: getErrorMessage(e)
-                }));
-                return;
-            }
-
-            if (widgetNote && widget instanceof BasicWidget) {
-                widget._noteId = widgetNote.noteId;
-            }
-            setWidget(widget);
-        })();
-    }, [ widgetNote ]);
-
-    return (
-        <div onContextMenu={launcherContextMenuHandler(launcherNote)}>
-            {widget && (
-                ("type" in widget && widget.type === "preact-launcher-widget")
-                    ? <ReactWidgetRenderer widget={widget as LauncherWidgetDefinitionWithType} />
-                    : <LegacyWidgetRenderer widget={widget as BasicWidget} />
-            )}
-        </div>
-    );
-}
-
-export function LegacyWidgetRenderer({ widget }: { widget: BasicWidget }) {
-    const [ widgetEl ] = useLegacyWidget(() => widget, {
-        noteContext: appContext.tabManager.getActiveContext() ?? undefined
-    });
-
-    return widgetEl;
-}
-
-function ReactWidgetRenderer({ widget }: { widget: LauncherWidgetDefinitionWithType }) {
-    const El = widget.render;
-    return <El />;
 }

@@ -1,11 +1,16 @@
-import { dayjs, filterAttributeName, isValidAttributeName } from "@triliumnext/commons";
+import {
+    filterAttributeName, isValidAttributeName
+} from "@triliumnext/commons/src/lib/attribute_names.js";
+import { BLOCK_ID_ATTRIBUTE } from "@triliumnext/commons/src/lib/block_reference.js";
+import type { ViteHotContext } from "vite/types/hot.js";
 
 import FNote from "../entities/fnote";
+import { getNoteImageUrl } from "./image_urls.js";
 import type { ViewMode, ViewScope } from "./link.js";
 
 const SVG_MIME = "image/svg+xml";
 
-export const isShare = !window.glob;
+export const isShare = !window.glob || !!window.glob.isShare;
 
 /**
  * True when the client is showing a *pre-auth* SPA screen — the login screen (`loggedIn: false`),
@@ -133,15 +138,17 @@ function formatDateISO(date: Date) {
     return `${date.getFullYear()}-${padNum(date.getMonth() + 1)}-${padNum(date.getDate())}`;
 }
 
-export function formatDateTime(date: Date, userSuppliedFormat?: string): string {
-    if (userSuppliedFormat?.trim()) {
-        return dayjs(date).format(userSuppliedFormat);
-    }
+export function formatDateTime(date: Date): string {
     return `${formatDate(date)} ${formatTime(date)}`;
 }
 
+/** The local time as `YYYY-MM-DD HH:mm:ss.SSS+hhmm`, which the server reads from a request header. */
 function localNowDateTime() {
-    return dayjs().format("YYYY-MM-DD HH:mm:ss.SSSZZ");
+    const date = new Date();
+    const offset = -date.getTimezoneOffset();
+    const zone = `${offset < 0 ? "-" : "+"}${padNum(Math.floor(Math.abs(offset) / 60))}${padNum(Math.abs(offset) % 60)}`;
+    const milliseconds = String(date.getMilliseconds()).padStart(3, "0");
+    return `${formatDateISO(date)} ${formatTimeWithSeconds(date)}.${milliseconds}${zone}`;
 }
 
 function now() {
@@ -245,6 +252,16 @@ export function escapeHtml(str: string) {
     return str.replace(/[&<>"'`=\/]/g, (s) => entityMap[s]);
 }
 
+/**
+ * A name the user wrote, as a menu title.
+ *
+ * A menu reads a title as markup, so the name is escaped into the text it is meant to be, and boxed
+ * so that `style.css` clips a long one rather than letting it widen the menu.
+ */
+export function menuName(name: string) {
+    return `<span class="tn-menu-name">${escapeHtml(name)}</span>`;
+}
+
 export function escapeQuotes(value: string) {
     return value.replaceAll('"', "&quot;");
 }
@@ -259,22 +276,38 @@ const SIZE_UNITS = ["B", "KiB", "MiB", "GiB", "TiB"];
  *   what is not needed, which reads best for a size at rest. Pass a number for a counter that is
  *   still climbing: there, dropping a trailing zero shortens the text on every other update and the
  *   line shifts about while it is being read.
+ * @param unitOf a size whose unit to show `size` in instead, so that a column of sizes shares one
+ *   unit and can be summed by eye: the largest of them, or their total.
  */
-export function formatSize(size: number | null | undefined, decimals?: number) {
+export function formatSize(size: number | null | undefined, decimals?: number, unitOf?: number) {
     if (size === null || size === undefined) {
         return "";
     }
 
-    if (size <= 0) {
+    const reference = unitOf ?? size;
+    if (reference <= 0) {
         return "0 B";
     }
 
-    const unit = Math.min(Math.floor(Math.log(size) / Math.log(1024)), SIZE_UNITS.length - 1);
-    const value = size / Math.pow(1024, unit);
+    let unit = Math.min(Math.floor(Math.log(reference) / Math.log(1024)), SIZE_UNITS.length - 1);
     // Nothing below a byte to show, however many places were asked for.
-    const places = decimals !== undefined && unit === 0 ? 0 : decimals;
+    const placesIn = (u: number) => (decimals !== undefined && u === 0 ? 0 : decimals);
+    const shown = (value: number, places: number | undefined) =>
+        places === undefined ? Math.round(value * 100) / 100 : value.toFixed(places);
+    // A size that rounds up to 1024 of its unit is 1 of the next: 1048575 B reads 1 MiB, not 1024 KiB.
+    // Not for a unit taken from unitOf, which a column of sizes shares.
+    if (unitOf === undefined && unit < SIZE_UNITS.length - 1
+        && Number(shown(size / Math.pow(1024, unit), placesIn(unit))) >= 1024) {
+        unit++;
+    }
+    const value = size / Math.pow(1024, unit);
+    const places = placesIn(unit);
+    const step = Math.pow(10, -(places ?? 2));
+    if (size > 0 && value < step / 2) {
+        return `<${step.toFixed(places ?? 2)} ${SIZE_UNITS[unit]}`;
+    }
 
-    return `${places === undefined ? Math.round(value * 100) / 100 : value.toFixed(places)} ${SIZE_UNITS[unit]}`;
+    return `${shown(value, places)} ${SIZE_UNITS[unit]}`;
 }
 
 function toObject<T, R>(array: T[], fn: (arg0: T) => [key: string, value: R]) {
@@ -309,9 +342,35 @@ export function isMobile() {
 }
 
 /**
- * Whether the viewport is as narrow as a phone's. In the mobile layout, a menu is a bottom sheet
- * only then; a tablet's wider layout places it beside what opened it. Must match the media query
- * around the `.mobile-bottom-menu` rules in style.css.
+ * Whether the mobile layout runs as a tablet's: on a viewport that docks the note tree beside the
+ * note (see {@link isTreeStacked}). A tablet keeps it either way up, a phone never has it, and a
+ * foldable changes as it folds, so it follows the viewport; {@link onTabletChange} reports the
+ * change.
+ */
+export function isTablet() {
+    return isMobile() && !isTreeStacked();
+}
+
+/** Calls `onChange` whenever {@link isTablet} changes, until the returned function runs. */
+export function onTabletChange(onChange: () => void) {
+    return onTreeStackedChange(onChange);
+}
+
+/** Whether the launch bar shows the desktop's launchers: on a desktop, and on a tablet. */
+export function hasDesktopLaunchBar() {
+    return !isMobile() || isTablet();
+}
+
+/** The note that holds the launchers of this device's launch bar, visible and available. */
+export function getLaunchBarRootId() {
+    return hasDesktopLaunchBar() ? "_lbRoot" : "_lbMobileRoot";
+}
+
+/**
+ * Whether the viewport is as narrow as a phone's. In the mobile layout, the launch bar sits at the
+ * bottom and a menu is a bottom sheet only then; a tablet in landscape places the launch bar on
+ * the side and a menu beside what opened it. Must match the media queries of
+ * `layouts/MobileLayout.phone.css` and `MobileLayout.tablet.css`.
  */
 export function isNarrowLayout() {
     return window.matchMedia(NARROW_LAYOUT).matches;
@@ -319,12 +378,36 @@ export function isNarrowLayout() {
 
 /** Calls `onChange` whenever {@link isNarrowLayout} changes, until the returned function runs. */
 export function onNarrowLayoutChange(onChange: () => void) {
-    const query = window.matchMedia(NARROW_LAYOUT);
+    return onMediaQueryChange(NARROW_LAYOUT, onChange);
+}
+
+export const NARROW_LAYOUT = "(max-width: 991px)";
+
+/**
+ * Whether the mobile layout stacks the note tree under the note, which slides away to reveal it,
+ * rather than docking it beside the note: on a viewport narrower than an iPad mini in portrait, or
+ * on a phone, whose screen is under 600px on its shorter side either way up. It reads the screen
+ * rather than the viewport's height, which an open keyboard shrinks on Android and in the iOS app.
+ * A tablet in portrait docks the tree while keeping the launch bar at the bottom. Must match the
+ * media queries of `MobileSidebar.css`.
+ */
+export function isTreeStacked() {
+    return window.matchMedia(STACKED_TREE_LAYOUT).matches;
+}
+
+/** Calls `onChange` whenever {@link isTreeStacked} changes, until the returned function runs. */
+export function onTreeStackedChange(onChange: () => void) {
+    return onMediaQueryChange(STACKED_TREE_LAYOUT, onChange);
+}
+
+export const STACKED_TREE_LAYOUT =
+    "(max-width: 743px), (max-device-width: 599px), (max-device-height: 599px)";
+
+function onMediaQueryChange(mediaQuery: string, onChange: () => void) {
+    const query = window.matchMedia(mediaQuery);
     query.addEventListener("change", onChange);
     return () => query.removeEventListener("change", onChange);
 }
-
-const NARROW_LAYOUT = "(max-width: 991px)";
 
 /**
  * Returns true if the client device is an Apple iOS one (iPad, iPhone, iPod).
@@ -332,8 +415,10 @@ const NARROW_LAYOUT = "(max-width: 991px)";
  *
  * @returns `true` if running under iOS.
  */
+/** Whether the device runs iOS or iPadOS, whose Safari reports a Mac user agent on an iPad. */
 export function isIOS() {
-    return /iPad|iPhone|iPod/.test(navigator.userAgent);
+    return /iPad|iPhone|iPod/.test(navigator.userAgent)
+        || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
 }
 
 /**
@@ -399,6 +484,8 @@ export function isHtmlEmpty(html: string) {
         !html.includes("<section") &&
         !html.includes("include-note") &&
         !html.includes("link-mention") &&
+        // A block with an id is content: references point at it.
+        !html.includes(BLOCK_ID_ATTRIBUTE) &&
         // the line below will actually attempt to load images so better to check for images first
         $("<div>").html(html).text().trim().length === 0
     );
@@ -472,19 +559,18 @@ function timeLimit<T>(promise: Promise<T>, limitMs: number, errorMessage?: strin
     const error = new Error(errorMessage || `Process exceeded time limit ${limitMs}`);
 
     return new Promise<T>((res, rej) => {
-        let resolved = false;
+        const timer = setTimeout(() => rej(error), limitMs);
 
-        promise.then((result) => {
-            resolved = true;
-
-            res(result);
-        });
-
-        setTimeout(() => {
-            if (!resolved) {
-                rej(error);
+        promise.then(
+            (result) => {
+                clearTimeout(timer);
+                res(result);
+            },
+            (e) => {
+                clearTimeout(timer);
+                rej(e);
             }
-        }, limitMs);
+        );
     });
 }
 
@@ -671,13 +757,15 @@ function copyHtmlToClipboard(html: string, plainText: string = html) {
         e.preventDefault();
     }
     document.addEventListener("copy", listener);
-    const ok = document.execCommand("copy");
-    document.removeEventListener("copy", listener);
-    return ok;
+    try {
+        return document.execCommand("copy");
+    } finally {
+        document.removeEventListener("copy", listener);
+    }
 }
 
 export function createImageSrcUrl(note: FNote) {
-    return `api/images/${note.noteId}/${encodeURIComponent(note.title)}?timestamp=${Date.now()}`;
+    return getNoteImageUrl(note.noteId, note.title, `timestamp=${Date.now()}`);
 }
 
 
@@ -958,6 +1046,21 @@ export function* causeChain(e: unknown): Generator<unknown> {
     }
 }
 
+/**
+ * Returns the instance a previous evaluation of the calling module stored in `hot.data`, or
+ * creates and stores one. Pass `import.meta.hot` from a module that holds an app-wide
+ * singleton: an HMR update can import that module again under a new `?t=` URL, and without
+ * this the re-evaluated copy builds a second, uninitialized instance.
+ */
+export function reuseAcrossHotReloads<T>(hot: ViteHotContext | undefined, create: () => T): T {
+    const data = hot?.data as { instance?: T } | undefined;
+    if (!data) {
+        return create();
+    }
+    data.instance ??= create();
+    return data.instance;
+}
+
 export function replaceHtmlEscapedSlashes(str: string) {
     return str.replace(/&#x2F;/g, "/");
 }
@@ -999,8 +1102,13 @@ export default {
     toObject,
     randomString,
     isMobile,
+    isTablet,
+    hasDesktopLaunchBar,
+    getLaunchBarRootId,
     isNarrowLayout,
     onNarrowLayoutChange,
+    isTreeStacked,
+    onTreeStackedChange,
     isDesktop,
     setCookie,
     getNoteTypeClass,

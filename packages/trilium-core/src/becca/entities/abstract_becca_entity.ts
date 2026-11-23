@@ -1,3 +1,6 @@
+import { PROTECTED_BLOB_PREFIX } from "@triliumnext/commons/src/lib/utils.js";
+
+import { ValidationError } from "../../errors.js";
 import eventService from "../../services/events";
 
 import blobService from "../../services/blob.js";
@@ -32,6 +35,23 @@ abstract class AbstractBeccaEntity<T extends AbstractBeccaEntity<T>> {
     isProtected?: boolean;
     isSynced?: boolean;
     blobId?: string;
+
+    /**
+     * Virtual entities exist only in becca — they are injected by a virtual note provider
+     * (see `services/virtual_notes.ts`), never persisted to the database and never synced.
+     * {@link save} and {@link markAsDeleted} throw; content goes through the note's provider.
+     */
+    isVirtual?: boolean;
+
+    /** @throws ValidationError when this entity is virtual, since virtual entities never touch the database. */
+    protected ensureNotVirtual(action: string) {
+        if (!this.isVirtual) {
+            return;
+        }
+
+        const constructorData = this.constructor as unknown as ConstructorData<T>;
+        throw new ValidationError(`Cannot ${action} ${constructorData.entityName} '${(this as any)[constructorData.primaryKeyName]}': it is a virtual entity (provided by a virtual note provider) and is read-only.`);
+    }
 
     protected beforeSaving(opts?: {}) {
         const constructorData = this.constructor as unknown as ConstructorData<T>;
@@ -103,6 +123,8 @@ abstract class AbstractBeccaEntity<T extends AbstractBeccaEntity<T>> {
      * Saves entity - executes SQL, but doesn't commit the transaction on its own
      */
     save(opts?: {}): this {
+        this.ensureNotVirtual("save");
+
         const constructorData = this.constructor as unknown as ConstructorData<T>;
         const entityName = constructorData.entityName;
         const primaryKeyName = constructorData.primaryKeyName;
@@ -141,6 +163,8 @@ abstract class AbstractBeccaEntity<T extends AbstractBeccaEntity<T>> {
     }
 
     protected _setContent(content: string | Uint8Array, opts: ContentOpts = {}) {
+        this.ensureNotVirtual("set content of");
+
         // client code asks to save entity even if blobId didn't change (something else was changed)
         opts.forceSave = !!opts.forceSave;
         opts.forceFrontendReload = !!opts.forceFrontendReload;
@@ -216,11 +240,10 @@ abstract class AbstractBeccaEntity<T extends AbstractBeccaEntity<T>> {
     private getUnencryptedContentForHashCalculation(unencryptedContent: Uint8Array | string) {
         if (this.isProtected) {
             // a "random" prefix makes sure that the calculated hash/blobId is different for a decrypted/encrypted content
-            const encryptedPrefixSuffix = "t$[nvQg7q)&_ENCRYPTED_?M:Bf&j3jr_";
             if (typeof unencryptedContent === "string") {
-                return `${encryptedPrefixSuffix}${unencryptedContent}`;
+                return `${PROTECTED_BLOB_PREFIX}${unencryptedContent}`;
             } else {
-                return concat2(encodeUtf8(encryptedPrefixSuffix), unencryptedContent)
+                return concat2(encodeUtf8(PROTECTED_BLOB_PREFIX), unencryptedContent)
             }
         }
         return unencryptedContent;
@@ -293,6 +316,8 @@ abstract class AbstractBeccaEntity<T extends AbstractBeccaEntity<T>> {
      * This is a low-level method, for notes and branches use `note.deleteNote()` and 'branch.deleteBranch()` instead.
      */
     markAsDeleted(deleteId: string | null = null) {
+        this.ensureNotVirtual("delete");
+
         const constructorData = this.constructor as unknown as ConstructorData<T>;
         const entityId = (this as any)[constructorData.primaryKeyName];
         const entityName = constructorData.entityName;
@@ -320,6 +345,8 @@ abstract class AbstractBeccaEntity<T extends AbstractBeccaEntity<T>> {
     }
 
     markAsDeletedSimple() {
+        this.ensureNotVirtual("delete");
+
         const constructorData = this.constructor as unknown as ConstructorData<T>;
         const entityId = (this as any)[constructorData.primaryKeyName];
         const entityName = constructorData.entityName;

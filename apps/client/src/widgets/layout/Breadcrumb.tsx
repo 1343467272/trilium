@@ -1,31 +1,31 @@
 import "./Breadcrumb.css";
 
 import clsx from "clsx";
+import { Fragment } from "preact";
 import { useContext, useRef, useState } from "preact/hooks";
-import { Fragment } from "preact/jsx-runtime";
 
 import appContext from "../../components/app_context";
-import Component from "../../components/component";
+import type Component from "../../components/component";
 import NoteContext from "../../components/note_context";
-import contextMenu, { MenuItem } from "../../menus/context_menu";
-import NoteColorPicker from "../../menus/custom-items/NoteColorPicker";
-import link_context_menu from "../../menus/link_context_menu";
-import { getDuplicateItems, TreeCommandNames } from "../../menus/tree_context_menu";
-import attributes from "../../services/attributes";
-import branches from "../../services/branches";
-import { copyTextWithToast } from "../../services/clipboard_ext";
+import type FNote from "../../entities/fnote";
+import type { MenuItem } from "../../menus/context_menu";
 import { getReadableTextColor } from "../../services/css_class_manager";
 import froca from "../../services/froca";
 import hoisted_note from "../../services/hoisted_note";
 import { t } from "../../services/i18n";
 import note_create from "../../services/note_create";
-import options from "../../services/options";
+import { noteTitleTextHtml, PROTECTED_ICON } from "../../services/tab_title";
 import tree from "../../services/tree";
 import ActionButton from "../react/ActionButton";
 import { Badge } from "../react/Badge";
-import Dropdown from "../react/Dropdown";
-import { FormDropdownDivider, FormListItem } from "../react/FormList";
-import { useActiveNoteContext, useChildNotes, useNote, useNoteColorClass, useNoteIcon, useNoteLabel, useNoteLabelBoolean, useNoteTitle, useStaticTooltip, useTriliumOptionBool } from "../react/hooks";
+import Dropdown, { DropdownMenuItemRows } from "../react/Dropdown";
+import { FormListItem } from "../react/FormList";
+import {
+    useChildNotes, useNote, useNoteColorClass, useNoteIcon, useNoteLabel, useNoteLabelBoolean
+} from "../react/hooks/note";
+import { useTriliumOptionBool } from "../react/hooks/options";
+import { useActiveNoteContext, useNoteTitle } from "../react/hooks/tree";
+import { useStaticTooltip } from "../react/hooks/tooltip";
 import Icon from "../react/Icon";
 import { NewNoteLink } from "../react/NoteLink";
 import { ParentComponent } from "../react/react_utils";
@@ -95,7 +95,8 @@ function BreadcrumbRoot({ noteContext }: { noteContext: NoteContext | undefined 
             onClick={() => noteContext?.setNote(note.noteId)}
             onContextMenu={(e) => {
                 e.preventDefault();
-                link_context_menu.openContextMenu(note.noteId, e);
+                void import("../../menus/link_context_menu").then(({ default: linkContextMenu }) =>
+                    linkContextMenu.openContextMenu(note.noteId, e));
             }}
         />
     );
@@ -186,7 +187,7 @@ interface BreadcrumbSeparatorProps {
     hideArchivedNotes: boolean;
 }
 
-function BreadcrumbSeparator(props: BreadcrumbSeparatorProps) {
+export function BreadcrumbSeparator(props: BreadcrumbSeparatorProps) {
     const notePathComponents = (props.notePath ?? "").split("/");
     const parentNoteId = notePathComponents.at(-1);
     const parentNote = useNote(parentNoteId);
@@ -204,44 +205,47 @@ function BreadcrumbSeparator(props: BreadcrumbSeparatorProps) {
             hideToggleArrow
             dropdownContainerClassName="breadcrumb-child-list"
             placement="top"
+            filterable={!!parentNote?.hasChildren()}
+            keepOrder
         >
             <BreadcrumbSeparatorDropdownContent {...props} />
         </Dropdown>
     );
 }
 
-function BreadcrumbSeparatorDropdownContent({ notePath, noteContext, activeNotePath, hideArchivedNotes }: BreadcrumbSeparatorProps) {
-    const notePathComponents = (notePath ?? "").split("/");
-    const parentNoteId = notePathComponents.at(-1);
+function BreadcrumbSeparatorDropdownContent(props: BreadcrumbSeparatorProps) {
+    const parentNoteId = (props.notePath ?? "").split("/").at(-1);
     const childNotes = useChildNotes(parentNoteId);
+    return <DropdownMenuItemRows items={buildChildNoteItems(childNotes, props)} />;
+}
 
-    return (
-        <>
-            {childNotes.map((note) => {
-                if (note.noteId === "_hidden") return;
-                if (hideArchivedNotes && note.isArchived) return null;
+/** The rows of a separator's menu: the children of the note before it, then "Create new note". */
+export function buildChildNoteItems(childNotes: FNote[], props: BreadcrumbSeparatorProps) {
+    const { notePath, activeNotePath, noteContext, hideArchivedNotes } = props;
+    const items: MenuItem<unknown>[] = [];
+    for (const note of childNotes) {
+        if (note.noteId === "_hidden") continue;
+        if (hideArchivedNotes && note.isArchived) continue;
 
-                const childNotePath = `${notePath}/${note.noteId}`;
-                return <li key={note.noteId}>
-                    <FormListItem
-                        icon={note.getIcon()}
-                        className={clsx(note.getColorClass(), note.isArchived && "archived")}
-                        onClick={() => noteContext?.setNote(childNotePath)}
-                    >
-                        {childNotePath !== activeNotePath
-                            ? <span>{note.title}</span>
-                            : <strong>{note.title}</strong>}
-                    </FormListItem>
-                </li>;
-            })}
+        const childNotePath = `${notePath}/${note.noteId}`;
+        const title = noteTitleTextHtml(note);
+        items.push({
+            title: childNotePath === activeNotePath ? `<strong>${title}</strong>` : title,
+            titleIcon: note.isProtected ? PROTECTED_ICON : undefined,
+            uiIcon: note.getIcon(),
+            iconColorClass: note.getColorClass(),
+            className: note.isArchived ? "archived" : undefined,
+            handler: () => noteContext?.setNote(childNotePath)
+        });
+    }
 
-            {childNotes.length > 0 && <FormDropdownDivider />}
-            <FormListItem
-                icon="bx bx-plus"
-                onClick={() => note_create.createNote(notePath, { activate: true })}
-            >{t("breadcrumb.create_new_note")}</FormListItem>
-        </>
-    );
+    if (items.length > 0) items.push({ kind: "separator" });
+    items.push({
+        title: t("breadcrumb.create_new_note"),
+        uiIcon: "bx bx-plus",
+        handler: () => note_create.createNote(notePath, { activate: true })
+    });
+    return items;
 }
 
 function BreadcrumbCollapsed({ items, noteContext }: {
@@ -267,11 +271,22 @@ function BreadcrumbCollapsed({ items, noteContext }: {
                         icon={note.getIcon()}
                         onClick={() => noteContext?.setNote(notePath)}
                     >
-                        <span>{note.title}</span>
+                        <span><BreadcrumbNoteTitle note={note} /></span>
                     </FormListItem>
                 </li>;
             })}
         </Dropdown>
+    );
+}
+
+export function BreadcrumbNoteTitle({ note }: { note: FNote }) {
+    return (
+        <>
+            {note.isContentAvailable()
+                ? note.title
+                : <span className="protected-title">{t("protected_session.locked_note_title")}</span>}
+            {note.isProtected && <Icon icon="bx bx-lock-alt" className="protected-icon" />}
+        </>
     );
 }
 
@@ -305,152 +320,18 @@ function useNotePaths() {
     };
 }
 
-//#region Note Context menu
 function buildContextMenu(notePath: string, parentComponent: Component | null) {
-    return async (e: MouseEvent) => {
+    return (e: MouseEvent) => {
         e.preventDefault();
-
-        const { noteId, parentNoteId } = tree.getNoteIdAndParentIdFromUrl(notePath);
-        if (!parentNoteId || !noteId) return;
-
-        const branchId = await froca.getBranchId(parentNoteId, noteId);
-        if (!branchId) return;
-        const branch = froca.getBranch(branchId);
-        if (!branch) return;
-
-        const note = await branch?.getNote();
-        if (!note) return;
-
-        const notSearch = note.type !== "search";
-        const notOptionsOrHelp = !note.noteId.startsWith("_options") && !note.noteId.startsWith("_help");
-        const isArchived = note.isArchived;
-        const isNotRoot = note.noteId !== "root";
-        const isHoisted = note.noteId === appContext.tabManager.getActiveContext()?.hoistedNoteId;
-        const parentNote = isNotRoot && branch ? await froca.getNote(branch.parentNoteId) : null;
-        const parentNotSearch = !parentNote || parentNote.type !== "search";
-
-        const items = [
-            ...link_context_menu.getItems(e),
-            {
-                title: `${t("tree-context-menu.hoist-note")}`,
-                command: "toggleNoteHoisting",
-                uiIcon: "bx bxs-chevrons-up",
-                enabled: notSearch
-            },
-            { kind: "separator" },
-            {
-                title: t("tree-context-menu.move-to"),
-                command: "moveNotesTo",
-                uiIcon: "bx bx-transfer",
-                enabled: isNotRoot && !isHoisted && parentNotSearch
-            },
-            {
-                title: t("tree-context-menu.clone-to"),
-                command: "cloneNotesTo",
-                uiIcon: "bx bx-duplicate",
-                enabled: isNotRoot && !isHoisted
-            },
-            { kind: "separator" },
-            {
-                title: t("tree-context-menu.duplicate"),
-                command: "duplicateSubtree",
-                uiIcon: "bx bx-outline",
-                enabled: parentNotSearch && isNotRoot && !isHoisted && notOptionsOrHelp && note.isContentAvailable(),
-                items: getDuplicateItems([ note ])
-            },
-
-            {
-                title: !isArchived ? t("tree-context-menu.archive") : t("tree-context-menu.unarchive"),
-                uiIcon: !isArchived ? "bx bx-archive" : "bx bx-archive-out",
-                handler: () => {
-                    if (!isArchived) {
-                        attributes.addLabel(note.noteId, "archived");
-                    } else {
-                        attributes.removeOwnedLabelByName(note, "archived");
-                    }
-                }
-            },
-            {
-                title: t("tree-context-menu.delete"),
-                command: "deleteNotes",
-                uiIcon: "bx bx-trash destructive-action-icon",
-                enabled: isNotRoot && !isHoisted && parentNotSearch && notOptionsOrHelp,
-                handler: () => branches.deleteNotes([ branchId ])
-            },
-            { kind: "separator" },
-            (notOptionsOrHelp ? {
-                kind: "custom",
-                componentFn: () => {
-                    return NoteColorPicker({note});
-                }
-            } : null),
-            { kind: "separator" },
-            {
-                title: t("tree-context-menu.recent-changes-in-subtree"),
-                uiIcon: "bx bx-history",
-                enabled: notOptionsOrHelp,
-                handler: () => parentComponent?.triggerCommand("showRecentChanges", { ancestorNoteId: noteId })
-            },
-            {
-                title: t("tree-context-menu.search-in-subtree"),
-                command: "searchInSubtree",
-                uiIcon: "bx bx-search",
-                enabled: notSearch
-            }
-        ];
-
-        contextMenu.show({
-            items: items.filter(Boolean) as MenuItem<TreeCommandNames>[],
-            x: e.pageX,
-            y: e.pageY,
-            selectMenuItemHandler: ({ command }) => {
-                if (link_context_menu.handleLinkContextMenuItem(command, e, notePath)) {
-                    return;
-                }
-
-                if (!command) return;
-                parentComponent?.triggerCommand(command, {
-                    noteId,
-                    notePath,
-                    selectedOrActiveBranchIds: [ branchId ],
-                    selectedOrActiveNoteIds: [ noteId ]
-                });
-            },
-        });
+        void import("./breadcrumb_context_menu").then(({ showNoteContextMenu }) =>
+            showNoteContextMenu(e, notePath, parentComponent));
     };
 }
-//#endregion
 
-//#region Empty context menu
 function buildEmptyAreaContextMenu(parentComponent: Component | null, notePath: string | null | undefined) {
     return (e: MouseEvent) => {
-        const hideArchivedNotes = (options.get("hideArchivedNotes_main") === "true");
-
         e.preventDefault();
-        contextMenu.show({
-            items: [
-                {
-                    title: t("breadcrumb.empty_hide_archived_notes"),
-                    handler: async () => {
-                        await options.save("hideArchivedNotes_main", !hideArchivedNotes ? "true" : "false");
-
-                        // Note tree doesn't update by itself.
-                        parentComponent?.triggerEvent("frocaReloaded", {});
-                    },
-                    checked: hideArchivedNotes
-                },
-                { kind: "separator" },
-                {
-                    title: t("tree-context-menu.copy-note-path-to-clipboard"),
-                    command: "copyNotePathToClipboard",
-                    uiIcon: "bx bx-directions",
-                    handler: () => copyTextWithToast(`#${notePath}`)
-                },
-            ],
-            x: e.pageX,
-            y: e.pageY,
-            selectMenuItemHandler: () => {}
-        });
+        void import("./breadcrumb_context_menu").then(({ showEmptyAreaContextMenu }) =>
+            showEmptyAreaContextMenu(e, parentComponent, notePath));
     };
 }
-//#endregion

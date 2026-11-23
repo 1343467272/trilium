@@ -1,13 +1,15 @@
 import { useCallback, useMemo } from "preact/hooks";
 
-import { type ExperimentalFeatureId, getAvailableExperimentalFeatures } from "../../../services/experimental_features";
+import {
+    type ExperimentalFeatureId, getAvailableExperimentalFeatures
+} from "../../../services/experimental_features";
 import { t } from "../../../services/i18n";
 import server from "../../../services/server";
 import toast from "../../../services/toast";
 import Button from "../../react/Button";
 import { Card, OptionCardSection } from "../../react/Card";
 import FormToggle from "../../react/FormToggle";
-import { useTriliumOptionJson } from "../../react/hooks";
+import { useTriliumOptionJson } from "../../react/hooks/options";
 import OptionsPageHeader from "./components/OptionsPageHeader";
 
 export default function AdvancedSettings() {
@@ -20,8 +22,8 @@ export default function AdvancedSettings() {
 
 function ExperimentalOptions() {
     const [enabledFeatures, setEnabledFeatures] = useTriliumOptionJson<ExperimentalFeatureId[]>("experimentalFeatures", true);
-    // Features with dedicated controls elsewhere (appearance settings and the AI/LLM page, respectively).
-    const integratedFeatures: ExperimentalFeatureId[] = ["new-layout", "llm"];
+    // Features with dedicated controls elsewhere (the AI/LLM page).
+    const integratedFeatures: ExperimentalFeatureId[] = ["llm"];
     const filteredFeatures = useMemo(() => getAvailableExperimentalFeatures().filter(e => !integratedFeatures.includes(e.id)), []);
 
     const toggleFeature = useCallback((featureId: ExperimentalFeatureId, enabled: boolean) => {

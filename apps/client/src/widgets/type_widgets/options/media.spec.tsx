@@ -1,6 +1,6 @@
 import { render } from "preact";
 import { act } from "preact/test-utils";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
  * The images card: everything that happens to an image on its way in, compression included — the
@@ -64,8 +64,8 @@ vi.mock("../../../services/i18n", () => ({
 // A stand-in options store: the page reads through these hooks and writes back through them, so
 // this is the whole of what the card touches. Partial-mocked, since sibling components below it
 // use other hooks from the same module.
-vi.mock("../../react/hooks", async (importOriginal) => ({
-    ...(await importOriginal<typeof import("../../react/hooks")>()),
+vi.mock("../../react/hooks/options", async (importOriginal) => ({
+    ...(await importOriginal<typeof import("../../react/hooks/options")>()),
     useTriliumOption: (name: string) => [ mocks.stored[name], (value: string) => mocks.saved(name, value) ],
     useTriliumOptionBool: (name: string) => [
         mocks.stored[name] === "true",
@@ -74,14 +74,20 @@ vi.mock("../../react/hooks", async (importOriginal) => ({
     useTriliumOptionInt: (name: string) => [
         parseInt(mocks.stored[name] ?? "", 10),
         (value: number) => mocks.saved(name, String(value))
-    ],
+    ]
+}));
+vi.mock("../../react/hooks/note_context", async (importOriginal) => ({
+    ...(await importOriginal<typeof import("../../react/hooks/note_context")>()),
     useNoteContext: () => ({ note: undefined })
 }));
 
 vi.mock("./components/OptionsPageHeader", () => ({ default: () => <div className="header-stub" /> }));
 vi.mock("./components/RelatedSettings", () => ({ default: () => <div className="related-stub" /> }));
 
+import { preloadDropdownPopups } from "../../react/Dropdown";
 import MediaSettings from "./media";
+
+beforeAll(() => preloadDropdownPopups());
 
 /** What an untouched install has: everything on, PNGs converted, as automatic shrinking always did. */
 const DEFAULTS: Record<string, string> = {
@@ -145,13 +151,17 @@ function rowOrFail(title: string): HTMLElement {
     return found;
 }
 
-/** Presses one of a row's choice buttons by its label. */
+/** Opens a row's choice menu and runs the entry with the given label. */
 async function choose(title: string, label: string) {
-    const button = [ ...(row(title)?.querySelectorAll<HTMLElement>("button") ?? []) ]
-        .find((candidate) => candidate.textContent?.trim() === label);
+    await act(async () => {
+        rowOrFail(title).querySelector<HTMLButtonElement>(".dropdown > button")?.click();
+    });
+    const entry = [ ...document.body.querySelectorAll<HTMLElement>(".image-compression-choice-menu li.dropdown-item") ]
+        .find((candidate) => candidate.textContent?.trim().startsWith(label));
+    expect(entry).toBeDefined();
 
     await act(async () => {
-        button?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        entry?.click();
     });
 }
 
@@ -223,9 +233,8 @@ describe("the images card", () => {
         expect(describes("space_usage.compress_resize")).toBe("images.max_image_dimensions_description");
         // Both qualities take the same advice, being the same scale read twice.
         expect(describes("space_usage.compress_quality")).toBe("images.jpeg_quality_description");
-        // A row with nothing extra to say keeps its help mark alone rather than inventing prose.
+        // A choice describes each entry in its menu rather than the row.
         expect(describes("space_usage.compress_png_handling")).toBeUndefined();
-        expect(row("space_usage.compress_png_handling")?.querySelector(".contextual-help-icon")).not.toBeNull();
     });
 
     it("writes each choice back to the option it stands for", async () => {

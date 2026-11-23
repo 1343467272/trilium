@@ -1,22 +1,22 @@
-import type { ZipEntry } from "@triliumnext/core/src/services/zip_provider.js";
+import type { ZipEntry, ZipSource } from "@triliumnext/core/src/services/zip_provider.js";
 import { strToU8, unzipSync, zipSync } from "fflate";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import BrowserZipProvider from "./zip_provider.js";
 
 const provider = new BrowserZipProvider();
 
-function makeZip(files: Record<string, string>): Uint8Array {
+function makeZip(files: Record<string, string>): Uint8Array<ArrayBuffer> {
     const entries: Record<string, Uint8Array> = {};
     for (const [name, content] of Object.entries(files)) {
         entries[name] = strToU8(content);
     }
-    return zipSync(entries);
+    return new Uint8Array(zipSync(entries));
 }
 
-async function readAll(buffer: Uint8Array, encoding?: string): Promise<Record<string, string>> {
+async function readAll(source: ZipSource, encoding?: string): Promise<Record<string, string>> {
     const out: Record<string, string> = {};
-    await provider.readZipFile(buffer, async (entry: ZipEntry, readContent) => {
+    await provider.readZipFile(source, async (entry: ZipEntry, readContent) => {
         out[entry.fileName] = new TextDecoder().decode(await readContent());
     }, encoding);
     return out;
@@ -36,7 +36,7 @@ async function readNames(buffer: Uint8Array, encoding?: string): Promise<string[
  * offset stays valid (the file name is not covered by the CRC or the recorded sizes). An entry given no
  * `nameBytes` is left exactly as fflate wrote it, so one archive can mix both conventions.
  */
-function makeLegacyZip(entries: { placeholder: string; nameBytes?: number[] }[]): Uint8Array {
+function makeLegacyZip(entries: { placeholder: string; nameBytes?: number[] }[]): Uint8Array<ArrayBuffer> {
     const zip = zipSync(Object.fromEntries(entries.map(({ placeholder }) => [placeholder, strToU8("x")])));
     const byPlaceholder = new Map(
         entries.flatMap((e) => (e.nameBytes ? [[e.placeholder, e.nameBytes] as const] : []))
@@ -149,10 +149,8 @@ describe("BrowserZipArchive store + backpressure", () => {
 });
 
 describe("BrowserZipProvider path sources are unsupported", () => {
-    it("readZipFile throws for a { path } source", () => {
-        // readZipFile isn't async, so the guard throws synchronously before the work promise is created;
-        // real callers await it inside an async function, where the throw surfaces as a rejection anyway.
-        expect(() => provider.readZipFile({ path: "/tmp/x.zip" }, async () => {})).toThrow(
+    it("readZipFile rejects a { path } source", async () => {
+        await expect(provider.readZipFile({ path: "/tmp/x.zip" }, async () => {})).rejects.toThrow(
             "Path-based zip reading is not supported in the browser"
         );
     });
@@ -180,6 +178,19 @@ describe("BrowserZipProvider.readZipFile", () => {
     it("rejects on a corrupt archive", async () => {
         const garbage = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]);
         await expect(provider.readZipFile(garbage, async () => {})).rejects.toBeDefined();
+    });
+
+    it("reads entries up to the size limit and rejects one declared past it", async () => {
+        const limited = new BrowserZipProvider(64 * 1024);
+        const sizes: Record<string, number> = {};
+        const read = (zip: Uint8Array) => limited.readZipFile(zip, async (entry, readContent) => {
+            sizes[entry.fileName] = (await readContent()).length;
+        });
+
+        await read(zipSync({ "small.bin": new Uint8Array(64 * 1024) }));
+        expect(sizes).toEqual({ "small.bin": 64 * 1024 });
+        await expect(read(zipSync({ "zeros.bin": new Uint8Array(1024 * 1024) })))
+            .rejects.toThrow(/"zeros\.bin" decompresses to more than 65536 bytes/);
     });
 
     it("propagates errors thrown while processing an entry", async () => {
@@ -236,8 +247,9 @@ describe("BrowserZipProvider.detectFilenameEncoding", () => {
             return new RealTextDecoder(label, opts);
         } as unknown as typeof TextDecoder;
         try {
-            const zip = makeZip({ [String.fromCharCode(0xfe)]: "x" });
-            expect(await provider.detectFilenameEncoding(zip)).toBe("utf-8");
+            // Without the stub these bytes detect as GBK; skipping it moves on to the next candidate.
+            const zip = makeLegacyZip([{ placeholder: "AB.txt", nameBytes: GBK_NAME_BYTES }]);
+            expect(await provider.detectFilenameEncoding(zip)).toBe("shift_jis");
         } finally {
             globalThis.TextDecoder = RealTextDecoder;
         }
@@ -287,3 +299,111 @@ describe("BrowserZipProvider filename re-decoding", () => {
         expect(names).toEqual(["þ.txt"]);
     });
 });
+
+describe("BrowserZipProvider Blob sources", () => {
+    it("reads the same entries and names from a Blob as from the bytes", async () => {
+        const zip = makeLegacyZip([
+            { placeholder: "AB.txt", nameBytes: GBK_NAME_BYTES },
+            { placeholder: "Café.txt" }
+        ]);
+        const blobSource = { blob: new Blob([ zip ]) };
+
+        expect(await provider.detectFilenameEncoding(blobSource)).toBe("gbk");
+        expect(await readAll(blobSource, "gbk")).toEqual(await readAll(zip, "gbk"));
+    });
+
+    it("reads one byte range at a time, never the whole archive", async () => {
+        const entries: Record<string, string> = {};
+        for (let i = 0; i < 8; i++) {
+            entries[`note-${i}.txt`] = incompressibleText(40_000, i + 1);
+        }
+        const zip = makeZip(entries);
+        const blob = new Blob([ zip ]);
+        const slice = vi.spyOn(blob, "slice");
+
+        expect(await readAll({ blob })).toEqual(entries);
+        // Bigger than the tail the reader fetches to find the end-of-central-directory record.
+        expect(blob.size).toBeGreaterThan(2 * 0x10000);
+
+        expect(slice).toHaveBeenCalled();
+        for (const [ start = 0, end = blob.size ] of slice.mock.calls) {
+            expect(end - start).toBeLessThan(blob.size / 2);
+        }
+    });
+
+    it("reads nothing past the central directory until an entry's content is asked for", async () => {
+        const zip = makeZip({ "a.txt": "a".repeat(50_000), "b.txt": "b" });
+        const blob = new Blob([ zip ]);
+        const slice = vi.spyOn(blob, "slice");
+
+        const names: string[] = [];
+        await provider.readZipFile({ blob }, async (entry) => { names.push(entry.fileName); });
+
+        expect(names).toEqual([ "a.txt", "b.txt" ]);
+        // The tail holding the end-of-central-directory record, then the directory itself.
+        expect(slice).toHaveBeenCalledTimes(2);
+    });
+});
+
+describe("BrowserZipProvider entry formats", () => {
+    it("reads a stored (uncompressed) entry", async () => {
+        const zip = zipSync({ "plain.txt": [ strToU8("as is"), { level: 0 } ] });
+        expect(await readAll(zip)).toEqual({ "plain.txt": "as is" });
+
+        const withExtraField = zipSync({ "plain.txt": [ strToU8("as is"), { level: 0, extra: { 0x5455: new Uint8Array([ 1 ]) } } ] });
+        expect(await readAll(withExtraField)).toEqual({ "plain.txt": "as is" });
+    });
+
+    it("keeps an unflagged name that decodes in no encoding as one character per byte", async () => {
+        const zip = makeLegacyZip([{ placeholder: "A", nameBytes: [0xfe] }]);
+        expect(await readNames(zip, "x-unknown-encoding")).toEqual([ "þ" ]);
+    });
+
+    it("rejects an entry it cannot read, but only when its content is asked for", async () => {
+        const unsupported = patchCentralHeader(makeZip({ "a.txt": "x" }), (view, at) => view.setUint16(at + 10, 12, true));
+        const encrypted = patchCentralHeader(makeZip({ "a.txt": "x" }), (view, at) => view.setUint16(at + 8, view.getUint16(at + 8, true) | 1, true));
+
+        expect(await readNames(unsupported)).toEqual([ "a.txt" ]);
+        await expect(readAll(unsupported)).rejects.toThrow("Unsupported ZIP compression method 12.");
+        await expect(readAll(encrypted)).rejects.toThrow("Encrypted ZIP entries are not supported.");
+    });
+
+    it("rejects an entry whose length or checksum is not the declared one, never importing it cut",
+        async () => {
+        const understated = patchCentralHeader(makeZip({ "a.txt": "longer text" }),
+            (view, at) => view.setUint32(at + 24, 3, true));
+        const altered = patchCentralHeader(makeZip({ "a.txt": "x" }),
+            (view, at) => view.setUint32(at + 16, 1, true));
+
+        await expect(readAll(understated))
+            .rejects.toThrow("an entry's length is not the declared one");
+        await expect(readAll(altered))
+            .rejects.toThrow("an entry's checksum is not the declared one");
+    });
+});
+
+/** Letters from a fixed-seed generator, which deflate cannot shrink much. */
+function incompressibleText(length: number, seed: number): string {
+    let state = seed;
+    let text = "";
+    for (let i = 0; i < length; i++) {
+        state ^= state << 13;
+        state ^= state >>> 17;
+        state ^= state << 5;
+        state >>>= 0;
+        text += String.fromCharCode(97 + state % 26);
+    }
+    return text;
+}
+
+/** Applies `patch` to the first central directory header in `zip`, at the header's offset. */
+function patchCentralHeader(zip: Uint8Array, patch: (view: DataView, offset: number) => void): Uint8Array {
+    const view = new DataView(zip.buffer, zip.byteOffset, zip.byteLength);
+    for (let i = 0; i + 4 <= zip.length; i++) {
+        if (view.getUint32(i, true) === 0x02014b50) {
+            patch(view, i);
+            return zip;
+        }
+    }
+    throw new Error("No central directory header found.");
+}

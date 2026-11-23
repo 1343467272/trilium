@@ -11,8 +11,8 @@ import { CoreApiTester } from "../../test/api_tester";
  * backup service on both runtimes. The two filesystem-touching service calls
  * are stubbed because the underlying platform I/O cannot run against the
  * ephemeral in-memory fixture: on node, better-sqlite3's `.backup()` rejects
- * with `SQLITE_NOTADB` against the in-memory DB; on standalone (happy-dom)
- * there is no OPFS. So `backupNow` and `getBackupContent` are isolated — the
+ * with `SQLITE_NOTADB` against the in-memory DB; on standalone there is no
+ * OPFS. So `backupNow` and `getBackupContent` are isolated — the
  * route's own logic (mapping, filename extraction, headers) is what we assert.
  */
 let api: CoreApiTester;
@@ -89,6 +89,15 @@ describe("Backup API (core)", () => {
             expect(res.status).toBe(200);
             expect(res.headers["Content-Type"]).toBe("application/x-sqlite3");
             expect(res.headers["Content-Disposition"]).toBe('attachment; filename="backup-now.db"');
+        });
+
+        it("falls back on a generic file name for a path that ends in a separator", async () => {
+            vi.spyOn(getBackup(), "getBackupContent").mockResolvedValue(Buffer.from("SQLite format 3 ") as never);
+
+            const res = await api.get(`/api/database/backup/download`, {
+                query: { filePath: "C:\\backups\\" }
+            });
+            expect(res.headers["Content-Disposition"]).toBe('attachment; filename="backup.db"');
         });
     });
 });

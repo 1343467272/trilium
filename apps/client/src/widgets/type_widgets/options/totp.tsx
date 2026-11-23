@@ -1,6 +1,8 @@
 import "./totp.css";
 
-import { TOTPEnableResponse, TOTPGenerate, TOTPRecoveryKeysResponse, TOTPStatus, TOTPVerifyResponse } from "@triliumnext/commons";
+import {
+    TOTPEnableResponse, TOTPGenerate, TOTPRecoveryKeysResponse, TOTPStatus, TOTPVerifyResponse
+} from "@triliumnext/commons";
 import { ComponentChildren, createPortal, RefObject } from "preact";
 import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks";
 import qrcode from "qrcode-generator";
@@ -18,7 +20,7 @@ import FormCheckbox from "../../react/FormCheckbox";
 import FormGroup from "../../react/FormGroup";
 import FormText from "../../react/FormText";
 import FormTextBox from "../../react/FormTextBox";
-import { useStaticTooltip } from "../../react/hooks";
+import { useStaticTooltip } from "../../react/hooks/tooltip";
 import Modal from "../../react/Modal";
 import { RawHtmlBlock } from "../../react/RawHtml";
 import MfaStatusBadge from "./components/MfaStatusBadge";
@@ -330,22 +332,20 @@ function TotpVerifyStep({ secret, secretUrl, code, setCode, codeRejected, codeRe
             <FormText>{t("multi_factor_authentication.totp_enroll_instructions")}</FormText>
 
             <h5 className="totp-enroll-step-title">{t("multi_factor_authentication.totp_enroll_step1_title")}</h5>
-            <div className="totp-enroll-grid">
-                {secretUrl && <TotpQrCode url={secretUrl} />}
+            {secretUrl && <TotpQrCode url={secretUrl} />}
 
-                <FormGroup
-                    className="totp-enroll-secret-group"
-                    name="totp-enroll-secret"
-                    label={t("multi_factor_authentication.totp_enroll_secret_label")}
-                >
-                    <FormTextBox
-                        className="totp-enroll-secret"
-                        currentValue={secret ?? ""}
-                        readOnly
-                        onFocus={(e) => e.currentTarget.select()}
-                    />
-                </FormGroup>
-            </div>
+            <FormGroup
+                className="totp-enroll-secret-group"
+                name="totp-enroll-secret"
+                label={t("multi_factor_authentication.totp_enroll_secret_label")}
+            >
+                <FormTextBox
+                    className="totp-enroll-secret"
+                    currentValue={secret ?? ""}
+                    readOnly
+                    onFocus={(e) => e.currentTarget.select()}
+                />
+            </FormGroup>
 
             <h5 className="totp-enroll-step-title">{t("multi_factor_authentication.totp_enroll_step2_title")}</h5>
             <FormGroup

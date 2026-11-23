@@ -69,6 +69,10 @@ function makeSocket(readyState = OPEN) {
         send(data: string) {
             this.sent.push(data);
         },
+        closed: false,
+        close() {
+            this.closed = true;
+        },
         emit(event: string, ...args: any[]) {
             return handlers[event]?.(...args);
         }
@@ -173,6 +177,26 @@ describe("WebSocketMessagingProvider", () => {
             await Promise.resolve(); // let the fire-and-forget async body settle
         });
 
+        it("logs a malformed message or a failing handler instead of rejecting", async () => {
+            const { server } = init();
+            const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+            provider.setClientMessageHandler(vi.fn(async () => {
+                throw new Error("handler failed");
+            }));
+            const ws = makeSocket();
+            server.emit("connection", ws, {});
+
+            ws.emit("message", "{not json");
+            ws.emit("message", JSON.stringify({ type: "hello" }));
+
+            await vi.waitFor(() => expect(consoleError).toHaveBeenCalledTimes(2));
+            expect(consoleError.mock.calls.map(([ prefix, error ]) => [ prefix, (error as Error).constructor.name ])).toEqual([
+                [ "Failed to process websocket message:", "SyntaxError" ],
+                [ "Failed to process websocket message:", "Error" ]
+            ]);
+            expect((consoleError.mock.calls[1][1] as Error).message).toBe("handler failed");
+        });
+
         it("logs server errors via the error handler", () => {
             const { server } = init();
             expect(() => server.emit("error", new Error("ws boom"))).not.toThrow();
@@ -224,6 +248,29 @@ describe("WebSocketMessagingProvider", () => {
                 provider.sendMessageToAllClients({ type: "frontend-update" } as WebSocketMessage)
             ).not.toThrow();
             expect(getLogMock.info).not.toHaveBeenCalled();
+        });
+    });
+
+    describe("disconnectAllClients", () => {
+        it("asks every open client to reload, then closes every connection", () => {
+            const { server } = init();
+            const open = makeSocket(OPEN);
+            const closed = makeSocket(CLOSED);
+            server.clients.add(open);
+            server.clients.add(closed);
+
+            provider.disconnectAllClients("password changed");
+
+            expect(open.sent.map((data) => JSON.parse(data))).toEqual([
+                { type: "reload-frontend", reason: "password changed" }
+            ]);
+            expect(closed.sent).toHaveLength(0);
+            expect(open.closed).toBe(true);
+            expect(closed.closed).toBe(true);
+        });
+
+        it("is a no-op when the server is not initialized", () => {
+            expect(() => provider.disconnectAllClients("password changed")).not.toThrow();
         });
     });
 

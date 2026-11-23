@@ -4,6 +4,7 @@
  * built-in search, with a `read_web_page` tool to read what it finds.
  */
 
+import type { LlmWebSearchResult } from "@triliumnext/commons";
 import { tool } from "ai";
 import { parse as parseHtml } from "node-html-parser";
 import { z } from "zod";
@@ -12,7 +13,7 @@ import markdownExport from "../export/markdown.js";
 import request, { validateFetchableUrl } from "../request.js";
 import { decodeUtf8 } from "../utils/binary.js";
 import { trimTrailingSlashes } from "../utils/index.js";
-import { llmFetch } from "./providers/fetch.js";
+import { fetchFailureReason, llmFetch } from "./providers/fetch.js";
 
 /** A configured search provider, as stored in the `llmProviders` option. */
 export interface WebSearchSetup {
@@ -23,22 +24,21 @@ export interface WebSearchSetup {
     baseURL?: string;
 }
 
-export interface WebSearchSource {
-    title: string;
-    url: string;
-    snippet: string;
-}
-
 const MAX_RESULTS = 8;
 const SEARCH_TIMEOUT_MS = 30_000;
+/** The longest query DeepSeek's Search API accepts. */
+const DEEPSEEK_MAX_QUERY_CHARS = 128;
 
 /**
  * The `web_search` tool for `setup`. Its result has the `sources` the chat lists under the tool's
  * line and the `searchProvider` whose mark the line shows, and a failure is returned as
  * `{ error, instruction }`: the chat shows `error` on the tool's line, and `instruction` directs the
  * model to `read_web_page` and, for a {@link SearchSetupError}, to tell the user about it.
+ *
+ * With `builtIn`, the tool is a model provider's own search, whose result has no `searchProvider`,
+ * so the chat shows the magnifier on its line.
  */
-export function createWebSearchTool(setup: WebSearchSetup) {
+export function createWebSearchTool(setup: WebSearchSetup, { builtIn = false } = {}) {
     return tool({
         description: "Search the web for current information. Returns the title, URL and a short excerpt of each matching page. "
             + "The excerpts rarely hold specific facts such as numbers, dates or versions, so before answering a factual "
@@ -50,7 +50,7 @@ export function createWebSearchTool(setup: WebSearchSetup) {
             try {
                 return {
                     query,
-                    searchProvider: { type: setup.provider, name: setup.name ?? setup.provider },
+                    ...(!builtIn && { searchProvider: { type: setup.provider, name: setup.name ?? setup.provider } }),
                     sources: await searchWeb(setup, query, options.abortSignal)
                 };
             } catch (e) {
@@ -79,7 +79,7 @@ class SearchSetupError extends Error {}
  * A switch over literal cases, as `createProviderInstance()` is, because the provider type is
  * user-controlled.
  */
-export async function searchWeb(setup: WebSearchSetup, query: string, signal?: AbortSignal): Promise<WebSearchSource[]> {
+export async function searchWeb(setup: WebSearchSetup, query: string, signal?: AbortSignal): Promise<LlmWebSearchResult[]> {
     switch (setup.provider) {
         case "brave": {
             const base = setup.baseURL ?? "https://api.search.brave.com/res/v1";
@@ -120,6 +120,14 @@ export async function searchWeb(setup: WebSearchSetup, query: string, signal?: A
                 body: JSON.stringify({ query, max_results: MAX_RESULTS })
             }, signal) as { results?: unknown[] };
             return toSources(payload.results, "snippet");
+        }
+        case "deepseek": {
+            const payload = await requestJson(`${setup.baseURL ?? "https://api.deepseek.com/v1"}/tools/search`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json", "Authorization": `Bearer ${setup.apiKey}` },
+                body: JSON.stringify({ query: query.slice(0, DEEPSEEK_MAX_QUERY_CHARS), count: MAX_RESULTS })
+            }, signal, describeDeepSeekFailure) as { results?: unknown[] };
+            return toSources(payload.results, "summary");
         }
         case "searxng": {
             if (!setup.baseURL) {
@@ -248,7 +256,12 @@ async function requestJson(
     describeFailure?: (status: number) => string | undefined
 ): Promise<unknown> {
     const timeout = AbortSignal.timeout(SEARCH_TIMEOUT_MS);
-    const response = await llmFetch(url, { ...init, signal: signal ? AbortSignal.any([ signal, timeout ]) : timeout });
+    let response: Response;
+    try {
+        response = await llmFetch(url, { ...init, signal: signal ? AbortSignal.any([ signal, timeout ]) : timeout });
+    } catch (e) {
+        throw new Error(`Could not reach the search provider: ${fetchFailureReason(e)}`);
+    }
     if (!response.ok) {
         const description = describeFailure?.(response.status);
         if (description) {
@@ -283,9 +296,23 @@ function describeSearxngFailure(status: number, hasApiKey: boolean): string | un
     return undefined;
 }
 
+/**
+ * The cause of a DeepSeek error status: 402 for an account without balance, and 404 from an
+ * endpoint without the Search API, such as a gateway set as the provider's base URL.
+ */
+function describeDeepSeekFailure(status: number): string | undefined {
+    if (status === 402) {
+        return "The DeepSeek account has no balance left (HTTP 402); top it up on the DeepSeek platform.";
+    }
+    if (status === 404) {
+        return "The DeepSeek provider's endpoint has no Search API (HTTP 404). Search needs DeepSeek's own endpoint, https://api.deepseek.com, or a search provider chosen in the chat's Tools menu.";
+    }
+    return undefined;
+}
+
 /** The results that carry a web URL, read from `urlField`, with the excerpt read from `snippetField`. */
-function toSources(results: unknown[] | undefined, snippetField: string, urlField = "url"): WebSearchSource[] {
-    const sources: WebSearchSource[] = [];
+function toSources(results: unknown[] | undefined, snippetField: string, urlField = "url"): LlmWebSearchResult[] {
+    const sources: LlmWebSearchResult[] = [];
     for (const result of results ?? []) {
         const { title, [urlField]: url, [snippetField]: snippet } = (result ?? {}) as Record<string, unknown>;
         if (typeof url === "string" && /^https?:\/\//i.test(url)) {

@@ -3,7 +3,7 @@ The <a class="reference-link" href="../Note%20Tree.md">Note Tree</a> comes wit
 
 ## Navigation within the tree
 
-*   <kbd><span>↑</span></kbd> and <kbd><span>↑</span></kbd> to navigate between notes.
+*   <kbd><span>↑</span></kbd> and <kbd><span>↓</span></kbd> to navigate between notes.
 *   <kbd><span>←</span></kbd> to collapse a note with children, or <kbd><span>→</span></kbd> to expand it.
 *   <kbd><span>←</span></kbd> on a note with no children to navigate to its parent.
 
@@ -25,6 +25,7 @@ The <a class="reference-link" href="../Note%20Tree.md">Note Tree</a> comes wit
 *   <kbd>Ctrl</kbd> + <kbd><span>←</span></kbd> - move note up in the note tree.
 *   <kbd>Ctrl</kbd>+<kbd><span>→</span></kbd> - move note down in the note tree.
 *   <kbd>Del</kbd> - deletes note and optionally its subtree (asked in the dialog).
+*   <kbd>Alt</kbd>+<kbd>S</kbd> - sorts the child notes of the note (see <a class="reference-link" href="../../Notes/Sorting%20Notes.md">Sorting Notes</a>).
 
 ## Multiple selection
 

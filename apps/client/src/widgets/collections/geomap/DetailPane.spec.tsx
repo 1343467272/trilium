@@ -1,18 +1,21 @@
 import { render } from "preact";
 import { useState } from "preact/hooks";
 import { act } from "preact/test-utils";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import appContext from "../../../components/app_context";
 import Component from "../../../components/component";
+import type NoteContext from "../../../components/note_context";
 import type FNote from "../../../entities/fnote";
 import attributes from "../../../services/attributes";
 import linkContextMenu from "../../../menus/link_context_menu";
 import froca from "../../../services/froca";
-import link from "../../../services/link";
+import link, { setupLinkHandlers } from "../../../services/link";
 import server from "../../../services/server";
 import { buildNote } from "../../../test/easy-froca";
-import { useLegacyImperativeHandlers, useNoteContext, useTriliumEvent } from "../../react/hooks";
+import { useTriliumEvent } from "../../react/hooks/events";
+import { useNoteContext } from "../../react/hooks/note_context";
+import { useLegacyImperativeHandlers } from "../../react/hooks/legacy";
 import { ParentComponent } from "../../react/react_utils";
 import { OTHER_WAYS_TO_OPEN } from "../../EmbeddedNotePane";
 import DetailPane, { PaneSelection } from "./DetailPane";
@@ -176,12 +179,14 @@ describe("DetailPane", () => {
         container = document.createElement("div");
         document.body.appendChild(container);
 
-        // `tabManager` is only built when the app starts, and the pane asks it where the reader is
-        // hoisted.
+        // `tabManager` is only built when the app starts. The pane asks it where the reader is
+        // hoisted, and registers its note context with it.
         (appContext as unknown as { tabManager: unknown }).tabManager = {
             getActiveContext: () => undefined,
             getActiveContextNotePath: () => undefined,
-            openContextWithNote: async () => undefined
+            openContextWithNote: async () => undefined,
+            registerDetachedContext: () => undefined,
+            unregisterDetachedContext: () => undefined
         };
         editorAskedToSave.mockClear();
         onRelocate.mockClear();
@@ -191,14 +196,15 @@ describe("DetailPane", () => {
     });
 
     afterEach(() => {
-        (appContext as unknown as { tabManager: unknown }).tabManager = undefined;
         mapComponent = undefined;
 
         if (container) {
-            render(null, container);
+            const mounted = container;
+            act(() => render(null, mounted));
             container.remove();
             container = undefined;
         }
+        (appContext as unknown as { tabManager: unknown }).tabManager = undefined;
     });
 
     /** Stands in for the map's own component, which is what the pane hangs under. */
@@ -898,6 +904,9 @@ describe("DetailPane", () => {
      * keeps meaning what it means anywhere in the app.
      */
     describe("following a link inside the pane", () => {
+        // A click the pane leaves alone reaches the app's link handlers.
+        beforeAll(() => setupLinkHandlers());
+
         function twoMarkersAndAStray() {
             buildNote({ id: "root", title: "root", children: [
                 { id: "fromhere", title: "From here", "#geolocation": "1,2" },
@@ -916,9 +925,9 @@ describe("DetailPane", () => {
         }
 
         /** A link as the note's content carries one, clicked as the browser reports it. */
-        function clickLink(noteId: string, init: MouseEventInit = {}) {
+        function clickLink(noteId: string, init: MouseEventInit = {}, query = "") {
             const anchor = document.createElement("a");
-            anchor.setAttribute("href", `#root/${noteId}`);
+            anchor.setAttribute("href", `#root/${noteId}${query}`);
             pane()?.querySelector(".geo-detail-pane-body")?.appendChild(anchor);
 
             const event = new MouseEvent("click", { bubbles: true, cancelable: true, ...init });
@@ -959,6 +968,25 @@ describe("DetailPane", () => {
             expect(pane()?.textContent).toContain("From here");
         });
 
+        it("leaves a link to a place in a PDF to the app, which opens the PDF there", async () => {
+            const notes = twoMarkersAndAStray();
+            const map = fakeMap();
+            await openPaneOn(notes[0], notes, map);
+
+            const targets: Record<string, string>[] = [
+                { page: "3" }, { page: "3", annotation: "12R" }, { page: "3", heading: "abc" }
+            ];
+            for (const target of targets) {
+                openInCurrentNoteContext.mockClear();
+                const query = `?${new URLSearchParams(target)}`;
+                await act(async () => { clickLink("tothere", {}, query); });
+                await settle();
+                expect(openInCurrentNoteContext, query).toHaveBeenCalledWith(
+                    expect.anything(), "root/tothere", expect.objectContaining(target));
+            }
+            expect(pane()?.textContent).toContain("From here");
+        });
+
         it("leaves a modified click to mean a new tab, marker or not", async () => {
             const notes = twoMarkersAndAStray();
             const map = fakeMap();
@@ -991,6 +1019,38 @@ describe("DetailPane", () => {
 
             // Mounted under the pane's own note context, which is what it reads its note out of.
             expect(pane()?.querySelector(".note-detail-stub")?.textContent).toBe("Somewhere");
+        });
+
+        /** Commands name a note context by its ntxId, so two maps in two splits need two of them. */
+        it("registers a note context of its own in every map", async () => {
+            const registered: string[] = [];
+            (appContext.tabManager as unknown as Record<string, unknown>).registerDetachedContext =
+                (noteContext: NoteContext) => registered.push(noteContext.ntxId ?? "");
+            await openPane(fakeMap());
+
+            const second = document.createElement("div");
+            document.body.appendChild(second);
+            try {
+                await act(async () => {
+                    render(
+                        <ParentComponent.Provider value={new Component()}>
+                            <ParentMap.Provider value={fakeMap() as never}>
+                                <Harness notes={[]} placing={false} isReadOnly={false} />
+                            </ParentMap.Provider>
+                        </ParentComponent.Provider>,
+                        second
+                    );
+                });
+
+                expect(registered).toEqual([
+                    expect.stringMatching(/^_geo-detail-pane_/),
+                    expect.stringMatching(/^_geo-detail-pane_/)
+                ]);
+                expect(registered[0]).not.toBe(registered[1]);
+            } finally {
+                act(() => render(null, second));
+                second.remove();
+            }
         });
 
         /** A toolbar built for the width of a note does not fit a pane a third that wide. */
@@ -1036,7 +1096,7 @@ describe("DetailPane", () => {
 
             await act(async () => { window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })); });
 
-            expect(editorAskedToSave).toHaveBeenCalledWith({ ntxIds: [ "_geo-detail-pane" ] });
+            expect(editorAskedToSave).toHaveBeenCalledWith({ ntxIds: [ expect.stringMatching(/^_geo-detail-pane_/) ] });
             expect(pane()).toBeNull();
         });
     });
@@ -1137,7 +1197,7 @@ describe("DetailPane", () => {
             expect(onRelocate).toHaveBeenCalledWith(note.noteId);
             expect(pane()).toBeNull();
             // Going away this way is still a close, so whatever was being written is saved first.
-            expect(editorAskedToSave).toHaveBeenCalledWith({ ntxIds: [ "_geo-detail-pane" ] });
+            expect(editorAskedToSave).toHaveBeenCalledWith({ ntxIds: [ expect.stringMatching(/^_geo-detail-pane_/) ] });
         });
 
         it("is not offered at all on a map that cannot be edited", async () => {

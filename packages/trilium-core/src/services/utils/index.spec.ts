@@ -151,8 +151,12 @@ describe("#sanitizeSqlIdentifier", () => {
 });
 
 describe("#escapeHtml", () => {
-    it("should re-export 'escape-html' npm module as escapeHtml", () => {
-        expect(utils.escapeHtml).toBeTypeOf("function");
+    it("escapes the five markup characters and leaves everything else alone", () => {
+        expect(utils.escapeHtml(`<a href="x?a=1&b=2" title='t'>`))
+            .toBe("&lt;a href=&quot;x?a=1&amp;b=2&quot; title=&#39;t&#39;&gt;");
+        expect(utils.escapeHtml("&amp; is escaped again")).toBe("&amp;amp; is escaped again");
+        expect(utils.escapeHtml("plain text, ünïcödé")).toBe("plain text, ünïcödé");
+        expect(utils.escapeHtml("")).toBe("");
     });
 });
 
@@ -388,14 +392,19 @@ describe("#getNoteTitle", () => {
             "some other title"
         ],
         [
-            "when a noteMeta object is passed, but the title prop is empty, it should try to handle the filename as if no noteMeta was passed",
-            [ "test_file.md", true, { title: "" } ],
-            "test file"
+            "when a noteMeta object is passed with an empty title, it should keep the note untitled",
+            [ "note.html", true, { title: "" } ],
+            ""
         ],
         [
-            "when a noteMeta object is passed, but the title prop is empty, it should try to handle the filename as if no noteMeta was passed",
-            [ "test_file.json", false, { title: " " } ],
-            "test_file.json"
+            "when a noteMeta object is passed with a blank title, it should keep the note untitled",
+            [ "1_note.html", false, { title: " " } ],
+            ""
+        ],
+        [
+            "when a noteMeta object is passed without a title, it should handle the filename as if no noteMeta was passed",
+            [ "test_file.md", true, { mime: "text/markdown" } ],
+            "test file"
         ]
     ];
 
@@ -481,6 +490,7 @@ describe("#removeDiacritic", () => {
         [ "w/ 'Été' it should replace the 'É' and 'é'", [ "Été" ], "Ete" ],
         [ "w/ 'Fête' it should replace the 'ê'", [ "Fête" ], "Fete" ],
         [ "w/ 'Αλφαβήτα' it should replace the 'ή'", [ "Αλφαβήτα" ], "Αλφαβητα" ],
+        [ "w/ '그래픽' it should keep the Hangul syllables composed", [ "그래픽" ], "그래픽" ],
         [ "w/ '' (empty string) it should return empty string", [ "" ], "" ]
     ];
 
@@ -850,6 +860,10 @@ describe("#slugifyHeadings", () => {
     it("avoids colliding a suffix with an existing slug", () => {
         // "Notes 1" naturally slugifies to "notes-1", so the second "Notes" must skip to "notes-2"
         expect(utils.slugifyHeadings(["Notes", "Notes 1", "Notes"])).toStrictEqual(["notes", "notes-1", "notes-2"]);
+    });
+
+    it("skips the reserved slugs", () => {
+        expect(utils.slugifyHeadings(["Notes", "Notes"], ["notes", "notes-1"])).toStrictEqual(["notes-2", "notes-3"]);
     });
 
     it("strips HTML tags before slugifying", () => {

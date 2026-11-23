@@ -246,8 +246,12 @@ export const HEADER_BYTES = 64 * 1024;
  * One image the run can act on, hiding whether it lives in a note's content or in an attachment.
  *
  * Neither kind is renamed when its format changes: an attachment's title is a reference elsewhere
- * (a canvas addresses its images by the Excalidraw file id stored as the title), and download and
- * export filenames already derive their extension from the mime when the title disagrees.
+ * (a canvas addresses its images by the Excalidraw file id stored as the title), so the mime is
+ * left to carry the format on its own.
+ *
+ * That makes the mime load-bearing rather than merely informative, since it is then the only
+ * record of what the bytes are: download and export filenames both derive their extension from it
+ * where the title disagrees, which is the whole reason they may be left disagreeing.
  */
 export interface CompressionTarget {
     entityType: "note" | "attachment";
@@ -376,6 +380,7 @@ function noteTarget(note: BNote): CompressionTarget {
 }
 
 function attachmentTarget(attachment: BAttachment): CompressionTarget {
+    /* v8 ignore next -- an attachment read from the database always carries its id */
     const attachmentId = attachment.attachmentId ?? "";
 
     return {
@@ -861,6 +866,7 @@ function logRunEnd(response: ImageCompressionResponse): ImageCompressionResponse
         const reasons = new Map<string, number>();
 
         response.items.filter((item) => !item.compressed).forEach((item) => {
+            /* v8 ignore next -- `skippedItem()` gives every item it makes a reason */
             const reason = item.skipReason ?? "unknown";
 
             reasons.set(reason, (reasons.get(reason) ?? 0) + 1);

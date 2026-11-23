@@ -1,16 +1,22 @@
 import "./revisions.css";
 
-import { dayjs, type RevisionItem, type RevisionPojo, safeHostname, safeLinkPreviewHref } from "@triliumnext/commons";
+import {
+    applyListItemAlignment
+} from "@triliumnext/ckeditor5/src/plugins/list_item_alignment_read_only.js";
+import type { RevisionItem, RevisionPojo } from "@triliumnext/commons";
+import { safeHostname, safeLinkPreviewHref } from "@triliumnext/commons/src/lib/link_embed.js";
 import clsx from "clsx";
 import { diffWords } from "diff";
-import HtmlDiff from "htmldiff-js";
 import { type CSSProperties, Fragment } from "preact";
-import { Dispatch, StateUpdater, useEffect, useRef, useState } from "preact/hooks";
+import { Dispatch, StateUpdater, useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
 
 import appContext from "../../components/app_context";
 import FNote from "../../entities/fnote";
+import { copyHtmlWithToast } from "../../services/clipboard_ext";
+import { dayjs } from "../../services/dayjs.js";
 import dialog from "../../services/dialog";
 import froca from "../../services/froca";
+import { diffHtml } from "../../services/html_diff";
 import { t } from "../../services/i18n";
 import { applyLinkEmbeds } from "../../services/link_embed";
 import open from "../../services/open";
@@ -21,12 +27,14 @@ import server from "../../services/server";
 import toast from "../../services/toast";
 import utils from "../../services/utils";
 import ActionButton from "../react/ActionButton";
+import Alert from "../react/Alert";
 import Button from "../react/Button";
 import Dropdown from "../react/Dropdown";
 import FormList, { FormDropdownDivider, FormListItem } from "../react/FormList";
 import FormToggle from "../react/FormToggle";
-import { useTriliumEvent } from "../react/hooks";
-import { DetailPane, MasterDetailHeader, MasterPane, useMobileMasterDetail } from "../react/master_detail";
+import { useTriliumEvent } from "../react/hooks/events";
+import { DetailPane, MasterPane, useMobileMasterDetail } from "../react/master_detail";
+import MasterDetailHeader from "../react/MasterDetailHeader";
 import Modal from "../react/Modal";
 import NoItems from "../react/NoItems";
 import { RawHtmlBlock, SanitizedHtml } from "../react/RawHtml";
@@ -47,8 +55,8 @@ export default function RevisionsDialog() {
     const { isMasterDetail, mobileView, switchMobileView, resetMobileView } = useMobileMasterDetail(modalRef);
     const isMobile = utils.isMobile();
 
-    useTriliumEvent("showRevisions", async ({ noteId }) => {
-        const note = await getNote(noteId);
+    useTriliumEvent("showRevisions", async ({ noteId, ntxId }) => {
+        const note = await getNote(noteId, ntxId);
         if (note) {
             setNote(note);
             // Mobile opens on the revision list; selecting one slides to its detail.
@@ -313,7 +321,9 @@ const REVISION_SOURCE_ICONS: Record<string, string> = {
     manual: "bx bx-save",
     etapi: "bx bx-code-alt",
     llm: "bx bx-bot",
-    restore: "bx bx-history"
+    restore: "bx bx-history",
+    draft: "bx bx-git-compare",
+    fragment: "bx bx-git-compare"
 };
 const DEFAULT_REVISION_ICON = "bx bx-file";
 
@@ -459,6 +469,9 @@ function RevisionToolbar({ revisionItem, showDiff, setShowDiff, setShown, showAc
                     )}
                 </div>
             )}
+            {revisionItem?.source === "fragment" && (
+                <Alert type="info">{t("revisions.fragment_not_restorable")}</Alert>
+            )}
             {revisionItem && (
                 <RevisionDescription
                     revisionItem={revisionItem}
@@ -517,22 +530,30 @@ function RevisionActions({ revisionItem, setShown, onRevisionDeleted, variant }:
             toast.showMessage(t("revisions.revision_restored"));
         }
     };
+    const onCopy = async () => {
+        const { content } = await server.get<RevisionPojo>(`revisions/${revisionItem.revisionId}`);
+        if (typeof content === "string") {
+            await copyHtmlWithToast(content);
+        }
+    };
 
-    if (variant === "footer") {
-        return (
-            <>
-                <ActionButton icon="bx bx-trash" text={t("revisions.delete_button")} onClick={onDelete} frame />
-                <ActionButton icon="bx bx-download" text={t("revisions.download_button")} onClick={onDownload} frame />
-                <Button kind="primary" icon="bx bx-history" text={t("revisions.restore_button")} onClick={onRestore} />
-            </>
+    // The edited blocks of an excerpt, kept alone, can be copied and not restored.
+    const lastAction = revisionItem.source === "fragment"
+        ? <Button icon="bx bx-copy" text={t("revisions.copy_button")} onClick={onCopy} />
+        : (
+            <Button
+                kind={variant === "footer" ? "primary" : undefined}
+                icon="bx bx-history"
+                text={t("revisions.restore_button")}
+                onClick={onRestore}
+            />
         );
-    }
 
     return (
         <>
             <ActionButton icon="bx bx-trash" text={t("revisions.delete_button")} onClick={onDelete} frame />
             <ActionButton icon="bx bx-download" text={t("revisions.download_button")} onClick={onDownload} frame />
-            <Button icon="bx bx-history" text={t("revisions.restore_button")} onClick={onRestore} />
+            {lastAction}
         </>
     );
 }
@@ -633,7 +654,7 @@ function RevisionContent({ noteContent, revisionItem, fullRevision, showDiff }: 
     }
     switch (revisionItem.type) {
         case "text":
-            return <RevisionContentText content={content} />;
+            return <RevisionContentText content={content} noteId={revisionItem.noteId} />;
         case "code":
             return <div className="revision-diff-code">{content}</div>;
         case "image":
@@ -669,7 +690,10 @@ function RevisionContent({ noteContent, revisionItem, fullRevision, showDiff }: 
     }
 }
 
-export function RevisionContentText({ content }: { content: string | Uint8Array | undefined }) {
+export function RevisionContentText({ content, noteId }: {
+    content: string | Uint8Array | undefined;
+    noteId: string;
+}) {
     const contentRef = useRef<HTMLDivElement>(null);
 
     // A revision stores what CKEditor's data downcast produced, and two of those constructs carry
@@ -682,8 +706,9 @@ export function RevisionContentText({ content }: { content: string | Uint8Array 
         if (!container) return;
 
         applyLinkEmbeds(container);
-        void applyReferenceLinks(container);
-    }, [content]);
+        applyListItemAlignment(container);
+        void applyReferenceLinks(container, noteId);
+    }, [content, noteId]);
 
     useEffect(() => {
         if (contentRef.current?.querySelector("span.math-tex")) {
@@ -700,11 +725,18 @@ export function RevisionContentText({ content }: { content: string | Uint8Array 
     return <RawHtmlBlock containerRef={contentRef} className="ck-content" html={sanitizeNoteContentHtml(content as string)} />;
 }
 
-function RevisionContentDiff({ noteContent, itemContent, itemType }: {
+export function RevisionContentDiff({ noteContent, itemContent, itemType }: {
     noteContent?: string,
     itemContent: string | Uint8Array | undefined,
     itemType: string
 }) {
+    const contentRef = useRef<HTMLDivElement>(null);
+    useLayoutEffect(() => {
+        if (contentRef.current) {
+            applyListItemAlignment(contentRef.current);
+        }
+    }, [ noteContent, itemContent, itemType ]);
+
     if (typeof itemContent !== "string") {
         return (
             <div className="revision-diff-content">
@@ -713,14 +745,17 @@ function RevisionContentDiff({ noteContent, itemContent, itemType }: {
         );
     }
 
-    let diffHtml: string;
+    let html: string;
     if (itemType === "text") {
         // Use proper HTML-aware diff for rich text content
-        diffHtml = HtmlDiff.execute(seedLinkPreviewTitles(noteContent), seedLinkPreviewTitles(itemContent));
+        html = diffHtml(
+            seedLinkPreviewTitles(noteContent) ?? "",
+            seedLinkPreviewTitles(itemContent) ?? ""
+        );
     } else {
         // Use word diff for code/mermaid (plain text)
         const diff = diffWords(noteContent ?? "", itemContent);
-        diffHtml = diff.map(part => {
+        html = diff.map(part => {
             if (part.added) {
                 return `<span class="revision-diff-added">${utils.escapeHtml(part.value)}</span>`;
             } else if (part.removed) {
@@ -731,13 +766,14 @@ function RevisionContentDiff({ noteContent, itemContent, itemType }: {
     }
 
     // Diff returned no results, meaning that they are identical.
-    if (!diffHtml) {
+    if (!html) {
         return <NoItems className="revision-diff-content" icon="bx bx-copy" text={t("revisions.diff_identical")} />;
     }
 
     return <SanitizedHtml
+        containerRef={contentRef}
         className={clsx("revision-diff-content", itemType === "text" ? "ck-content" : "revision-diff-code")}
-        html={diffHtml}
+        html={html}
     />;
 }
 
@@ -745,7 +781,7 @@ function RevisionContentDiff({ noteContent, itemContent, itemType }: {
  * Fills every link preview with a real link carrying the title it displays, so that the differ can
  * see it and the reader gets something they recognise as a link.
  *
- * htmldiff-js diffs words, and a link preview holds none: it is stored as an empty
+ * `diffHtml()` diffs words, and a link preview holds none: it is stored as an empty
  * `<span class="link-mention">` / `<section class="link-embed">` carrying its metadata in data
  * attributes, which only the note view turns into a card. Left alone the differ emits the element
  * unmarked whether it was added or removed, so a revision that gained a link and one that lost it
@@ -854,10 +890,10 @@ function FilePreviewInner({ revisionItem, fullRevision }: { revisionItem: Revisi
     return t("revisions.preview_not_available");
 }
 
-async function getNote(noteId?: string | null) {
+async function getNote(noteId: string | null | undefined, ntxId: string | null | undefined) {
     if (noteId) {
         return await froca.getNote(noteId);
     }
-    return appContext.tabManager.getActiveContextNote();
+    return appContext.tabManager.getCommandContext(ntxId)?.note;
 
 }

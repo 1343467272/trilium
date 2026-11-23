@@ -21,7 +21,13 @@ export interface AttachmentRow {
     encoding?: "base64";
 }
 
-export const REVISION_SOURCES = ["auto", "manual", "etapi", "llm", "restore"] as const;
+/**
+ * Where a revision comes from. `draft` holds changes that an editor could not save over a newer
+ * version, and `fragment` the edited blocks of an excerpt that could not be put back into the note.
+ */
+export const REVISION_SOURCES = [
+    "auto", "manual", "etapi", "llm", "restore", "draft", "fragment"
+] as const;
 export type RevisionSource = (typeof REVISION_SOURCES)[number];
 
 export interface RevisionRow {
@@ -132,6 +138,10 @@ export const ALLOWED_NOTE_TYPES = [
     "llmChat"
 ] as const;
 export type NoteType = (typeof ALLOWED_NOTE_TYPES)[number];
+
+export function isNoteType(value: unknown): value is NoteType {
+    return typeof value === "string" && (ALLOWED_NOTE_TYPES as readonly string[]).includes(value);
+}
 
 export interface NoteRow {
     noteId: string;

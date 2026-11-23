@@ -1,5 +1,5 @@
 # Code blocks
-![](Code%20blocks_image.png)
+![](Code%20blocks_image.jpg)
 
 The code blocks feature allows entering pieces of code in text notes.
 
@@ -36,9 +36,9 @@ Interaction:
 *   When the language is set to _Auto-detected_ (by default), Trilium will try to identify the programming language (or similar) that corresponds to the given snippet of text and highlight it. Only the languages enabled in <a class="reference-link" href="../../../Basic%20Concepts%20and%20Features/UI%20Elements/Options.md">Options</a> → _Code Notes_ → _Available MIME types in the dropdown_ are considered. If this is problematic, consider changing the language of the code block manually.
 *   When the language is set to _Plain text_, there will be no syntax highlighting.
 
-Note that when editing a text note, syntax highlighting is automatically disabled if the code block is too big (somewhere around 500 lines). This value is currently not configurable. For <a class="reference-link" href="../../../Basic%20Concepts%20and%20Features/Notes/Read-Only%20Notes.md">Read-Only Notes</a>, this limitation is not applied.
+Note that when editing a text note, syntax highlighting is automatically disabled if the code block is too big (somewhere around 500 lines). In <a class="reference-link" href="../../../Basic%20Concepts%20and%20Features/Notes/Read-Only%20Notes.md">Read-Only Notes</a>, in print and on a [shared page](../../../Advanced%20Usage/Sharing.md), a code block of more than 500 lines or 50,000 characters is shown without syntax highlighting. These limits are not configurable.
 
-In order to configure this new feature, a section has been added in <a class="reference-link" href="../../../Basic%20Concepts%20and%20Features/UI%20Elements/Options.md">Options</a> → _Appearance_ to control the syntax highlighting. There the color scheme can be chosen, from a builtin selection of themes from Highlight.js.
+In order to configure this new feature, a section has been added in <a class="reference-link" href="../../../Basic%20Concepts%20and%20Features/UI%20Elements/Options.md">Options</a> → _Appearance_ to control the syntax highlighting. There the color scheme can be chosen, from a builtin selection of themes from Highlight.js. _VS Code (Light)_ and _VS Code (Dark)_ use the same colors as the default themes of <a class="reference-link" href="../../Code.md">Code</a> notes, so a code block and a code note color the same code alike.
 
 *   It is possible to disable the syntax highlighting for all the notes by selecting “No syntax highlighting” in the “Color scheme” option.
 *   Word wrapping is disabled by default, but can be configured from the same section.
@@ -59,14 +59,13 @@ Should you encounter any issues after the migration, try running Trilium in safe
 
 ## Changing the language of a code block
 
-Simply click anywhere inside the code block and press again the code block button in the <a class="reference-link" href="../Formatting%20toolbar.md">Formatting toolbar</a>:  
-![](1_Code%20blocks_image.png)
+Click anywhere inside the code block, then open the arrow next to the <span class="tn-icon cke cke-code-block"></span> _Code block_ button in the <a class="reference-link" href="../Formatting%20toolbar.md">Formatting toolbar</a> and pick the language.
 
 ## Adjusting the list of languages
 
 The code blocks feature shares the list of languages with the <a class="reference-link" href="../../Code.md">Code</a> note type.
 
-The supported languages can be adjusted by going to <a class="reference-link" href="../../../Basic%20Concepts%20and%20Features/UI%20Elements/Options.md">Options</a>, then _Code Notes_ and looking for the _Available MIME types in the dropdown_ section. Simply check any of the items to add them to the list, or uncheck them to remove them from the list.
+The supported languages, and the order in which they are listed, can be adjusted by going to <a class="reference-link" href="../../../Basic%20Concepts%20and%20Features/UI%20Elements/Options.md">Options</a> → _Code Notes_ → _Available MIME types in the dropdown_. See <a class="reference-link" href="../../Code.md">Code</a> for how to add, remove and reorder them.
 
 Note that the list of languages is not immediately refreshed, you'd have to manually [refresh the application](../../../Troubleshooting/Refreshing%20the%20application.md).
 
@@ -77,3 +76,25 @@ Note that the list of languages is not immediately refreshed, you'd have to manu
 A different feature is _programming ligatures_, which is simply a display affordance which turns `!=` into `≠` or `->` as `→` . These come from the [font](../../../Basic%20Concepts%20and%20Features/Themes/Personalizing%20the%20font.md). The underlying text is not actually changed, and copying it out gives you back `!=` and `->`.
 
 Ligatures can be disabled in <a class="reference-link" href="../../../Basic%20Concepts%20and%20Features/UI%20Elements/Options.md">Options</a>_→ Appearance → Fonts → Programming ligatures._
+
+## Extended code blocks
+
+> [!IMPORTANT]
+> Extended code blocks are experimental, and they change as they mature. To use them, turn on _Extended code blocks_ in <a class="reference-link" href="../../../Basic%20Concepts%20and%20Features/UI%20Elements/Options.md">Options</a> → _Advanced_ → _Experimental Options_.
+
+An extended code block is a code block that is edited with the code editor of a <a class="reference-link" href="../../Code.md">Code</a> note, inside the text. It has the same syntax highlighting and code folding as a code note, and it suits longer pieces of code.
+
+While the feature is on, every code block of a text note is an extended code block: the ones already in the notes, and the new ones.
+
+*   To insert one, insert a code block in any of the ways described in _Inserting a code block_.
+*   A new block is editable, in a _Full_ box, and takes the focus. Its language is the one picked from the list of the <span class="tn-icon cke cke-code-block"></span> button, otherwise the one set last on a code block, or _Plain text_.
+*   The list of languages has no _Auto-detected_ entry. A code block saved as _Auto-detected_ takes the language that Trilium detects in its code, or _Plain text_, once its note is opened for editing. The language can then be changed from the toolbar of the block.
+*   A click places the cursor in the code, as in a code block. Over a _Small_ or _Medium_ box, the mouse wheel scrolls the code.
+*   The block shows in a box like the one of an included code note, with the corners and the shadow of a code block. While the block is editable, its language shows in its top corner, as for a code block. While it is read-only, because _Editable_ is unchecked or the note is one of the <a class="reference-link" href="../../../Basic%20Concepts%20and%20Features/Notes/Read-Only%20Notes.md">Read-Only Notes</a>, that corner has a <span class="tn-icon bx bx-copy"></span> _Copy to clipboard_ button instead, as a code block of a read-only note does.
+*   Its toolbar has the _Change language mode_ menu of an embedded code file, described in _Editing an include in place_ in <a class="reference-link" href="../Include%20Note.md">Include Note</a>, and the <span class="tn-icon cke cke-trilium-copy"></span> _Copy to clipboard_ button, which copies the code as the one of a code block does. Its <span class="tn-icon cke cke-three-vertical-dots"></span> _More actions_ menu has _Editable_, which shows the code read-only once unchecked, the _Word wrap_ and _Line numbers_ submenus, the _Tab width_ submenu, with the items of the _Change tab width_ menu of an embedded code file, the _Size_ submenu, with _Resizable_, _Full_ and _Default_, the _Position_ submenu, and <span class="tn-icon bx bx-trash"></span> _Delete block_, which removes the block from the note.
+*   The _Position_ submenu places the block as it places an include, described in _Positioning_ in <a class="reference-link" href="../Include%20Note.md">Include Note</a>: on lines of its own at the left, the center or the right, or at the left or the right with the text running beside it. Only a _Resizable_ box can be placed, and it takes the full width of the note until it is resized narrower. In the mobile layout, a block with a position other than _Align center_ takes the full width.
+*   The changes made in the block are part of the undo history of the text note.
+
+The code stays in the note as a code block of its language. The Markdown export, [shared pages](../../../Advanced%20Usage/Sharing.md) and printing show it as a code block, and copying it into another application pastes a code block.
+
+Turning _Extended code blocks_ off again shows the code blocks as before, as does a version of Trilium without this feature. Saving a note there drops the box size and the other settings of its blocks. An extended code block inserted from the _Insert_ menu of Trilium 0.107 stays one while the feature is off.

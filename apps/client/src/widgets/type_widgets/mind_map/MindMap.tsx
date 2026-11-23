@@ -1,16 +1,23 @@
 import "mind-elixir/style";
 import "./MindMap.css";
 
-import { NOTE_TYPE_IMAGE_ATTACHMENTS } from "@triliumnext/commons";
+import { NOTE_TYPE_IMAGE_ATTACHMENTS } from "@triliumnext/commons/src/lib/notes.js";
 import { t } from "i18next";
-import { DARK_THEME, default as VanillaMindElixir, MindElixirData, MindElixirInstance, NodeObj, Operation, Theme, THEME as LIGHT_THEME } from "mind-elixir";
+import {
+    DARK_THEME, default as VanillaMindElixir, MindElixirData, NodeObj, Operation, Theme,
+    THEME as LIGHT_THEME
+} from "mind-elixir";
 import { ComponentChildren, createPortal, HTMLAttributes, RefObject } from "preact";
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 
 import { sanitizeNoteContentHtml } from "../../../services/sanitize_content";
 import toast from "../../../services/toast";
 import utils from "../../../services/utils";
-import { useColorScheme, useEditorSpacedUpdate, useEffectiveReadOnly, useSyncedRef, useTriliumEvent, useTriliumEvents, useTriliumOption } from "../../react/hooks";
+import { useTriliumEvent, useTriliumEvents } from "../../react/hooks/events";
+import { useSyncedRef } from "../../react/hooks/dom";
+import { useColorScheme, useTriliumOption } from "../../react/hooks/options";
+import { useEffectiveReadOnly } from "../../react/hooks/note_context";
+import { useEditorSpacedUpdate } from "../../react/hooks/editor";
 import { refToJQuerySelector } from "../../react/react_utils";
 import { TypeWidgetProps } from "../type_widget";
 import { renderMindMapPreviewSvg } from "./export";
@@ -67,14 +74,14 @@ function sanitizeMindMapNode(value: unknown): void {
 }
 
 interface MindElixirProps {
-    apiRef?: RefObject<MindElixirInstance | null>;
+    apiRef?: RefObject<VanillaMindElixir | null>;
     /**
      * Rendered in an overlay on top of the map, outside of the DOM managed by Mind Elixir, and given
      * the instance it stands over. Asked for rather than handed in, the instance being built after
      * the first render and again whenever the map has to be rebuilt — what is drawn over it follows
      * onto the new one instead of holding a reference to the one it was born with.
      */
-    children?: (mind: MindElixirInstance) => ComponentChildren;
+    children?: (mind: VanillaMindElixir) => ComponentChildren;
     containerProps?: Omit<HTMLAttributes<HTMLDivElement>, "ref">;
     containerRef?: RefObject<HTMLDivElement | null>;
     editable: boolean;
@@ -83,11 +90,11 @@ interface MindElixirProps {
 }
 
 export default function MindMap({ note, ntxId, noteContext }: TypeWidgetProps) {
-    const apiRef = useRef<MindElixirInstance>(null);
+    const apiRef = useRef<VanillaMindElixir>(null);
     const containerRef = useRef<HTMLDivElement>(null);
     const isReadOnly = useEffectiveReadOnly(note, noteContext);
     const [ selectedNodes, setSelectedNodes ] = useState<NodeObj[]>([]);
-
+    const loadedNoteIdRef = useRef<string | undefined>(undefined);
 
     const spacedUpdate = useEditorSpacedUpdate({
         note,
@@ -110,7 +117,7 @@ export default function MindMap({ note, ntxId, noteContext }: TypeWidgetProps) {
             };
         },
         onContentChange: (content) => {
-            let newContent: MindElixirData;
+            let newContent: MindElixirData | undefined;
 
             if (content) {
                 try {
@@ -125,7 +132,10 @@ export default function MindMap({ note, ntxId, noteContext }: TypeWidgetProps) {
                 // its own for any empty name it is given.
                 newContent = VanillaMindElixir.new(t("mind-map.new-topic"));
             }
-            apiRef.current?.init(newContent!);
+            if (!apiRef.current || !newContent) return;
+
+            loadMapData(apiRef.current, newContent, loadedNoteIdRef.current !== note?.noteId);
+            loadedNoteIdRef.current = note?.noteId;
         }
     });
 
@@ -198,9 +208,9 @@ export default function MindMap({ note, ntxId, noteContext }: TypeWidgetProps) {
     );
 }
 
-function MindElixir({ children, containerRef: externalContainerRef, containerProps, apiRef: externalApiRef, onChange, onSelectionChange, editable }: MindElixirProps) {
+export function MindElixir({ children, containerRef: externalContainerRef, containerProps, apiRef: externalApiRef, onChange, onSelectionChange, editable }: MindElixirProps) {
     const containerRef = useSyncedRef<HTMLDivElement>(externalContainerRef, null);
-    const apiRef = useRef<MindElixirInstance>(null);
+    const apiRef = useRef<VanillaMindElixir>(null);
     const [ locale ] = useTriliumOption("locale");
     const colorScheme = useColorScheme();
     const defaultColorScheme = useRef(colorScheme);
@@ -211,6 +221,7 @@ function MindElixir({ children, containerRef: externalContainerRef, containerPro
     function reinitialize() {
         if (!containerRef.current) return;
 
+        apiRef.current?.destroy();
         const mind = new VanillaMindElixir({
             el: containerRef.current,
             editable,
@@ -238,12 +249,11 @@ function MindElixir({ children, containerRef: externalContainerRef, containerPro
         setInstanceVersion((version) => version + 1);
     }
 
-    useEffect(() => {
-        reinitialize();
-        return () => {
-            apiRef.current?.destroy();
-            apiRef.current = null;
-        };
+    // The instance is built by the effect that follows `editable` and `locale`, which also runs on
+    // mount; this one only tears it down.
+    useEffect(() => () => {
+        apiRef.current?.destroy();
+        apiRef.current = null;
     }, []);
 
     // React to theme changes.
@@ -311,9 +321,42 @@ function MindElixir({ children, containerRef: externalContainerRef, containerPro
         };
 
         dressNodes();
-        mind.bus.addListener("linkDiv", dressNodes);
+        const { bus } = mind;
+        bus.addListener("linkDiv", dressNodes);
 
-        return () => mind.bus.removeListener("linkDiv", dressNodes);
+        // The instance is destroyed by the effect above, whose cleanup runs first and clears `bus`.
+        return () => bus.removeListener("linkDiv", dressNodes);
+    }, [ instanceVersion ]);
+
+    // A map laid out while hidden, such as in a quick-edit popup that is still loading, measures
+    // every node at 0: `linkDiv()` draws its branches with `NaN` coordinates and `toCenter()`
+    // misplaces it. Lay it out and center it again once its container gets a size.
+    useEffect(() => {
+        const mind = apiRef.current;
+        const container = containerRef.current;
+        if (!mind || !container) return;
+
+        const isLaidOutHidden = () =>
+            mind.nodes.querySelector(".me-root") !== null && mind.nodes.offsetHeight === 0;
+        let laidOutHidden = isLaidOutHidden();
+        const recordLayout = () => {
+            laidOutHidden = isLaidOutHidden();
+        };
+
+        const observer = new ResizeObserver(() => {
+            if (!laidOutHidden || mind.nodes.offsetHeight === 0) return;
+            mind.linkDiv();
+            mind.toCenter();
+        });
+
+        const { bus } = mind;
+        bus.addListener("linkDiv", recordLayout);
+        observer.observe(container);
+
+        return () => {
+            bus.removeListener("linkDiv", recordLayout);
+            observer.disconnect();
+        };
     }, [ instanceVersion ]);
 
     // Selection listener. The events only carry the nodes that were added to or removed from the
@@ -325,16 +368,17 @@ function MindElixir({ children, containerRef: externalContainerRef, containerPro
         const reportSelection = () => onSelectionChange(mind.currentNodes.map(({ nodeObj }) => nodeObj));
 
         reportSelection();
-        mind.bus.addListener("selectNodes", reportSelection);
-        mind.bus.addListener("unselectNodes", reportSelection);
+        const { bus } = mind;
+        bus.addListener("selectNodes", reportSelection);
+        bus.addListener("unselectNodes", reportSelection);
         // Operations edit the node objects in place, leaving the selection pointing at the same
         // ones. Report it again so that what is shown of a selected node follows its edits.
-        mind.bus.addListener("operation", reportSelection);
+        bus.addListener("operation", reportSelection);
 
         return () => {
-            mind.bus.removeListener("selectNodes", reportSelection);
-            mind.bus.removeListener("unselectNodes", reportSelection);
-            mind.bus.removeListener("operation", reportSelection);
+            bus.removeListener("selectNodes", reportSelection);
+            bus.removeListener("unselectNodes", reportSelection);
+            bus.removeListener("operation", reportSelection);
         };
     }, [ onSelectionChange, instanceVersion ]);
 
@@ -394,7 +438,7 @@ export function buildTheme(colorScheme: "light" | "dark", container: HTMLElement
  *
  * @param mind the instance to name after, taken over for as long as it lives.
  */
-export function localizeBuiltLabels(mind: MindElixirInstance) {
+export function localizeBuiltLabels(mind: VanillaMindElixir) {
     const { createArrow, createSummary, editSummary } = mind;
 
     mind.createArrow = function (from, to, options) {
@@ -447,4 +491,36 @@ function createOverlayElement() {
     const overlayEl = document.createElement("div");
     overlayEl.className = "mind-map-overlay";
     return overlayEl;
+}
+
+/**
+ * Loads a note's content into the map. `init()` runs only once per instance, so a map that already
+ * holds content is patched with `diffRefresh()`, which keeps unchanged nodes and the view. A change
+ * of note or of `direction` redraws the whole map instead, and a change of note also centers it.
+ * The undo history is cleared so that undo cannot revert the content that was loaded.
+ *
+ * @param isOtherNote whether the content belongs to a different note than the map currently shows.
+ */
+export function loadMapData(mind: VanillaMindElixir, data: MindElixirData, isOtherNote: boolean) {
+    if (!mind.nodeData) {
+        void mind.init(data);
+        return;
+    }
+
+    const isNewDirection = data.direction !== undefined && data.direction !== mind.direction;
+    if (data.direction !== undefined) {
+        mind.direction = data.direction;
+    }
+
+    // `diffRefresh()` exists only once `init()` has finished, which waits for `document.fonts.ready`.
+    if (isOtherNote || isNewDirection || !mind.pluginsInitialized) {
+        mind.refresh(data);
+    } else {
+        mind.diffRefresh(data);
+    }
+    mind.clearHistory?.();
+
+    if (isOtherNote) {
+        mind.toCenter();
+    }
 }

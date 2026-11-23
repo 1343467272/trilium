@@ -1,8 +1,11 @@
 import { type ComponentChildren, render } from "preact";
-import { useRef } from "preact/hooks";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { useRef, useState } from "preact/hooks";
+import { act } from "preact/test-utils";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
-import Dropdown, { type DropdownHandle, DropdownPanel, type DropdownPanelProps } from "./Dropdown";
+import Dropdown, {
+    type DropdownHandle, DropdownPanel, type DropdownPanelProps, preloadDropdownPopups
+} from "./Dropdown";
 import { FormDropdownSubmenu, FormListItem } from "./FormList";
 import { MenuItemRows } from "./Menu";
 
@@ -19,6 +22,8 @@ vi.mock("../../services/utils", async (importOriginal) => ({
     ...(await importOriginal<typeof import("../../services/utils")>()),
     isMobile: () => layout.onMobile
 }));
+
+beforeAll(() => preloadDropdownPopups());
 
 describe("Dropdown", () => {
     const host = document.createElement("div");
@@ -117,6 +122,46 @@ describe("Dropdown", () => {
         expect(picked).toEqual([ "JavaScript" ]);
     });
 
+    it("clears the filter from a button in place of its magnifier, and stays up with focus in the input", async () => {
+        const { toggle } = renderDropdown({
+            filterable: true, items: [ { title: "Python" }, { title: "JavaScript" } ]
+        }, null);
+        const key = (name: string) => {
+            const event = new KeyboardEvent("keydown", { key: name, bubbles: true, cancelable: true });
+            (document.activeElement ?? document.body).dispatchEvent(event);
+        };
+        const input = () => popup()?.querySelector<HTMLInputElement>("input.tn-menu-filter-input") ?? null;
+        const box = () => input()?.closest(".tn-menu-filter-box");
+        const magnifier = () => box()?.querySelector(".bx-search") ?? null;
+        const clearButton = () => box()?.querySelector<HTMLButtonElement>("button.bx-x") ?? null;
+        const rowCount = () => popup()?.querySelectorAll("li.dropdown-item").length;
+
+        click(toggle);
+        await vi.waitFor(() => expect(document.activeElement).toBe(popup()));
+        expect(magnifier()).not.toBeNull();
+        expect(clearButton()).toBeNull();
+
+        key("j");
+        await vi.waitFor(() => expect(document.activeElement).toBe(input()));
+        expect(rowCount()).toBe(1);
+        expect(magnifier()).toBeNull();
+        const button = clearButton();
+        if (!button) throw new Error("expected the clear button");
+        // A press keeps focus in the input.
+        const press = new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0 });
+        button.dispatchEvent(press);
+        expect(press.defaultPrevented).toBe(true);
+
+        click(button);
+        await vi.waitFor(() => expect(input()?.value).toBe(""));
+        expect(rowCount()).toBe(2);
+        expect(document.activeElement).toBe(input());
+        expect(clearButton()).toBeNull();
+        expect(magnifier()).not.toBeNull();
+        await new Promise((resolve) => setTimeout(resolve));
+        expect(popup()).not.toBeNull();
+    });
+
     it("filters the rows a filterable submenu of components draws from data, on a desktop and on a phone", async () => {
         for (const onMobile of [ false, true ]) {
             layout.onMobile = onMobile;
@@ -143,6 +188,9 @@ describe("Dropdown", () => {
             key(onMobile ? "Enter" : "ArrowRight");
             await vi.waitFor(() => expect(input()).not.toBeNull());
             expect(titles()).toEqual([ "Python", "JavaScript" ]);
+            // Above the list the rows scroll in, on a page as in a layer.
+            const header = input()?.closest(".tn-menu-filter");
+            expect(header?.nextElementSibling?.className).toBe("tn-menu-scroll");
 
             key("j");
             await vi.waitFor(() => expect(document.activeElement).toBe(input()));
@@ -223,6 +271,32 @@ describe("Dropdown", () => {
         await vi.waitFor(() => expect(popup()).toBeNull());
         const disabledToggle = host.querySelector<HTMLButtonElement>("button");
         expect(disabledToggle?.disabled).toBe(true);
+    });
+
+    it("waits to draw an open popup until its content is ready", async () => {
+        let setReady: (ready: boolean) => void = () => {};
+        function Harness() {
+            const [ ready, setReadyState ] = useState(false);
+            setReady = setReadyState;
+            return <DropdownPanel text="Sort" ready={ready}><p>Calendar</p></DropdownPanel>;
+        }
+        render(<Harness />, host);
+        const toggle = host.querySelector<HTMLButtonElement>("button");
+        expect(toggle).not.toBeNull();
+        if (toggle) click(toggle);
+        await vi.waitFor(() => expect(toggle?.getAttribute("aria-expanded")).toBe("true"));
+        expect(popup()).toBeNull();
+
+        act(() => setReady(true));
+        await vi.waitFor(() => expect(popup()?.textContent).toBe("Calendar"));
+    });
+
+    it("draws a disabled icon toggle muted, as an icon button", () => {
+        renderDropdown({ iconAction: true, disabled: true });
+        expect(host.querySelector("button")?.classList.contains("disabled")).toBe(true);
+
+        renderDropdown({ iconAction: true });
+        expect(host.querySelector("button")?.classList.contains("disabled")).toBe(false);
     });
 
     describe("content", () => {
@@ -386,6 +460,26 @@ describe("Dropdown", () => {
             await vi.waitFor(() => expect(popup()).toBeNull());
             expect(restore).toHaveBeenCalledTimes(1);
         });
+
+        it("suspends the focus traps before a bottom sheet, placed at once, takes focus", async () => {
+            layout.onMobile = true;
+            const order: string[] = [];
+            focusTraps.suspend.mockImplementation(() => {
+                order.push("suspend");
+                return () => {};
+            });
+            const focus = HTMLElement.prototype.focus;
+            vi.spyOn(HTMLElement.prototype, "focus").mockImplementation(function (this: HTMLElement, options) {
+                if (this.closest(".tn-popup")) order.push("popup focus");
+                focus.call(this, options);
+            });
+            const { toggle } = renderDropdown({ mobileBottomSheet: true });
+
+            click(toggle);
+            await vi.waitFor(() => expect(popup()?.contains(document.activeElement)).toBe(true));
+            expect(order.at(0)).toBe("suspend");
+            expect(order).toContain("popup focus");
+        });
     });
 
     describe("as a menu", () => {
@@ -498,11 +592,13 @@ describe("Dropdown", () => {
             // Nothing placed it beside the toggle; the `.mobile-bottom-menu` rules do.
             expect([ popup()?.style.left, popup()?.style.top ]).toEqual([ "", "" ]);
             expect([ ...cover.classList ]).toEqual([ "show", "global-menu-cover" ]);
+            expect(document.body.classList.contains("backdrop-open")).toBe(true);
 
             // A tap on the cover is one outside the menu.
             cover.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
             await vi.waitFor(() => expect(popup()).toBeNull());
             expect(cover.classList.contains("show")).toBe(false);
+            expect(document.body.classList.contains("backdrop-open")).toBe(false);
             cover.remove();
         });
 
@@ -519,6 +615,26 @@ describe("Dropdown", () => {
             expect(popup()?.style.maxHeight).not.toBe("");
             expect([ ...cover.classList ]).toEqual([ "show", "global-menu-cover" ]);
             cover.remove();
+        });
+
+        it("leaves a launcher bar menu to the stylesheet on a phone, and beside its toggle on a tablet", async () => {
+            layout.onMobile = true;
+            const { toggle } = renderDropdown({ mobileBackdrop: true });
+
+            click(toggle);
+            await vi.waitFor(() => expect(popup()?.style.visibility).toBe("visible"));
+            expect(popup()?.classList.contains("mobile-bottom-menu")).toBe(false);
+            const { left, top, maxHeight } = popup()?.style ?? {};
+            expect([ left, top, maxHeight ]).toEqual([ "", "", "" ]);
+            expect(document.body.classList.contains("backdrop-open")).toBe(true);
+
+            click(toggle);
+            await vi.waitFor(() => expect(popup()).toBeNull());
+            layout.narrow = false;
+            for (const listener of layout.onChange) listener();
+            click(toggle);
+            await vi.waitFor(() => expect(popup()?.style.top).toBe("82px"));
+            expect(popup()?.style.maxHeight).not.toBe("");
         });
 
         it("turns into a placed menu and back as a tablet turns while it is open", async () => {
@@ -552,6 +668,7 @@ describe("Dropdown", () => {
             expect(popup()?.classList.contains("mobile-bottom-menu")).toBe(false);
             expect(popup()?.style.top).toBe("82px");
             expect(cover.classList.contains("show")).toBe(false);
+            expect(document.body.classList.contains("backdrop-open")).toBe(false);
             cover.remove();
         });
 
@@ -562,6 +679,11 @@ describe("Dropdown", () => {
             await vi.waitFor(() => expect(popup()).not.toBeNull());
             const drawn = [ ...popup()?.parentElement?.children ?? [] ].map((child) => child.classList[0]);
             expect(drawn).toEqual([ "tn-dropdown-backdrop", "tn-popup" ]);
+            expect(document.body.classList.contains("backdrop-open")).toBe(true);
+
+            click(toggle);
+            await vi.waitFor(() => expect(popup()).toBeNull());
+            expect(document.body.classList.contains("backdrop-open")).toBe(false);
         });
     });
 });

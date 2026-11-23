@@ -1,6 +1,6 @@
 
 
-import type { OptionNames, UserFont } from "@triliumnext/commons";
+import type { OptionNames, UserFont, UserTheme } from "@triliumnext/commons";
 import type { Request } from "../../http_interface";
 
 import attributeService from "../../services/attributes.js";
@@ -12,14 +12,6 @@ import searchService from "../../services/search/services/search.js";
 import { getSql } from "../../services/sql/index.js";
 import syncOptions from "../../services/sync_options.js";
 import { ValidationError } from "../../errors.js";
-
-interface UserTheme {
-    val: string; // value of the theme, used in the URL
-    title: string; // title of the theme, displayed in the UI
-    noteId: string; // ID of the note containing the theme
-    icon: string; // icon class of the note
-    appThemeBase?: "next" | "next-light" | "next-dark"; // optional base theme to load underneath the custom theme
-}
 
 // options allowed to be updated directly in the Options dialog
 const ALLOWED_OPTIONS = new Set<OptionNames>([
@@ -63,7 +55,14 @@ const ALLOWED_OPTIONS = new Set<OptionNames>([
     "openNoteContexts",
     "vimKeymapEnabled",
     "codeLineWrapEnabled",
+    "codeLineNumbersEnabled",
+    "transcriptCleanupEnabled",
+    "transcriptionEnabled",
+    "transcriptionModel",
+    "transcriptionSpeakersEnabled",
+    "transcriptionKeepRecordings",
     "codeNotesMimeTypes",
+    "codeNotesMimeTypesSortAlphabetically",
     "contentManagerSortOrder",
     "contentManagerViewMode",
     "spellCheckEnabled",
@@ -75,16 +74,19 @@ const ALLOWED_OPTIONS = new Set<OptionNames>([
     "imagePngHandling",
     "imageConversionQuality",
     "leftPaneWidth",
+    "mobileLeftPaneWidth",
     "leftPaneVisible",
     "rightPaneWidth",
     "rightPaneCollapsedItems",
     "rightPaneSelectedTab",
     "rightPaneNoteMapType",
     "rightPaneVisible",
+    "presentationSidebarVisible",
     "nativeTitleBarVisible",
     "headingStyle",
     "autoCollapseNoteTree",
     "treeScrollFollowNavigation",
+    "treeDensity",
     "autoReadonlySizeText",
     "customDateTimeFormat",
     "autoReadonlySizeCode",
@@ -104,7 +106,6 @@ const ALLOWED_OPTIONS = new Set<OptionNames>([
     "centerContent",
     "compressImages",
     "downloadImagesAutomatically",
-    "minTocHeadings",
     "highlightsList",
     "checkForUpdates",
     "disableTray",
@@ -133,13 +134,25 @@ const ALLOWED_OPTIONS = new Set<OptionNames>([
     "textNoteCustomReplacements",
     "textNoteEmojiCompletionEnabled",
     "textNoteCompletionEnabled",
+    "textNoteCompletionLinkTargetsEnabled",
     "textNoteSlashCommandsEnabled",
     "mathFieldEnabled",
     "textNoteContentHintsEnabled",
+    "textNoteScrollRailHighlightsEnabled",
     "textNoteAutoLinkPreviewsEnabled",
+    "textNoteLinkTitleRetrievalEnabled",
+    "textNoteLinkDetailsRetrievalEnabled",
+    "textNoteStickyTableHeadersEnabled",
     "textNoteHtmlSupportEnabled",
+    "textNoteVimModeEnabled",
+    "textNoteVimModeNoticeShown",
+    "textNoteVimInsertKeysEnabled",
+    "textNoteVimStartupCommands",
+    "vimModeHintsEnabled",
+    "vimModeHintStripShown",
     "clipboardImageEmbedEnabled",
     "layoutOrientation",
+    "noteTitleStyle",
     "backgroundEffects",
     "allowedHtmlTags",
     "cleanupToolOptions",
@@ -147,17 +160,18 @@ const ALLOWED_OPTIONS = new Set<OptionNames>([
     "searchEnableFuzzyMatching",
     "searchAutocompleteFuzzy",
     "searchResultsPageSize",
+    "canvasThinStroke",
     "redirectBareDomain",
     "showLoginInShareTheme",
     "splitEditorOrientation",
     "seenCallToActions",
     "experimentalFeatures",
-    "newLayout",
     "mfaMethod",
     // LLM options
     "aiEnabled",
     "llmProviders",
     "llmWebSearchProvider",
+    "llmPermissionMode",
     "aiAssistantModel",
     "mcpEnabled",
     // OCR options

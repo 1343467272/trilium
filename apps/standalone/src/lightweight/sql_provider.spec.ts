@@ -160,6 +160,15 @@ describe("WasmStatement reads and writes", () => {
             .toEqual(["alice", "bob"]);
     });
 
+    it("iterate() resets the statement when a loop exits early", () => {
+        const stmt = provider.prepare("SELECT name FROM t ORDER BY name /* it-break */");
+        for (const row of stmt.iterate()) {
+            expect(row).toEqual({ name: "alice" });
+            break;
+        }
+        expect([...stmt.iterate()]).toEqual([{ name: "alice" }, { name: "bob" }]);
+    });
+
     it("toggling raw/pluck off restores object rows", () => {
         const stmt = provider.prepare("SELECT name FROM t WHERE name = ? /* toggle */").raw().pluck();
         stmt.raw(false).pluck(false);
@@ -620,6 +629,22 @@ describe("waitForSahPoolRelease", () => {
             pollMs: 1,
             deadlineMs: 25
         })).resolves.toBe(false);
+    });
+
+    it("falls back to the origin's private filesystem, and does not wait where there is none", async () => {
+        try {
+            for (const missing of [ undefined, {}, { storage: {} } ]) {
+                vi.stubGlobal("navigator", missing);
+                await expect(waitForSahPoolRelease()).resolves.toBe(true);
+            }
+
+            const getDirectory = vi.fn(fakeRootWith([]));
+            vi.stubGlobal("navigator", { storage: { getDirectory } });
+            await expect(waitForSahPoolRelease()).resolves.toBe(true);
+            expect(getDirectory).toHaveBeenCalledOnce();
+        } finally {
+            vi.unstubAllGlobals();
+        }
     });
 
     it("treats a probe failure other than a held lock as nothing to wait for", async () => {

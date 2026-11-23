@@ -29,13 +29,17 @@ import { useEffect, useRef, useState } from "preact/hooks";
 import type NoteContext from "../../../components/note_context";
 import { t } from "../../../services/i18n";
 import { isMobile } from "../../../services/utils";
-import { useColorScheme, useEffectiveReadOnly, useTriliumEvent, useTriliumEvents } from "../../react/hooks";
+import { useTriliumEvent, useTriliumEvents } from "../../react/hooks/events";
+import { useColorScheme } from "../../react/hooks/options";
+import { useEffectiveReadOnly } from "../../react/hooks/note_context";
 import { TypeWidgetProps } from "../type_widget";
 import useStripPastedFontFamily from "./clipboard";
 import useSpreadsheetExport from "./export";
 import { loadUniverLocale, UniverLocale } from "./locales";
+import { useWorkbookFile, type WorkbookFileSource } from "./loading";
 import useClampEdgeNavigation from "./navigation";
 import usePersistence from "./persistence";
+import useFixRadixPortals from "./radix_portals";
 
 function buildReadOnlyLocaleOverrides() {
     const msg = t("spreadsheet.read-only");
@@ -100,7 +104,7 @@ function SpreadsheetEditor({ note, noteContext, readOnly, locale }: TypeWidgetPr
     useAnchorCellEditorOnScroll(apiRef);
     useStripPastedFontFamily(apiRef);
     useDarkMode(apiRef);
-    const spacedUpdate = usePersistence(note, noteContext, apiRef, containerRef);
+    const spacedUpdate = usePersistence(note, noteContext, apiRef, containerRef, readOnly);
     useSpreadsheetExport(apiRef, note, noteContext, spacedUpdate);
     useSearchIntegration(apiRef, noteContext);
     useDismissDialogsOnNoteSwitch(apiRef);
@@ -117,36 +121,38 @@ function SpreadsheetEditor({ note, noteContext, readOnly, locale }: TypeWidgetPr
     return <div ref={containerRef} className="spreadsheet" />;
 }
 
-/**
- * Univer's design system uses Radix UI primitives whose DismissableLayer detects
- * "outside" clicks/focus via document-level pointerdown/focusin listeners combined
- * with a React capture-phase flag. In React, portal events bubble through the
- * component tree so onPointerDownCapture fires on the DismissableLayer, setting an
- * internal flag that suppresses the "outside" detection. With preact/compat, portal
- * events don't bubble through the React tree, so the flag never gets set and Radix
- * immediately dismisses popups.
- *
- * Radix dispatches cancelable custom events ("dismissableLayer.pointerDownOutside"
- * and "dismissableLayer.focusOutside") on the original event target before calling
- * onDismiss. The dismiss is skipped if defaultPrevented is true. This hook intercepts
- * those custom events in the capture phase and prevents default when the target is
- * inside a Radix portal, restoring the expected behavior.
- */
-function useFixRadixPortals() {
-    useEffect(() => {
-        function preventDismiss(e: Event) {
-            if (e.target instanceof HTMLElement && e.target.closest("[id^='radix-']")) {
-                e.preventDefault();
-            }
-        }
+interface SpreadsheetFileProps extends Omit<WorkbookFileSource, "componentId"> {
+    componentId?: string;
+    onError: () => void;
+}
 
-        document.addEventListener("dismissableLayer.pointerDownOutside", preventDismiss, true);
-        document.addEventListener("dismissableLayer.focusOutside", preventDismiss, true);
-        return () => {
-            document.removeEventListener("dismissableLayer.pointerDownOutside", preventDismiss, true);
-            document.removeEventListener("dismissableLayer.focusOutside", preventDismiss, true);
-        };
-    }, []);
+/**
+ * Shows the workbook of an XLSX file note or attachment in a read-only spreadsheet. Calls `onError`
+ * when the file cannot be read as a workbook, so the caller can fall back to the HTML preview.
+ */
+export function SpreadsheetFile(props: SpreadsheetFileProps) {
+    const locale = useUniverLocale();
+
+    if (!locale) {
+        return <div className="spreadsheet" />;
+    }
+
+    return <SpreadsheetFileViewer {...props} locale={locale} />;
+}
+
+function SpreadsheetFileViewer({ entity, noteContext, componentId, isVisible, locale, onError }: SpreadsheetFileProps & { locale: UniverLocale }) {
+    const containerRef = useRef<HTMLDivElement>(null);
+    const apiRef = useRef<FUniver | undefined>(undefined);
+
+    useInitializeSpreadsheet(containerRef, apiRef, true, locale);
+    useClampEdgeNavigation(apiRef);
+    useDarkMode(apiRef);
+    useWorkbookFile({ entity, noteContext, componentId, isVisible }, apiRef, containerRef, onError);
+    useSearchIntegration(apiRef, noteContext);
+    useDismissDialogsOnNoteSwitch(apiRef);
+    useFixRadixPortals();
+
+    return <div ref={containerRef} className="spreadsheet" />;
 }
 
 // Univer binds Ctrl+R to fill-right and Ctrl+D to fill-down, which shadow the
@@ -303,18 +309,6 @@ function useInitializeSpreadsheet(containerRef: RefObject<HTMLDivElement | null>
             // (see toMobilePresets); the remaining feature plugins are platform-agnostic.
             presets: isMobile() ? toMobilePresets(presets) : presets,
         });
-        if (readOnly) {
-            univerAPI.addEvent(univerAPI.Event.LifeCycleChanged, ({ stage }) => {
-                if (stage === univerAPI.Enum.LifecycleStages.Rendered) {
-                    const workbook = univerAPI.getActiveWorkbook();
-                    if (!workbook) return;
-
-                    workbook.disableSelection();
-                    workbook.getWorkbookPermission().setReadOnly();
-                }
-            });
-        }
-
         apiRef.current = univerAPI;
         return () => univerAPI.dispose();
     }, [ apiRef, containerRef, readOnly, locale ]);
@@ -363,9 +357,9 @@ function useDarkMode(apiRef: RefObject<FUniver | undefined>) {
     }, [ colorScheme, apiRef ]);
 }
 
-function useSearchIntegration(apiRef: RefObject<FUniver | undefined>, noteContext: NoteContext | undefined) {
-    useTriliumEvent("findInText", () => {
-        if (!noteContext?.isActive()) return;
+function useSearchIntegration(apiRef: RefObject<FUniver | undefined>, noteContext: NoteContext | null | undefined) {
+    useTriliumEvent("findInText", ({ ntxId }) => {
+        if (!noteContext?.isCommandTarget(ntxId)) return;
 
         const univerAPI = apiRef.current;
         if (!univerAPI) return;

@@ -1,4 +1,5 @@
-import { customFontFamily, customFontNoteId, type UserFont } from "@triliumnext/commons";
+import type { UserFont } from "@triliumnext/commons";
+import { customFontFamily, customFontNoteId } from "@triliumnext/commons/src/lib/custom_fonts.js";
 
 import froca from "./froca.js";
 import type LoadResults from "./load_results.js";
@@ -27,7 +28,7 @@ const loadingFonts = new Map<string, string>();
 
 /**
  * Registers the user's own fonts that the font options name, so the families the fonts stylesheet
- * declares (see `getFontCss`) resolve to the files those notes hold. Fonts no longer named by any
+ * declares (see `buildFontCss()`) resolve to the files those notes hold. Fonts no longer named by any
  * option are unregistered.
  *
  * Lives here rather than beside the stylesheet in `font.ts` because that module is loaded by
@@ -119,10 +120,9 @@ export async function getCustomFonts() {
  * `document.fonts.delete()` once it is done with it.
  *
  * The bytes are fetched and handed to `FontFace` rather than referenced by their API URL: a `url()`
- * source is loaded by the engine itself, outside the host document's service worker and Capacitor
- * request interceptors, which is where standalone and iOS answer an API request from (see
- * `loadIconPackFont`). `version` — a blobId — keeps a replaced file from being served from the
- * cache of the one it replaced.
+ * source is loaded by the engine itself, outside the host document's service worker, which is where
+ * standalone answers an API request from (see `loadIconPackFont`). `version` — a blobId — keeps a
+ * replaced file from being served from the cache of the one it replaced.
  */
 export async function registerFontNote(noteId: string, family: string, version: string) {
     // Resolved against the host document's base URL, which also covers Electron's `trilium-app://`.

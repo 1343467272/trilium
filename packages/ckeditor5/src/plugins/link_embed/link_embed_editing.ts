@@ -1,10 +1,19 @@
-import { Plugin, toWidget, viewToModelPositionOutsideModelElement, Widget } from 'ckeditor5';
-import { preventCKEditorHandling } from '../widget_utils.js';
+import { LINK_PREVIEW_DATA_ATTRIBUTES } from '@triliumnext/commons';
+import { safeLinkPreviewHref } from "@triliumnext/commons/src/lib/link_embed.js";
+import {
+    Plugin, toWidget, type ViewContainerElement, type ViewDowncastWriter, type ViewElement,
+    viewToModelPositionOutsideModelElement, Widget
+} from 'ckeditor5';
+import { CLIPBOARD_PLAIN_TEXT_PROPERTY } from "../clipboard_plain_text_indent.js";
+import ColoredWidgets from "../colored_widgets.js";
+import ContentEmbed from '../content_embed/content_embed.js';
+import {
+    dragWidgetFromUi, preventCKEditorHandling, restoreRendererFocusOnInput
+} from '../widget_utils.js';
 import {
     CHANGE_LINK_DISPLAY_COMMAND,
-    CHANGE_LINK_PREVIEW_TITLE_COMMAND,
     ChangeLinkDisplayCommand,
-    ChangeLinkPreviewTitleCommand,
+    getLinkEmbedHost,
     InsertLinkEmbedCommand,
     LINK_EMBED_COMMAND,
     META_KEYS,
@@ -14,16 +23,20 @@ import {
 } from './link_embed_commands.js';
 
 /**
- * Schema, converters and command registration for linkEmbed (block) and linkMention (inline).
+ * Schema, converters and command registration for linkEmbed (block) and linkMention (inline). The
+ * embed of a URL with a video is a video embed of `ContentEmbed`.
  */
 export default class LinkEmbedEditing extends Plugin {
     static get requires() {
-        return [Widget];
+        return [Widget, ContentEmbed, ColoredWidgets];
     }
 
     init() {
         this._defineSchema();
         this._defineConverters();
+        const coloredWidgets = this.editor.plugins.get(ColoredWidgets);
+        coloredWidgets.register("linkEmbed");
+        coloredWidgets.register("linkMention");
 
         // linkMention is an empty inline object whose editing view holds a UIElement child, so a
         // view position inside the rendered widget would otherwise resolve to a degenerate model
@@ -37,7 +50,8 @@ export default class LinkEmbedEditing extends Plugin {
         this.editor.commands.add(LINK_EMBED_COMMAND, new InsertLinkEmbedCommand(this.editor));
         this.editor.commands.add(CHANGE_LINK_DISPLAY_COMMAND, new ChangeLinkDisplayCommand(this.editor));
         this.editor.commands.add(REMOVE_LINK_EMBED_COMMAND, new RemoveLinkEmbedCommand(this.editor));
-        this.editor.commands.add(CHANGE_LINK_PREVIEW_TITLE_COMMAND, new ChangeLinkPreviewTitleCommand(this.editor));
+
+        restoreRendererFocusOnInput(this);
     }
 
     _defineSchema() {
@@ -45,7 +59,8 @@ export default class LinkEmbedEditing extends Plugin {
 
         schema.register('linkEmbed', {
             isObject: true,
-            allowAttributes: ['url', 'embedType', 'title', 'description', 'favicon', 'siteName', 'image'],
+            isBlock: true,
+            allowAttributes: META_KEYS,
             allowWhere: '$block'
         });
 
@@ -53,7 +68,7 @@ export default class LinkEmbedEditing extends Plugin {
             isInline: true,
             isObject: true,
             // Stores all metadata so we can switch to card/embed without re-fetching.
-            allowAttributes: ['url', 'embedType', 'title', 'description', 'favicon', 'siteName', 'image'],
+            allowAttributes: META_KEYS,
             allowWhere: '$text'
         });
     }
@@ -66,26 +81,22 @@ export default class LinkEmbedEditing extends Plugin {
 
         conversion.for('upcast').elementToElement({
             model: (viewElement, { writer }) => {
-                return writer.createElement('linkEmbed', {
-                    url: viewElement.getAttribute('data-url'),
-                    embedType: viewElement.getAttribute('data-embed-type'),
-                    title: viewElement.getAttribute('data-title'),
-                    description: viewElement.getAttribute('data-description'),
-                    favicon: viewElement.getAttribute('data-favicon'),
-                    siteName: viewElement.getAttribute('data-site-name'),
-                    image: viewElement.getAttribute('data-image')
-                });
+                return writer.createElement('linkEmbed', metadataModelAttributes(viewElement));
             },
             view: { name: 'section', classes: 'link-embed' }
         });
 
         conversion.for('dataDowncast').elementToElement({
             model: 'linkEmbed',
-            view: (modelElement, { writer }) => {
-                return writer.createContainerElement(
+            view: (modelElement, { writer, options }) => {
+                const section = writer.createContainerElement(
                     'section',
                     metadataViewAttributes(modelElement, 'link-embed', ['url', 'embedType'])
                 );
+                if (options.isClipboardPipeline) {
+                    addClipboardLink(writer, section, modelElement);
+                }
+                return section;
             }
         });
 
@@ -99,6 +110,7 @@ export default class LinkEmbedEditing extends Plugin {
                 const favicon = modelElement.getAttribute('favicon') as string | undefined;
                 const siteName = modelElement.getAttribute('siteName') as string | undefined;
                 const image = modelElement.getAttribute('image') as string | undefined;
+                const aspectRatio = modelElement.getAttribute('aspectRatio') as string | undefined;
 
                 const section = writer.createContainerElement(
                     'section',
@@ -110,18 +122,17 @@ export default class LinkEmbedEditing extends Plugin {
                     'data-cke-ignore-events': 'true'
                 }, function (domDocument) {
                     const domElement = this.toDomElement(domDocument);
-                    const editorEl = editor.editing.view.getDomRoot();
-                    const component = glob.getComponentByEl<EditorComponent>(editorEl);
-                    component.renderLinkEmbed(domElement, { url, embedType, title, description, favicon, siteName, image }, true);
+                    getLinkEmbedHost(editor).renderEmbed(domElement, {
+                        url, embedType, title, description, favicon, siteName, image, aspectRatio
+                    }, true);
                     preventCKEditorHandling(domElement, editor);
+                    dragWidgetFromUi(domElement, editor);
                     return domElement;
                 });
 
                 writer.insert(writer.createPositionAt(section, 0), preview);
                 // hasSelectionHandle gives the block preview (both card and video) CKEditor's own
-                // widget drag handle — the same one tables use. Without a handle the user grabs the
-                // preview's own content and the browser's native drag tears the image and text apart;
-                // the handle moves the whole widget atomically instead.
+                // widget drag handle, the same one tables use.
                 // The label is announced by screen readers; lowercase to match the "image widget" /
                 // "table widget" labels CKEditor gives its own widgets.
                 return toWidget(section, writer, { label: editor.t('link embed widget'), hasSelectionHandle: true });
@@ -132,26 +143,22 @@ export default class LinkEmbedEditing extends Plugin {
 
         conversion.for('upcast').elementToElement({
             model: (viewElement, { writer }) => {
-                return writer.createElement('linkMention', {
-                    url: viewElement.getAttribute('data-url'),
-                    embedType: viewElement.getAttribute('data-embed-type'),
-                    title: viewElement.getAttribute('data-title'),
-                    description: viewElement.getAttribute('data-description'),
-                    favicon: viewElement.getAttribute('data-favicon'),
-                    siteName: viewElement.getAttribute('data-site-name'),
-                    image: viewElement.getAttribute('data-image')
-                });
+                return writer.createElement('linkMention', metadataModelAttributes(viewElement));
             },
             view: { name: 'span', classes: 'link-mention' }
         });
 
         conversion.for('dataDowncast').elementToElement({
             model: 'linkMention',
-            view: (modelElement, { writer }) => {
-                return writer.createContainerElement(
+            view: (modelElement, { writer, options }) => {
+                const span = writer.createContainerElement(
                     'span',
                     metadataViewAttributes(modelElement, 'link-mention', ['url'])
                 );
+                if (options.isClipboardPipeline) {
+                    addClipboardLink(writer, span, modelElement);
+                }
+                return span;
             }
         });
 
@@ -172,10 +179,9 @@ export default class LinkEmbedEditing extends Plugin {
                     'data-cke-ignore-events': 'true'
                 }, function (domDocument) {
                     const domElement = this.toDomElement(domDocument);
-                    const editorEl = editor.editing.view.getDomRoot();
-                    const component = glob.getComponentByEl<EditorComponent>(editorEl);
-                    component.renderLinkMention(domElement, { url, title, favicon }, true);
+                    getLinkEmbedHost(editor).renderMention(domElement, { url, title, favicon }, true);
                     preventCKEditorHandling(domElement, editor);
+                    dragWidgetFromUi(domElement, editor);
                     return domElement;
                 });
 
@@ -186,15 +192,30 @@ export default class LinkEmbedEditing extends Plugin {
     }
 }
 
-const DATA_ATTR_NAMES: Record<MetaKey, string> = {
-    url: 'data-url',
-    embedType: 'data-embed-type',
-    title: 'data-title',
-    description: 'data-description',
-    favicon: 'data-favicon',
-    siteName: 'data-site-name',
-    image: 'data-image'
-};
+/**
+ * Gives a link preview on the clipboard a link to its URL, which applications that do not know
+ * the preview paste, and the URL as its `text/plain` form. Upcast ignores the link.
+ */
+function addClipboardLink(
+    writer: ViewDowncastWriter,
+    wrapper: ViewContainerElement,
+    modelElement: { getAttribute(key: string): unknown }
+) {
+    const url = modelElement.getAttribute("url") as string;
+    const title = modelElement.getAttribute("title") as string | undefined;
+    const link = writer.createContainerElement(
+        "a", { href: safeLinkPreviewHref(url) }, writer.createText(title || url)
+    );
+    writer.insert(writer.createPositionAt(wrapper, 0), link);
+    writer.setCustomProperty(CLIPBOARD_PLAIN_TEXT_PROPERTY, url, wrapper);
+}
+
+/** The model attributes of a linkEmbed/linkMention element, read from its `data-*` attributes. */
+function metadataModelAttributes(viewElement: ViewElement) {
+    return Object.fromEntries(META_KEYS.map((key) => [
+        key, viewElement.getAttribute(LINK_PREVIEW_DATA_ATTRIBUTES[key])
+    ]));
+}
 
 /**
  * Builds the widget wrapper's class + `data-*` attributes from a linkEmbed/linkMention element.
@@ -215,7 +236,7 @@ function metadataViewAttributes(
     for (const key of META_KEYS) {
         const val = modelElement.getAttribute(key) as string | undefined;
         if (val || requiredKeys.includes(key)) {
-            attrs[DATA_ATTR_NAMES[key]] = val as string;
+            attrs[LINK_PREVIEW_DATA_ATTRIBUTES[key]] = val as string;
         }
     }
     return attrs;

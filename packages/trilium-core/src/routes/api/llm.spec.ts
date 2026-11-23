@@ -13,11 +13,15 @@ const state = vi.hoisted(() => ({
     chatThrows: undefined as unknown,
     /** The signal the completion was handed, so the abort route can be asserted. */
     signal: undefined as AbortSignal | undefined,
+    /** The stream id the completion was handed. */
+    streamId: undefined as string | undefined,
     /** Keeps the faked completion running until it is aborted, as a real one would. */
     holdUntilAborted: false,
     /** Every message broadcast while a stream ran. */
     sent: [] as WebSocketMessage[]
 }));
+
+const searchWeb = vi.hoisted(() => vi.fn());
 
 // The route reaches the provider registry through a dynamic import, so that the
 // AI SDK stays out of the startup chunk; mocking the module id covers it either way.
@@ -29,8 +33,11 @@ vi.mock("../../services/llm/index.js", () => ({
     }
 }));
 
+vi.mock("../../services/llm/web_search.js", () => ({ searchWeb }));
+
 vi.mock("../../services/llm/chat.js", () => ({
-    async *runChat(_messages: unknown, _config: unknown, signal?: AbortSignal) {
+    async *runChat(streamId: string, _messages: unknown, _config: unknown, signal?: AbortSignal) {
+        state.streamId = streamId;
         state.signal = signal;
         if (state.chatThrows !== undefined) throw state.chatThrows;
         for (const c of state.chunks) yield c;
@@ -40,10 +47,11 @@ vi.mock("../../services/llm/chat.js", () => ({
     }
 }));
 
+import { closeToolApprovals, openToolApprovals } from "../../services/llm/tool_approval.js";
 import { getLog } from "../../services/log.js";
 import ws from "../../services/ws.js";
 
-import { abortChatStream, getProviderModels, startChatStream } from "./llm.js";
+import { abortChatStream, answerToolCall, getProviderModels, startChatStream, testSearchProvider } from "./llm.js";
 
 /**
  * Poll until the completion — which runs detached from the request that started
@@ -91,6 +99,7 @@ afterEach(() => {
         chunks: [],
         chatThrows: undefined,
         signal: undefined,
+        streamId: undefined,
         holdUntilAborted: false,
         sent: []
     });
@@ -124,6 +133,31 @@ describe("getProviderModels", () => {
     });
 });
 
+describe("testSearchProvider", () => {
+    const result = (n: number) => ({ title: `Page ${n}`, url: `https://example.com/${n}`, snippet: "" });
+
+    it("runs the test query with the credentials in the body and returns the first three results", async () => {
+        searchWeb.mockResolvedValueOnce([ result(1), result(2), result(3), result(4) ]);
+        await expect(testSearchProvider({ body: { provider: "searxng", baseURL: "http://localhost:8888" } }))
+            .resolves.toEqual({ results: [ result(1), result(2), result(3) ] });
+        expect(searchWeb).toHaveBeenCalledWith(
+            { provider: "searxng", apiKey: "", baseURL: "http://localhost:8888" }, "Trilium Notes");
+    });
+
+    it("rejects a missing provider and reports a search failure as a validation error", async () => {
+        await expect(testSearchProvider({ body: {} as never })).rejects.toThrow(/provider is required/);
+        await expect(testSearchProvider({} as never)).rejects.toThrow(/provider is required/);
+
+        searchWeb.mockRejectedValueOnce(new Error("Could not reach the search provider: connect ECONNREFUSED 127.0.0.1:8888"));
+        await expect(testSearchProvider({ body: { provider: "searxng", baseURL: "http://localhost:8888" } }))
+            .rejects.toMatchObject({ name: "ValidationError", message: "Could not reach the search provider: connect ECONNREFUSED 127.0.0.1:8888" });
+
+        searchWeb.mockRejectedValueOnce("socket hang up");
+        await expect(testSearchProvider({ body: { provider: "searxng" } }))
+            .rejects.toMatchObject({ name: "ValidationError", message: "socket hang up" });
+    });
+});
+
 describe("startChatStream", () => {
     it("answers immediately, then broadcasts the chunks under the client's id and an end marker", async () => {
         state.chunks = [{ type: "text", content: "Hi" }, { type: "done" }];
@@ -138,12 +172,14 @@ describe("startChatStream", () => {
             { type: "llm-stream", streamId: "s1", chunk: { type: "done" } },
             { type: "llm-stream-end", streamId: "s1" }
         ]);
+        expect(state.streamId).toBe("s1");
     });
 
     it("rejects a request that could not be matched back to a stream", () => {
         expect(() => startChatStream({ body: { streamId: "", messages: HELLO } })).toThrow(/streamId is required/);
         expect(() => startChatStream({ body: { streamId: "s1", messages: [] } })).toThrow(/messages array is required/);
         expect(() => startChatStream({ body: {} as never })).toThrow(/streamId is required/);
+        expect(() => startChatStream({ body: undefined as never })).toThrow(/streamId is required/);
     });
 
     it("refuses to reuse the id of a stream still running, and frees it once it ends", async () => {
@@ -197,5 +233,39 @@ describe("abortChatStream", () => {
     it("ignores an id that is not running, and a request with no id at all", () => {
         expect(() => abortChatStream({ body: { streamId: "nope" } })).not.toThrow();
         expect(() => abortChatStream({ body: {} })).not.toThrow();
+    });
+});
+
+describe("answerToolCall", () => {
+    afterEach(() => closeToolApprovals("s1"));
+
+    it("settles the call waiting in the turn, and reports an answer that came too late", async () => {
+        const approvals = openToolApprovals("s1");
+        const decision = approvals?.request({ toolCallId: "c1", toolName: "create_note", toolInput: {} });
+
+        expect(answerToolCall({ body: { streamId: "s1", toolCallId: "c1", approved: true } })).toEqual({ answered: true });
+        await expect(decision).resolves.toBe(true);
+
+        // Answered already, a call of another turn, and a turn that has ended.
+        expect(answerToolCall({ body: { streamId: "s1", toolCallId: "c1", approved: false } })).toEqual({ answered: false });
+        expect(answerToolCall({ body: { streamId: "s2", toolCallId: "c1", approved: true } })).toEqual({ answered: false });
+    });
+
+    it("allows the tool for the rest of the turn when the answer is scoped to the chat", async () => {
+        const approvals = openToolApprovals("s1");
+        const decision = approvals?.request({ toolCallId: "c1", toolName: "create_note", toolInput: {} });
+
+        expect(answerToolCall({ body: { streamId: "s1", toolCallId: "c1", approved: true, scope: "chat" } })).toEqual({ answered: true });
+        await expect(decision).resolves.toBe(true);
+        await expect(approvals?.request({ toolCallId: "c2", toolName: "create_note", toolInput: {} })).resolves.toBe(true);
+    });
+
+    it("rejects an answer that names no call or gives no decision", () => {
+        expect(() => answerToolCall({ body: { streamId: "s1", toolCallId: "c1" } })).toThrow(/approved are required/);
+        expect(() => answerToolCall({ body: { streamId: "s1", approved: true } })).toThrow(/approved are required/);
+        expect(() => answerToolCall({ body: { toolCallId: "c1", approved: true } })).toThrow(/approved are required/);
+        expect(() => answerToolCall({ body: undefined as never })).toThrow(/approved are required/);
+        expect(() => answerToolCall({ body: { streamId: "s1", toolCallId: "c1", approved: true, scope: "forever" as "chat" } }))
+            .toThrow(/scope/);
     });
 });

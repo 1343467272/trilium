@@ -4,14 +4,33 @@
  * elements carrying metadata. Rendering the stored HTML on its own therefore shows less than the
  * note does, and in the case of a link preview shows nothing at all (#10707).
  */
-import HtmlDiff from "htmldiff-js";
-import { describe, expect, it, vi } from "vitest";
+import type { RevisionItem, RevisionPojo, RevisionSource } from "@triliumnext/commons";
+import type { ComponentChildren } from "preact";
+import { act } from "preact/test-utils";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
+import Component from "../../components/component";
+import { diffHtml } from "../../services/html_diff";
+import server from "../../services/server";
+import utils from "../../services/utils";
 import { buildNote } from "../../test/easy-froca";
 import { renderInto } from "../../test/render";
-import { RevisionContentText, seedLinkPreviewTitles } from "./revisions";
+import { ParentComponent } from "../react/react_utils";
+import RevisionsDialog, {
+    RevisionContentDiff, RevisionContentText, seedLinkPreviewTitles
+} from "./revisions";
 
 vi.mock("../../services/i18n", () => ({ t: (key: string) => key }));
+const copyHtmlWithToast = vi.hoisted(() => vi.fn());
+vi.mock("../../services/clipboard_ext", async (importOriginal) => ({
+    ...(await importOriginal<typeof import("../../services/clipboard_ext")>()),
+    copyHtmlWithToast
+}));
+// The dialog's content, without Bootstrap's modal around it.
+vi.mock("../react/Modal", () => ({
+    default: ({ children, show }: { children: ComponentChildren; show: boolean }) =>
+        (show ? <div className="modal-stub">{children}</div> : null)
+}));
 
 /**
  * Every fixture starts with a paragraph that is not the subject of its assertion: DOMPurify running
@@ -20,14 +39,14 @@ vi.mock("../../services/i18n", () => ({ t: (key: string) => key }));
  */
 
 /** Renders revision HTML and lets the reference-link lookups (froca, then the icon) settle. */
-async function renderRevision(content: string) {
-    const container = renderInto(<RevisionContentText content={content} />);
+async function renderRevision(content: string, noteId = "revisedNote") {
+    const container = renderInto(<RevisionContentText content={content} noteId={noteId} />);
     await vi.waitFor(() => expect(container.querySelector(".ck-content")).toBeTruthy());
     return container;
 }
 
 describe("RevisionContentText", () => {
-    it("renders an inline link preview that is stored as an empty element", async () => {
+    it("renders an icon & text link that is stored as an empty element", async () => {
         const container = await renderRevision(
             '<p>before</p><p><span class="link-mention" data-url="https://github.com/TriliumNext/Trilium/issues"'
             + ' data-title="Issues · TriliumNext/Trilium"></span></p><p>after</p>'
@@ -53,6 +72,16 @@ describe("RevisionContentText", () => {
         });
     });
 
+    it("marks the list items whose first paragraph is aligned", async () => {
+        const container = await renderRevision(
+            "<p>before</p><ul><li><p style=\"text-align:center;\">a</p></li><li>b</li></ul>");
+
+        await vi.waitFor(() => {
+            expect([ ...container.querySelectorAll("li") ].map((item) => item.className))
+                .toEqual([ "trilium-list-item-aligned-center", "" ]);
+        });
+    });
+
     it("resolves reference link titles against the current note tree", async () => {
         const note = buildNote({ title: "Target note" });
         const container = await renderRevision(
@@ -67,11 +96,119 @@ describe("RevisionContentText", () => {
         });
     });
 
+    it("labels a reference to a block of the revised note by the text of the block", async () => {
+        const note = buildNote({
+            title: "Revised note",
+            content: "<p data-trilium-block-id=\"b1\">Opening words</p>"
+        });
+        const href = `#root/${note.noteId}?block=b1`;
+        const container = await renderRevision(
+            `<p>before</p><p><a class="reference-link" href="${href}">x</a></p>`,
+            note.noteId
+        );
+
+        const link = container.querySelector("a.reference-link");
+        expect(link).not.toBeNull();
+        await vi.waitFor(() => expect(link?.textContent).toBe("Opening words"));
+    });
+
     it("leaves a preview without a URL alone rather than rendering an empty card", async () => {
         const container = await renderRevision('<p>before</p><p><span class="link-mention" data-title="No URL"></span></p>');
 
         expect(container.querySelector("a.link-embed-mention")).toBeNull();
     });
+});
+
+describe("RevisionContentDiff", () => {
+    it("marks the list items whose first paragraph is aligned", async () => {
+        const list = "<ul><li><p style=\"text-align:center;\">a</p></li><li>b</li></ul>";
+        const container = renderInto(<RevisionContentDiff
+            noteContent={`<p>before</p>${list}`}
+            itemContent={`<p>after</p>${list}`}
+            itemType="text"
+        />);
+
+        await vi.waitFor(() => {
+            const items = container.querySelectorAll(".ck-content li");
+            expect([ ...items ].map((item) => item.className))
+                .toEqual([ "trilium-list-item-aligned-center", "" ]);
+        });
+    });
+});
+
+describe("RevisionsDialog", () => {
+    afterEach(() => {
+        vi.restoreAllMocks();
+        copyHtmlWithToast.mockClear();
+    });
+
+    it("offers to copy the edited blocks of an excerpt, which cannot be restored", async () => {
+        const { container, fullRevision } = await openDialog("fragment");
+        const toolbar = container.querySelector(".revision-toolbar");
+        expect(toolbar?.querySelector(".alert.alert-info")).not.toBeNull();
+        expect(toolbar?.querySelector("button:has(.bx-history)")).toBeNull();
+        const copy = toolbar?.querySelector<HTMLButtonElement>("button:has(.bx-copy)");
+        expect(copy).toBeTruthy();
+
+        await act(async () => copy?.click());
+        await vi.waitFor(() => expect(copyHtmlWithToast).toHaveBeenCalledOnce());
+        expect(copyHtmlWithToast).toHaveBeenCalledWith("<p>kept</p>");
+
+        // Content that is not text is not copied.
+        fullRevision.content = new Uint8Array([ 1 ]);
+        await act(async () => copy?.click());
+        await settle();
+        expect(copyHtmlWithToast).toHaveBeenCalledOnce();
+    });
+
+    it("offers to restore any other revision, as the footer's main action on mobile", async () => {
+        const desktop = await openDialog("manual");
+        expect(desktop.container.querySelector(".revision-toolbar .alert")).toBeNull();
+        expect(desktop.container.querySelector("button:has(.bx-copy)")).toBeNull();
+        const restore = desktop.container
+            .querySelector(".revision-toolbar-actions button.btn:has(.bx-history)");
+        expect(restore?.classList.contains("btn-secondary")).toBe(true);
+
+        vi.spyOn(utils, "isMobile").mockReturnValue(true);
+        const mobile = await openDialog("manual");
+        expect(mobile.container.querySelector(".revision-toolbar button:has(.bx-history)"))
+            .toBeNull();
+        const footerRestore = mobile.container
+            .querySelector(".revision-detail-footer button.btn:has(.bx-history)");
+        expect(footerRestore?.classList.contains("btn-primary")).toBe(true);
+    });
+
+    /** Opens the revisions of a text note whose one revision has `source`, once it is shown. */
+    async function openDialog(source: RevisionSource) {
+        const note = buildNote({ title: "Revised note", content: "<p>now</p>" });
+        const revision: RevisionItem = {
+            noteId: note.noteId, revisionId: "rev1", type: "text", mime: "text/html",
+            title: "Revised note", source, dateCreated: "2026-01-01 10:00:00.000+0100"
+        };
+        const fullRevision: RevisionPojo = { ...revision, content: "<p>kept</p>" };
+        vi.spyOn(server, "get").mockImplementation(async (url: string) =>
+            (url === `notes/${note.noteId}/revisions` ? [ revision ] : fullRevision));
+        const component = new Component();
+        const container = renderInto(
+            <ParentComponent.Provider value={component}>
+                <RevisionsDialog />
+            </ParentComponent.Provider>
+        );
+        await act(async () => {
+            await component.handleEvent("showRevisions", { noteId: note.noteId });
+        });
+        await vi.waitFor(() => {
+            expect(container.querySelector(".revision-toolbar-actions")).not.toBeNull();
+        });
+        return { container, fullRevision };
+    }
+
+    /** Lets the requests in flight finish. */
+    async function settle() {
+        await act(async () => {
+            await new Promise((resolve) => setTimeout(resolve, 0));
+        });
+    }
 });
 
 describe("seedLinkPreviewTitles", () => {
@@ -114,12 +251,12 @@ describe("seedLinkPreviewTitles", () => {
         const withPreview = seedLinkPreviewTitles(`<p>x</p><p>${mention}</p>`);
         const without = seedLinkPreviewTitles("<p>x</p>");
 
-        const added = HtmlDiff.execute(without, withPreview);
-        const removed = HtmlDiff.execute(withPreview, without);
+        const added = diffHtml(without ?? "", withPreview ?? "");
+        const removed = diffHtml(withPreview ?? "", without ?? "");
 
         expect(added).toContain("diffins");
         expect(removed).toContain("diffdel");
-        // Unseeded, htmldiff-js emits these two byte-identical: the empty element carries no word
+        // Unseeded, `diffHtml()` emits these two byte-identical: the empty element carries no word
         // for it to compare, so neither direction produces a marker at all.
         expect(added).not.toBe(removed);
     });

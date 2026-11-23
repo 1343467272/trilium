@@ -1,4 +1,8 @@
-import type { Editor } from "ckeditor5";
+import {
+    ClipboardObserver, type DowncastCleanSelectionEvent, type DowncastSelectionEvent, type Editor,
+    isWidget, type ModelElement, type ModelPosition, type Plugin, type ViewDocumentSelection,
+    type ViewElement, WIDGET_SELECTED_CLASS_NAME
+} from "ckeditor5";
 
 /**
  * Hack coming from https://github.com/ckeditor/ckeditor5/issues/4465
@@ -26,6 +30,40 @@ export function preventCKEditorHandling(domElement: HTMLElement, editor: Editor)
 }
 
 /**
+ * Makes a drag that starts in `domElement`, the UI element of a widget, move the whole widget, as
+ * a drag from its selection handle does. `ClipboardObserver` ignores the events of widget UI
+ * (`data-cke-ignore-events`), so the browser would drag a link in the UI by itself.
+ */
+export function dragWidgetFromUi(domElement: HTMLElement, editor: Editor) {
+    const forward = (evt: DragEvent) => {
+        editor.editing.view.getObserver(ClipboardObserver)?.onDomEvent(evt);
+    };
+    domElement.addEventListener("dragstart", (evt) => {
+        forward(evt);
+        // The browser shows a dragged link as its text and URL, not as the widget that moves.
+        const widget = domElement.parentElement as HTMLElement;
+        const { left, top } = widget.getBoundingClientRect();
+        evt.dataTransfer?.setDragImage(widget, evt.clientX - left, evt.clientY - top);
+    });
+    domElement.addEventListener("dragend", forward);
+}
+
+/**
+ * Sets `_renderer.isFocused` back to `view.document.isFocused` on a press or key in the text,
+ * after `preventCKEditorHandling()` turned it off. The view ignores the events of widget UI
+ * (`data-cke-ignore-events`), so a press or key that the view sees is back in the text.
+ */
+export function restoreRendererFocusOnInput(plugin: Plugin) {
+    const view = plugin.editor.editing.view;
+    const restore = () => {
+        //@ts-expect-error: We are accessing a private field.
+        view._renderer.isFocused = view.document.isFocused;
+    };
+    plugin.listenTo(view.document, "mousedown", restore, { priority: "highest" });
+    plugin.listenTo(view.document, "keydown", restore, { priority: "highest" });
+}
+
+/**
  * Finds the closest widget ancestor of a DOM element and selects it in the
  * editor model. This makes the widget toolbar appear when clicking inside
  * UI elements that have `data-cke-ignore-events`.
@@ -50,4 +88,123 @@ function selectParentWidget(domElement: HTMLElement, editor: Editor) {
     editor.model.enqueueChange({ isUndoable: false }, writer => {
         writer.setSelection(modelElement, "on");
     });
+}
+
+/**
+ * Returns the innermost widget with the `property` custom property that is selected or contains
+ * the selection. Used as the `getRelatedElement` of a widget toolbar.
+ */
+export function findSelectedWidget(
+    selection: ViewDocumentSelection,
+    property: string
+): ViewElement | null {
+    const selected = selection.getSelectedElement();
+    if (selected && isMarkedWidget(selected, property)) {
+        return selected;
+    }
+
+    let node = selection.getFirstPosition()?.parent ?? null;
+    while (node) {
+        if (node.is("element") && isMarkedWidget(node, property)) {
+            return node;
+        }
+        node = node.parent;
+    }
+    return null;
+}
+
+function isMarkedWidget(element: ViewElement, property: string) {
+    return !!element.getCustomProperty(property) && isWidget(element);
+}
+
+/**
+ * Deletes `widget` with its content, and puts the caret at the start of the block after it, else at
+ * the end of the block before it. A parent left empty, such as a table cell, gets an empty
+ * paragraph.
+ */
+export function deleteWidget(editor: Editor, widget: ModelElement) {
+    const model = editor.model;
+    model.change((writer) => {
+        const position = writer.createPositionBefore(widget);
+        writer.remove(widget);
+
+        const parent = position.parent as ModelElement;
+        if (parent.isEmpty && model.schema.checkChild(parent, "paragraph")) {
+            writer.insertElement("paragraph", position);
+        }
+
+        writer.setSelection(model.schema.getNearestSelectionRange(position, "forward")
+            ?? model.schema.getNearestSelectionRange(position, "backward"));
+    });
+}
+
+/**
+ * Keeps `className` on the view elements that `isContainer` accepts and that hold the focused
+ * nested editable, like CKEditor keeps `ck-editor__nested-editable_focused` on the editable.
+ * With `isInnermostOnly`, only the closest such element gets it. Stylesheets match this class
+ * instead of a `:has()` on CKEditor's: that `:has()` re-checks large ancestors on each caret move.
+ */
+export function markFocusedContainers(
+    editor: Editor,
+    className: string,
+    isContainer: (element: ViewElement) => boolean,
+    { isInnermostOnly = false } = {}
+) {
+    const viewDocument = editor.editing.view.document;
+    let marked = new Set<ViewElement>();
+
+    viewDocument.registerPostFixer(writer => {
+        const containers = new Set<ViewElement>();
+        const editable = viewDocument.isFocused ? viewDocument.selection.editableElement : null;
+        for (const ancestor of editable?.getAncestors({ parentFirst: true }) ?? []) {
+            if (ancestor.is("element") && isContainer(ancestor)) {
+                containers.add(ancestor);
+                if (isInnermostOnly) break;
+            }
+        }
+
+        let isChanged = false;
+        for (const element of marked) {
+            if (!containers.has(element) && element.hasClass(className)) {
+                writer.removeClass(className, element);
+                isChanged = true;
+            }
+        }
+        for (const element of containers) {
+            if (!element.hasClass(className)) {
+                writer.addClass(className, element);
+                isChanged = true;
+            }
+        }
+        marked = containers;
+        return isChanged;
+    });
+}
+
+/**
+ * Marks the widget that `findWidget()` returns for the selection as selected, as `Widget` marks
+ * the widget that the selection is on: an embed whose caption holds the selection, or an aside that
+ * holds it.
+ */
+export function markWidgetOfSelection(
+    editor: Editor, findWidget: (position: ModelPosition | null) => ModelElement | null
+) {
+    const dispatcher = editor.editing.downcastDispatcher;
+    let marked: ViewElement | null = null;
+
+    dispatcher.on<DowncastCleanSelectionEvent>("cleanSelection", (_evt, _data, api) => {
+        if (marked) {
+            api.writer.removeClass(WIDGET_SELECTED_CLASS_NAME, marked);
+            marked = null;
+        }
+    });
+    // After `Widget` marks the widgets in the selection.
+    dispatcher.on<DowncastSelectionEvent>("selection", (_evt, { selection }, api) => {
+        const widget = findWidget(selection.getFirstPosition());
+        const view = widget && api.mapper.toViewElement(widget);
+        if (view) {
+            api.writer.addClass(WIDGET_SELECTED_CLASS_NAME, view);
+            marked = view;
+        }
+    }, { priority: "lowest" });
 }

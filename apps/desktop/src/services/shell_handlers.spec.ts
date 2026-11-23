@@ -1,3 +1,4 @@
+import { EventEmitter } from "events";
 import fs from "fs";
 import path from "path";
 import { pathToFileURL } from "url";
@@ -11,7 +12,12 @@ const h = vi.hoisted(() => ({
     openExternal: vi.fn(() => Promise.resolve()),
     openPath: vi.fn(() => Promise.resolve("")),
     showItemInFolder: vi.fn(),
-    execFile: vi.fn()
+    execFile: vi.fn(),
+    spawn: vi.fn(),
+    fromWebContents: vi.fn<() => { id: number } | null>(() => ({ id: 1 })),
+    showOpenDialog: vi.fn<(...args: unknown[]) => Promise<{ canceled: boolean; filePaths: string[] }>>(),
+    showMessageBox: vi.fn<(...args: unknown[]) => Promise<{ response: number }>>(),
+    logError: vi.fn()
 }));
 
 vi.mock("electron", () => ({
@@ -20,6 +26,8 @@ vi.mock("electron", () => ({
             on: (channel: string, fn: Handler) => h.on.set(channel, fn),
             handle: (channel: string, fn: Handler) => h.handle.set(channel, fn)
         },
+        BrowserWindow: { fromWebContents: h.fromWebContents },
+        dialog: { showOpenDialog: h.showOpenDialog, showMessageBox: h.showMessageBox },
         shell: {
             openExternal: h.openExternal,
             openPath: h.openPath,
@@ -28,14 +36,19 @@ vi.mock("electron", () => ({
     }
 }));
 
-vi.mock("child_process", () => ({ execFile: h.execFile }));
+vi.mock("child_process", () => ({ execFile: h.execFile, spawn: h.spawn }));
 
 vi.mock("@triliumnext/core", async (importOriginal) => {
     const actual = await importOriginal<typeof import("@triliumnext/core")>();
-    return { ...actual, getLog: () => ({ info: vi.fn(), error: vi.fn() }) };
+    return {
+        ...actual,
+        getBackup: vi.fn(actual.getBackup),
+        getLog: () => ({ info: vi.fn(), error: h.logError })
+    };
 });
 
-const { setupShellHandlers } = await import("./shell.js");
+const { getBackup } = await import("@triliumnext/core");
+const { getConfiguredOpenRoots, setupShellHandlers } = await import("./shell.js");
 const dataDirs = (await import("@triliumnext/server/src/services/data_dir.js")).default;
 
 const DATA_DIR = dataDirs.TRILIUM_DATA_DIR;
@@ -44,6 +57,7 @@ let tmpFile: string;
 let dataFile: string;
 let tmpDir: string;
 let unicodeDir: string;
+let executables: string[];
 
 function setPlatform(platform: NodeJS.Platform) {
     Object.defineProperty(process, "platform", { value: platform, configurable: true });
@@ -61,6 +75,11 @@ beforeAll(() => {
     unicodeDir = path.join(TMP_DIR, "shell-handlers-资料");
     fs.mkdirSync(tmpDir, { recursive: true });
     fs.mkdirSync(unicodeDir, { recursive: true });
+    executables = [ "report.bat", "Report.CMD", "run.ps1", "app.lnk", "page.hta", "x.desktop", "x.command" ]
+        .map((name) => path.join(TMP_DIR, `shell-handlers-${name}`));
+    for (const file of executables) {
+        fs.writeFileSync(file, "");
+    }
     setupShellHandlers();
 });
 
@@ -69,6 +88,9 @@ afterAll(() => {
     fs.rmSync(dataFile, { force: true });
     fs.rmSync(tmpDir, { force: true, recursive: true });
     fs.rmSync(unicodeDir, { force: true, recursive: true });
+    for (const file of executables) {
+        fs.rmSync(file, { force: true });
+    }
     setPlatform(realPlatform);
 });
 
@@ -113,6 +135,45 @@ describe("setupShellHandlers", () => {
             expect(result).toBeTruthy();
             expect(h.openPath).not.toHaveBeenCalled();
         });
+
+        it("refuses a file that would run as a program, on every platform", () => {
+            for (const platform of [ "win32", "darwin", "linux" ] as const) {
+                setPlatform(platform);
+                for (const file of executables) {
+                    expect(String(fireHandle("open-path", file)), file).toMatch(/refusing to open an executable/);
+                }
+            }
+            expect(h.openPath).not.toHaveBeenCalled();
+            expect(h.showMessageBox).not.toHaveBeenCalled();
+        });
+
+        it("refuses an extension Windows lists in PATHEXT", () => {
+            setPlatform("win32");
+            vi.stubEnv("PATHEXT", ".COM;.EXE;.TRILIUMTEST");
+            const file = path.join(TMP_DIR, "shell-handlers-x.triliumtest");
+            fs.writeFileSync(file, "");
+            try {
+                expect(String(fireHandle("open-path", file))).toMatch(/refusing to open an executable/);
+                expect(h.openPath).not.toHaveBeenCalled();
+            } finally {
+                fs.rmSync(file, { force: true });
+                vi.unstubAllEnvs();
+            }
+        });
+    });
+
+    describe("configured roots", () => {
+        it("drops the backup directory when the backup service is not initialized yet", () => {
+            const notInitialized = () => {
+                throw new Error("Backup service not initialized.");
+            };
+            vi.mocked(getBackup).mockImplementationOnce(notInitialized).mockImplementationOnce(notInitialized);
+
+            expect(getConfiguredOpenRoots()).toEqual([ null, dataDirs.RESOURCES_DIR ]);
+            fireHandle("open-path", dataFile);
+            expect(h.openPath).toHaveBeenCalledWith(path.resolve(dataFile));
+            expect(getBackup).toHaveBeenCalledTimes(2);
+        });
     });
 
     describe("show-item-in-folder", () => {
@@ -129,9 +190,61 @@ describe("setupShellHandlers", () => {
 
     describe("open-file-url", () => {
         it("opens a valid file: URL", () => {
-            const url = process.platform === "win32" ? "file:///C:/Windows/notepad.exe" : "file:///etc/hosts";
+            const url = process.platform === "win32" ? "file:///C:/Windows/win.ini" : "file:///etc/hosts";
             fireHandle("open-file-url", url);
             expect(h.openPath).toHaveBeenCalled();
+            expect(h.showMessageBox).not.toHaveBeenCalled();
+        });
+
+        it("asks before opening a program, and opens nothing when the user cancels", async () => {
+            h.showMessageBox.mockResolvedValueOnce({ response: 0 });
+            expect(await fireHandle("open-file-url", pathToFileURL(executables[0]).href)).toBe("");
+            expect(h.openPath).not.toHaveBeenCalled();
+
+            const [ window, options ] = h.showMessageBox.mock.calls[0] as [ unknown, { defaultId: number; cancelId: number; message: string } ];
+            expect(window).toEqual({ id: 1 });
+            expect(options).toMatchObject({ defaultId: 0, cancelId: 0 });
+            expect(options.message).toContain("shell-handlers-report.bat");
+        });
+
+        it("opens a program once the user confirms, even without a parent window", async () => {
+            h.fromWebContents.mockReturnValueOnce(null);
+            h.showMessageBox.mockResolvedValueOnce({ response: 1 });
+            await fireHandle("open-file-url", pathToFileURL(executables[1]).href);
+            expect(h.showMessageBox.mock.calls[0]).toHaveLength(1);
+            expect(h.openPath).toHaveBeenCalledWith(executables[1]);
+        });
+
+        it("refuses a second program while the first confirmation is still open", async () => {
+            let answer: (value: { response: number }) => void = () => {};
+            h.showMessageBox.mockReturnValueOnce(new Promise((resolve) => { answer = resolve; }));
+            const first = fireHandle("open-file-url", pathToFileURL(executables[0]).href);
+            expect(await fireHandle("open-file-url", pathToFileURL(executables[2]).href)).toMatch(/already/);
+            answer({ response: 1 });
+            await first;
+            expect(h.showMessageBox).toHaveBeenCalledOnce();
+            expect(h.openPath).toHaveBeenCalledOnce();
+            expect(h.openPath).toHaveBeenCalledWith(executables[0]);
+        });
+
+        it.runIf(process.platform !== "win32")("asks before opening a file marked executable", async () => {
+            const file = path.join(TMP_DIR, "shell-handlers-binary");
+            fs.writeFileSync(file, "", { mode: 0o755 });
+            try {
+                h.showMessageBox.mockResolvedValueOnce({ response: 0 });
+                await fireHandle("open-file-url", pathToFileURL(file).href);
+                expect(h.showMessageBox).toHaveBeenCalledOnce();
+                expect(h.openPath).not.toHaveBeenCalled();
+            } finally {
+                fs.rmSync(file, { force: true });
+            }
+        });
+
+        it.runIf(process.platform !== "win32")("opens a missing file without asking", () => {
+            const file = path.join(TMP_DIR, "shell-handlers-missing");
+            fireHandle("open-file-url", pathToFileURL(file).href);
+            expect(h.showMessageBox).not.toHaveBeenCalled();
+            expect(h.openPath).toHaveBeenCalledWith(file);
         });
 
         it("returns an error message for a non-file URL", () => {
@@ -163,6 +276,14 @@ describe("setupShellHandlers", () => {
             expect(h.openExternal).not.toHaveBeenCalled();
         });
 
+        it("keeps openPath for a path that does not exist on Windows", () => {
+            setPlatform("win32");
+            const missing = path.join(TMP_DIR, "shell-handlers-missing");
+            fireHandle("open-file-url", pathToFileURL(missing).href);
+            expect(h.openPath).toHaveBeenCalledWith(missing);
+            expect(h.openExternal).not.toHaveBeenCalled();
+        });
+
         it("keeps openPath for a directory outside Windows", () => {
             setPlatform("linux");
             fireHandle("open-file-url", pathToFileURL(tmpDir).href);
@@ -184,60 +305,133 @@ describe("setupShellHandlers", () => {
     });
 
     describe("open-custom", () => {
-        it("swallows invalid paths", () => {
-            fireOn("open-custom", "/etc/passwd");
+        it("reports an invalid path as a failure without opening anything", async () => {
+            expect(await fireHandle("open-custom", "/etc/passwd")).toBe(false);
             expect(h.execFile).not.toHaveBeenCalled();
             expect(h.openPath).not.toHaveBeenCalled();
         });
 
-        it("opens directly via the shell on macOS/other platforms", () => {
-            setPlatform("darwin");
-            fireOn("open-custom", tmpFile);
-            expect(h.openPath).toHaveBeenCalledWith(path.resolve(tmpFile));
+        it("reports a failure on platforms without an application chooser", async () => {
+            setPlatform("freebsd");
+            expect(await fireHandle("open-custom", tmpFile)).toBe(false);
+            expect(h.openPath).not.toHaveBeenCalled();
             expect(h.execFile).not.toHaveBeenCalled();
+        });
+
+        describe("darwin", () => {
+            beforeEach(() => setPlatform("darwin"));
+
+            it("opens the file in the application picked from /Applications", async () => {
+                h.showOpenDialog.mockResolvedValue({ canceled: false, filePaths: [ "/Applications/TextEdit.app" ] });
+                h.execFile.mockImplementation((_cmd, _args, cb) => cb(null));
+                expect(await fireHandle("open-custom", tmpFile)).toBe(true);
+
+                const [ window, options ] = h.showOpenDialog.mock.calls[0] as [ unknown, { defaultPath: string; properties: string[]; filters: { extensions: string[] }[] } ];
+                expect(window).toEqual({ id: 1 });
+                expect(options.defaultPath).toBe("/Applications");
+                expect(options.properties).toEqual([ "openFile" ]);
+                expect(options.filters[0].extensions).toEqual([ "app" ]);
+                expect(h.execFile).toHaveBeenCalledWith("open", [ "-a", "/Applications/TextEdit.app", tmpFile ], expect.any(Function));
+                expect(h.openPath).not.toHaveBeenCalled();
+            });
+
+            it("shows the picker without a parent when the sender has no window", async () => {
+                h.fromWebContents.mockReturnValueOnce(null);
+                h.showOpenDialog.mockResolvedValue({ canceled: true, filePaths: [] });
+                expect(await fireHandle("open-custom", tmpFile)).toBe(true);
+                expect(h.showOpenDialog).toHaveBeenCalledWith(expect.objectContaining({ defaultPath: "/Applications" }));
+            });
+
+            it("opens nothing when the picker is canceled", async () => {
+                h.showOpenDialog.mockResolvedValue({ canceled: true, filePaths: [] });
+                expect(await fireHandle("open-custom", tmpFile)).toBe(true);
+                expect(h.execFile).not.toHaveBeenCalled();
+                expect(h.openPath).not.toHaveBeenCalled();
+            });
+
+            it("reports a failure when the application cannot open the file", async () => {
+                h.showOpenDialog.mockResolvedValue({ canceled: false, filePaths: [ "/Applications/Broken.app" ] });
+                h.execFile.mockImplementation((_cmd, _args, cb) => cb(new Error("LSOpenURLsWithRole() failed")));
+                expect(await fireHandle("open-custom", tmpFile)).toBe(false);
+                expect(h.logError).toHaveBeenCalledWith(expect.stringContaining("LSOpenURLsWithRole"));
+                expect(h.openPath).not.toHaveBeenCalled();
+            });
         });
 
         describe("linux", () => {
             beforeEach(() => setPlatform("linux"));
 
-            it("launches the first available terminal", () => {
-                h.execFile.mockImplementation((_cmd, _args, cb) => cb(null));
-                fireOn("open-custom", tmpFile);
-                expect(h.execFile).toHaveBeenCalledTimes(1);
-                expect(h.execFile.mock.calls[0][0]).toBe("x-terminal-emulator");
+            /** Makes the next `spawn()` emit `event` with `arg` on the following tick. */
+            function spawnEmits(event: "close" | "error", arg: unknown) {
+                h.spawn.mockImplementationOnce(() => {
+                    const child = new EventEmitter();
+                    setImmediate(() => child.emit(event, arg));
+                    return child;
+                });
+            }
+
+            it("asks the desktop portal to show its chooser for the file", async () => {
+                spawnEmits("close", 0);
+                expect(await fireHandle("open-custom", tmpFile)).toBe(true);
+
+                expect(h.spawn).toHaveBeenCalledTimes(1);
+                const [ command, args, options ] = h.spawn.mock.calls[0];
+                expect(command).toBe("gdbus");
+                expect(args).toEqual(expect.arrayContaining([
+                    "org.freedesktop.portal.Desktop",
+                    "org.freedesktop.portal.OpenURI.OpenFile",
+                    "@h 3"
+                ]));
+                expect(args.at(-1)).toContain("'ask': <true>");
+                expect(options.stdio[3]).toEqual(expect.any(Number));
+                expect(h.execFile).not.toHaveBeenCalled();
                 expect(h.openPath).not.toHaveBeenCalled();
             });
 
-            it("falls through to the next terminal when one fails", () => {
-                let calls = 0;
-                h.execFile.mockImplementation((_cmd, _args, cb) => cb(calls++ === 0 ? new Error("nope") : null));
-                fireOn("open-custom", tmpFile);
-                expect(h.execFile).toHaveBeenCalledTimes(2);
+            it("reports a failure without opening the file when the portal call fails", async () => {
+                spawnEmits("close", 1);
+                expect(await fireHandle("open-custom", tmpFile)).toBe(false);
+                expect(h.openPath).not.toHaveBeenCalled();
             });
 
-            it("falls back to shell.openPath when no terminal works", () => {
-                h.execFile.mockImplementation((_cmd, _args, cb) => cb(new Error("nope")));
-                fireOn("open-custom", tmpFile);
-                // 9 terminals are tried before giving up.
-                expect(h.execFile).toHaveBeenCalledTimes(9);
-                expect(h.openPath).toHaveBeenCalledWith(path.resolve(tmpFile));
+            it("reports a failure without opening the file when gdbus is missing", async () => {
+                spawnEmits("error", Object.assign(new Error("spawn gdbus ENOENT"), { code: "ENOENT" }));
+                expect(await fireHandle("open-custom", tmpFile)).toBe(false);
+                expect(h.openPath).not.toHaveBeenCalled();
+            });
+
+            it("settles once and logs the portal's stderr when a failed spawn emits both error and close", async () => {
+                const closeSync = vi.spyOn(fs, "closeSync");
+                h.spawn.mockImplementationOnce(() => {
+                    const child = Object.assign(new EventEmitter(), { stderr: new EventEmitter() });
+                    setImmediate(() => {
+                        child.stderr.emit("data", "No such interface\n");
+                        child.emit("close", 1);
+                        child.emit("error", new Error("late"));
+                    });
+                    return child;
+                });
+
+                expect(await fireHandle("open-custom", tmpFile)).toBe(false);
+                expect(closeSync).toHaveBeenCalledOnce();
+                expect(h.logError).toHaveBeenCalledWith(expect.stringContaining("No such interface"));
             });
         });
 
         describe("win32", () => {
             beforeEach(() => setPlatform("win32"));
 
-            it("launches rundll32 for the OpenAs dialog", () => {
+            it("launches rundll32 for the OpenAs dialog", async () => {
                 h.execFile.mockImplementation((_cmd, _args, _opts, cb) => cb(null));
-                fireOn("open-custom", tmpFile);
+                expect(await fireHandle("open-custom", tmpFile)).toBe(true);
                 expect(h.execFile.mock.calls[0][0]).toBe("rundll32.exe");
                 expect(h.openPath).not.toHaveBeenCalled();
             });
 
-            it("falls back to shell.openPath when rundll32 fails", () => {
+            it("reports a failure without opening the file when rundll32 fails", async () => {
                 h.execFile.mockImplementation((_cmd, _args, _opts, cb) => cb(new Error("boom")));
-                fireOn("open-custom", tmpFile);
-                expect(h.openPath).toHaveBeenCalledWith(path.resolve(tmpFile));
+                expect(await fireHandle("open-custom", tmpFile)).toBe(false);
+                expect(h.openPath).not.toHaveBeenCalled();
             });
         });
     });

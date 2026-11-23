@@ -2,7 +2,10 @@
  * https://github.com/TriliumNext/Trilium/issues/1002
  */
 
-import { Command, ModelDocumentSelection, ModelElement, ModelLiveRange, ModelNode, Plugin, _isMac, Editor } from 'ckeditor5';
+import {
+	ButtonView, Command, IconArrowDown, IconArrowUp, ModelDocumentSelection, ModelElement, ModelLiveRange,
+	ModelNode, Plugin, _isMac, Editor
+} from 'ckeditor5';
 
 import { isSelectionInTable } from "./table_move/table_move_commands.js";
 
@@ -11,24 +14,78 @@ interface MoveKeyCommands {
     block: "moveBlockUp" | "moveBlockDown";
 }
 
+const MOVE_UP: MoveKeyCommands = { table: "moveTableRowUp", block: "moveBlockUp" };
+const MOVE_DOWN: MoveKeyCommands = { table: "moveTableRowDown", block: "moveBlockDown" };
+
 const keyMap = new Map<string, MoveKeyCommands>([
-    ["ArrowUp", { table: "moveTableRowUp", block: "moveBlockUp" }],
-    ["ArrowDown", { table: "moveTableRowDown", block: "moveBlockDown" }]
+    ["ArrowUp", MOVE_UP],
+    ["ArrowDown", MOVE_DOWN]
 ]);
 
+/**
+ * Registers the `moveBlockUp` and `moveBlockDown` commands, their Alt+↑/↓ shortcuts and buttons
+ * of the same names. The shortcuts and the buttons move the table row instead in a table.
+ */
 export default class MoveBlockUpDownPlugin extends Plugin {
     init() {
         const editor = this.editor;
+        const t = editor.t;
 
         editor.commands.add('moveBlockUp', new MoveBlockUpCommand(editor));
         editor.commands.add('moveBlockDown', new MoveBlockDownCommand(editor));
 
 		// Use native DOM capturing to intercept Ctrl/Alt + ↑/↓,
 		// as plugin-level keystroke handling may fail when the selection is near an object.
-        this.bindMoveBlockShortcuts(editor);
+        this.bindMoveBlockShortcuts();
+
+        this.addButton('moveBlockUp', t('Move up'), IconArrowUp, MOVE_UP);
+        this.addButton('moveBlockDown', t('Move down'), IconArrowDown, MOVE_DOWN);
     }
 
-	bindMoveBlockShortcuts(editor: Editor) {
+    private addButton(name: string, label: string, icon: string, commands: MoveKeyCommands) {
+        const editor = this.editor;
+        editor.ui.componentFactory.add(name, (locale) => {
+            const button = new ButtonView(locale);
+            button.set({ label, icon, tooltip: true });
+
+            const refresh = () => {
+                button.isEnabled = this.canMove(commands);
+            };
+            refresh();
+            button.listenTo(editor.model.document, 'change', refresh);
+            button.listenTo(editor, 'change:isReadOnly', refresh);
+
+            button.on('execute', () => {
+                this.move(commands);
+                editor.editing.view.focus();
+            });
+            return button;
+        });
+    }
+
+    /**
+     * The command that moves the selection: the row of the table it is in, or its blocks. Inside
+     * a table the block commands would only shuffle paragraphs inside one cell. The block commands
+     * still serve editor builds without the TableMove plugin.
+     */
+    private getMoveCommandName(commands: MoveKeyCommands) {
+        const editor = this.editor;
+        return editor.commands.get(commands.table) && isSelectionInTable(editor.model.document.selection)
+            ? commands.table
+            : commands.block;
+    }
+
+    private canMove(commands: MoveKeyCommands) {
+        return !!this.editor.commands.get(this.getMoveCommandName(commands))?.isEnabled;
+    }
+
+    private move(commands: MoveKeyCommands) {
+        if (this.canMove(commands)) {
+            this.editor.execute(this.getMoveCommandName(commands));
+        }
+    }
+
+	bindMoveBlockShortcuts() {
 		addEditingKeydownCapture(this, (e) => {
 			const commands = keyMap.get(e.key);
 			if (!commands || !hasMoveModifier(e)) {
@@ -37,17 +94,7 @@ export default class MoveBlockUpDownPlugin extends Plugin {
 			e.preventDefault();
 			e.stopImmediatePropagation();
 
-			// Inside a table the whole row moves; the block commands would only shuffle
-			// paragraphs inside one cell. The guard keeps block moves working in editor
-			// builds without the TableMove plugin.
-			const tableCommand = editor.commands.get(commands.table);
-			if (tableCommand && isSelectionInTable(editor.model.document.selection)) {
-				if (tableCommand.isEnabled) {
-					editor.execute(commands.table);
-				}
-				return;
-			}
-			editor.execute(commands.block);
+			this.move(commands);
 		});
 	}
 
@@ -71,32 +118,62 @@ export function hasMoveModifier(e: KeyboardEvent): boolean {
  * container — see #10095). Without this cleanup the orphaned listener stays attached, captures
  * the keystroke first and runs editor.execute() against the destroyed editor — silently
  * swallowing the shortcut until a reload.
+ *
+ * The keys pressed in the content of an embed, such as in its editor, are skipped.
  */
 export function addEditingKeydownCapture(plugin: Plugin, handleKeydown: (e: KeyboardEvent) => void) {
 	const editor = plugin.editor;
+	const onKeydown = (e: KeyboardEvent) => {
+		if (isFromEditable(editor, e)) {
+			handleKeydown(e);
+		}
+	};
 	editor.editing.view.once('render', () => {
 		const domRoot = editor.editing.view.getDomRoot();
 		/* v8 ignore next 1 -- domRoot is always set while the editor is alive; only null after destroy */
 		if (!domRoot) return;
 
-		domRoot.addEventListener('keydown', handleKeydown, { capture: true });
+		domRoot.addEventListener('keydown', onKeydown, { capture: true });
 		plugin.listenTo(editor, 'destroy', () => {
-			domRoot.removeEventListener('keydown', handleKeydown, { capture: true });
+			domRoot.removeEventListener('keydown', onKeydown, { capture: true });
 		});
 	});
 }
 
+/**
+ * Whether `event` comes from an editable of `editor`, such as its root, a caption or a table cell,
+ * rather than from the content of an embed, which the wrapper of the embed marks with
+ * `data-cke-ignore-events`.
+ */
+export function isFromEditable(editor: Editor, event: Event) {
+	const root = editor.editing.view.getDomRoot();
+	const target = event.target instanceof Element ? event.target : null;
+	const embedWrapper = target?.closest('[data-cke-ignore-events]');
+	return !!root && !!target && root.contains(target)
+		&& !(embedWrapper && root.contains(embedWrapper));
+}
+
 abstract class MoveBlockUpDownCommand extends Command {
 
-	abstract getSibling(selectedBlock: ModelElement): ModelNode | null;
+	/** The node that `selectedBlock` moves past. `isHidden` tells which blocks are hidden. */
+	abstract getSibling(selectedBlock: ModelElement, isHidden: IsHidden): ModelNode | null;
     abstract get offset(): "before" | "after";
+
+	override refresh() {
+		const blocks = this.getSelectedBlocks(this.editor.model.document.selection);
+		const isHidden = this.getHiddenSnapshot();
+		this.isEnabled = blocks.length > 0
+			&& blocks.every(block => !!this.getSibling(block, isHidden));
+	}
 
 	override execute() {
 		const model = this.editor.model;
 		const selection = model.document.selection;
 		const selectedBlocks = this.getSelectedBlocks(selection);
+		// A move can hide or show blocks, so the moves read the hidden blocks as they are now.
+		const isHidden = this.getHiddenSnapshot();
 		const isEnabled = selectedBlocks.length > 0
-			&& selectedBlocks.every(block => !!this.getSibling(block));
+			&& selectedBlocks.every(block => !!this.getSibling(block, isHidden));
 
 		if (!isEnabled) {
 			return;
@@ -117,10 +194,13 @@ abstract class MoveBlockUpDownCommand extends Command {
 		model.change((writer) => {
 			// Move blocks
 			for (const block of movingBlocks) {
-				const sibling = this.getSibling(block);
-				/* v8 ignore next 1 -- isEnabled already ensures every block has a sibling; null path is unreachable */
+				const sibling = this.getSibling(block, isHidden);
+				/* v8 ignore else -- isEnabled already ensures every block has a sibling */
 				if (sibling) {
-					const range = model.createRangeOn(block);
+					const range = model.createRange(
+						model.createPositionBefore(block),
+						model.createPositionAfter(getUnitEnd(block, isHidden))
+					);
 					writer.move(range, sibling, this.offset);
 				}
 			}
@@ -163,15 +243,32 @@ abstract class MoveBlockUpDownCommand extends Command {
 			resolved.push(el);
 		}
 
-		// Deduplicate adjacent duplicates (e.g., nested selections resolving to same block)
-		return resolved.filter((blk, idx) => idx === 0 || blk !== resolved[idx - 1]);
+		// Deduplicate adjacent duplicates (e.g., nested selections resolving to same block). A
+		// selected hidden block moves with the block that hides it.
+		return resolved.filter((blk, idx) => (idx === 0 || blk !== resolved[idx - 1])
+			&& !this.getHiddenBlocks()?.isHidden(blk));
+	}
+
+	/** Whether a block is hidden, as of now. Without `HiddenBlocks`, no block is. */
+	getHiddenSnapshot(): IsHidden {
+		return this.getHiddenBlocks()?.getHiddenSnapshot() ?? isNeverHidden;
+	}
+
+	getHiddenBlocks() {
+		const plugins = this.editor.plugins;
+		return plugins.has('HiddenBlocks') ? plugins.get('HiddenBlocks') : null;
 	}
 }
 
 class MoveBlockUpCommand extends MoveBlockUpDownCommand {
 
-    getSibling(selectedBlock: ModelElement) {
-        return selectedBlock.previousSibling;
+    /** The block to move before: the previous one, or the shown block before the hidden ones. */
+    getSibling(selectedBlock: ModelElement, isHidden: IsHidden) {
+        let previous = selectedBlock.previousSibling;
+        while (previous && isHidden(previous)) {
+            previous = previous.previousSibling;
+        }
+        return previous;
     }
 
     get offset() {
@@ -182,15 +279,33 @@ class MoveBlockUpCommand extends MoveBlockUpDownCommand {
 
 class MoveBlockDownCommand extends MoveBlockUpDownCommand {
 
-	/** @override */
-	getSibling(selectedBlock: ModelElement) {
-		return selectedBlock.nextSibling;
+	/** The block to move after: the next one, or the last of the blocks hidden after it. */
+	getSibling(selectedBlock: ModelElement, isHidden: IsHidden) {
+		const next = getUnitEnd(selectedBlock, isHidden).nextSibling;
+		return next && getUnitEnd(next, isHidden);
 	}
 
 	/** @override */
 	get offset() {
 		return "after" as const;
 	}
+}
+
+/** Whether a block is hidden, so that it moves with the shown block before it. */
+type IsHidden = (node: ModelNode) => boolean;
+
+const isNeverHidden: IsHidden = () => false;
+
+/**
+ * The last node that moves with `node`: the last of the hidden blocks right after it, such as the
+ * section of a collapsed heading, or `node` itself.
+ */
+function getUnitEnd(node: ModelNode, isHidden: IsHidden): ModelNode {
+	let end = node;
+	while (end.nextSibling && isHidden(end.nextSibling)) {
+		end = end.nextSibling;
+	}
+	return end;
 }
 
 function scrollToSelection(editor: Editor) {

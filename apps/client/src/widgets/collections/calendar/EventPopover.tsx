@@ -1,17 +1,22 @@
 import "./EventPopover.css";
 
 import clsx from "clsx";
+import { ComponentChildren } from "preact";
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 
 import FNote from "../../../entities/fnote";
 import { t } from "../../../services/i18n";
 import { isMobile } from "../../../services/utils";
-import { announceEmbeddedNoteClosing, EmbeddedNoteActions, EmbeddedNoteScope, MaximizeAction, NoteColorAction, OpenNoteActions, useEmbeddedNoteContext, useFollowLinksWithin } from "../../EmbeddedNotePane";
+import {
+    announceEmbeddedNoteClosing, EmbeddedNoteActions, EmbeddedNoteScope, MaximizeAction,
+    NoteColorAction, OpenNoteActions, useEmbeddedNoteContext, useFollowLinksWithin
+} from "../../EmbeddedNotePane";
 import TitleRow from "../../layout/TitleRow";
 import NoteDetail from "../../NoteDetail";
 import PromotedAttributes from "../../PromotedAttributes";
 import ActionButton from "../../react/ActionButton";
-import { useLegacyComponentElement, useNote, useNoteColorClass } from "../../react/hooks";
+import { useNote, useNoteColorClass } from "../../react/hooks/note";
+import { useLegacyComponentElement } from "../../react/hooks/legacy";
 import Modal from "../../react/Modal";
 import Popover from "../../react/Popover";
 import { removeFromCalendar } from "./api";
@@ -54,7 +59,7 @@ export default function EventPopover({ noteId, anchor, container, parentNote, is
     onFollowLink(noteId: string): boolean;
 }) {
     const note = useNote(noteId);
-    const { noteContext, component } = useEmbeddedNoteContext(note ?? undefined, POPOVER_NTX_ID);
+    const { noteContext, component, ntxId } = useEmbeddedNoteContext(note ?? undefined, POPOVER_NTX_ID_PREFIX);
 
     /**
      * Whether the card has been grown to the window (see the maximize in {@link EventDetails}, and
@@ -73,9 +78,9 @@ export default function EventPopover({ noteId, anchor, container, parentNote, is
      * mounted, and not waited on. Every way out leads through here.
      */
     const close = useCallback(() => {
-        void announceEmbeddedNoteClosing(component, POPOVER_NTX_ID);
+        void announceEmbeddedNoteClosing(component, ntxId);
         onClose();
-    }, [ component, onClose ]);
+    }, [ component, ntxId, onClose ]);
 
     if (!note) {
         return null;
@@ -164,7 +169,7 @@ function EventPopoverShell({ note, anchorRect, updateKey, parentNote, isEditable
  *
  * Dressed as the quick editor is, that being the app's own way of showing a whole note over
  * whatever raised it — the note's title row heading the dialog rather than standing inside it, at
- * the height it stands there (see the shared rules in PopupEditor.css). It rises to what a dialog
+ * the height it stands there (see the shared rules in TitleRow.css). It rises to what a dialog
  * may take rather than to the whole page, as the quick editor does: a page-high sheet squares off
  * the corners the app rounds every dialog by, and gains nothing for it.
  *
@@ -203,24 +208,22 @@ function EventSheet({ note, parentNote, isEditable, onClose, onFollowLink }: {
     return (
         <Modal
             className={clsx("calendar-event-sheet", colorClass)}
+            portal
             size="lg"
             title={<TitleRow />}
             modalRef={modalRef}
             show={shown}
             onHidden={onClose}
         >
-            <EventDetailsBody
-                note={note}
-                parentNote={parentNote}
-                isEditable={isEditable}
-                onClose={() => setShown(false)}
-            />
+            <EventDetailsBody note={note} isEditable={isEditable}>
+                <EventActions note={note} parentNote={parentNote} isEditable={isEditable} onClose={() => setShown(false)} />
+            </EventDetailsBody>
         </Modal>
     );
 }
 
-/** The popover's own ntxId, as the geo pane and the quick editor have one of their own. */
-const POPOVER_NTX_ID = "_calendar-event-popover";
+/** The start of the ntxId of the popover's own note context. */
+const POPOVER_NTX_ID_PREFIX = "_calendar-event-popover";
 
 /** The popover's contents: what heads it, and the event under that. */
 function EventDetails({ note, parentNote, isEditable, maximized, setMaximized, onClose, onFollowLink }: {
@@ -244,40 +247,44 @@ function EventDetails({ note, parentNote, isEditable, maximized, setMaximized, o
 
     return (
         <div className="calendar-event-popover-inner" ref={innerRef}>
+            {/* The toolbar heads the card with the title, so it stays in view while the body
+                scrolls. */}
             <div className="calendar-event-popover-header">
-                <TitleRow compact />
-                {/* A sheet is offered no maximize: it already has the whole screen to grow into. */}
-                <MaximizeAction
-                    icon={maximized ? "bx bx-collapse-alt" : "bx bx-expand-alt"}
-                    text={maximized ? t("calendar.restore_details") : t("calendar.expand_details")}
-                    onClick={() => setMaximized(!maximized)}
-                />
-                <ActionButton
-                    icon="bx bx-x"
-                    text={t("calendar.close_details")}
-                    onClick={onClose}
-                />
+                <div className="calendar-event-popover-title">
+                    <TitleRow compact />
+                    {/* A sheet is offered no maximize: it already has the whole screen to grow into. */}
+                    <MaximizeAction
+                        icon={maximized ? "bx bx-collapse-alt" : "bx bx-expand-alt"}
+                        text={maximized ? t("calendar.restore_details") : t("calendar.expand_details")}
+                        onClick={() => setMaximized(!maximized)}
+                    />
+                    <ActionButton
+                        icon="bx bx-x"
+                        text={t("calendar.close_details")}
+                        onClick={onClose}
+                    />
+                </div>
+                <EventActions note={note} parentNote={parentNote} isEditable={isEditable} onClose={onClose} />
             </div>
 
-            <EventDetailsBody note={note} parentNote={parentNote} isEditable={isEditable} maximized={maximized} onClose={onClose} />
+            <EventDetailsBody note={note} isEditable={isEditable} maximized={maximized} />
         </div>
     );
 }
 
 /**
- * The event itself, under whatever heads it: what can be done with it, its own fields, the note's
- * promoted attributes and the note. Shared by the two shells, which differ only in what they put
- * around this and how they are dismissed.
+ * The event's fields, the note's promoted attributes and the note, shared by the popover and the
+ * phone sheet. The popover renders {@link EventActions} in its header; the sheet passes them as
+ * `children`, which render above the fields.
  */
-function EventDetailsBody({ note, parentNote, isEditable, maximized, onClose }: {
+function EventDetailsBody({ note, isEditable, maximized, children }: {
     note: FNote;
-    parentNote: FNote;
     isEditable: boolean;
+    children?: ComponentChildren;
     /** The card fills the window, so what it holds is laid out for a note's width rather than a
      *  card's (see `tn-embedded-note-pane-wide` in EmbeddedNotePane.css). Never a sheet's, which is
      *  a phone's whole screen and still only one field wide. */
     maximized?: boolean;
-    onClose(): void;
 }) {
     // The labels the body's own fields already speak for, so the promoted grid does not repeat
     // them: the dates the calendar draws the event by and the recurrence — under the stock names
@@ -286,30 +293,7 @@ function EventDetailsBody({ note, parentNote, isEditable, maximized, onClose }: 
 
     return (
         <div className={clsx("calendar-event-popover-body tn-embedded-note-pane", maximized && "tn-embedded-note-pane-wide")}>
-                {/* What can be done with the event: the ways of opening its note (see
-                    OpenNoteActions), then the ways of changing it — left out rather than disabled
-                    where the calendar may not be edited, as the geo pane leaves them out. */}
-                <EmbeddedNoteActions>
-                    <OpenNoteActions note={note} />
-
-                    {isEditable && <>
-                        {/* Named for the chip it dresses, the colour it sets being worn everywhere
-                            the note shows (see NoteColorPicker). */}
-                        <NoteColorAction note={note} title={t("calendar_view.event_color")} />
-
-                        <ActionButton
-                            className="tn-embedded-note-remove"
-                            icon="bx bx-trash"
-                            text={t("calendar_view.remove_from_calendar")}
-                            // Whether the note goes with its event is asked before anything
-                            // happens, the two being different wishes. Closed by hand where
-                            // something was done: a removed event is still a note of the
-                            // collection, so no watcher stands the popover down.
-                            onClick={() => void removeFromCalendar(note, parentNote)
-                                .then((removed) => removed && onClose())}
-                        />
-                    </>}
-                </EmbeddedNoteActions>
+                {children}
 
                 {/* The event's own fields — when it happens, how it repeats — which are ways of
                     changing it, so they go where the calendar may be edited: a calendar root's day
@@ -326,6 +310,41 @@ function EventDetailsBody({ note, parentNote, isEditable, maximized, onClose }: 
                 <PromotedAttributes omit={eventLabels} />
                 <NoteDetail />
         </div>
+    );
+}
+
+/**
+ * The event's toolbar: `OpenNoteActions`, then the editing actions, which are omitted when the
+ * calendar is read-only.
+ */
+function EventActions({ note, parentNote, isEditable, onClose }: {
+    note: FNote;
+    parentNote: FNote;
+    isEditable: boolean;
+    onClose(): void;
+}) {
+    return (
+        <EmbeddedNoteActions>
+            <OpenNoteActions note={note} />
+
+            {isEditable && <>
+                {/* Named for the chip it dresses, the colour it sets being worn everywhere
+                    the note shows (see NoteColorPicker). */}
+                <NoteColorAction note={note} title={t("calendar_view.event_color")} />
+
+                <ActionButton
+                    className="tn-embedded-note-remove"
+                    icon="bx bx-trash"
+                    text={t("calendar_view.remove_from_calendar")}
+                    // Whether the note goes with its event is asked before anything
+                    // happens, the two being different wishes. Closed by hand where
+                    // something was done: a removed event is still a note of the
+                    // collection, so no watcher stands the popover down.
+                    onClick={() => void removeFromCalendar(note, parentNote)
+                        .then((removed) => removed && onClose())}
+                />
+            </>}
+        </EmbeddedNoteActions>
     );
 }
 

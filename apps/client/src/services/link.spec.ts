@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import $ from "jquery";
 
@@ -25,13 +25,22 @@ vi.mock("./ws.js", () => {
 // (via note_context) and let us assert on the navigation commands link.ts dispatches.
 const triggerCommand = vi.fn();
 const openTabWithNoteWithHoisting = vi.fn();
+const getNoteContextById = vi.fn((_ntxId: string) => ({ noteId: "abcdefghijkl" }));
 vi.mock("../components/app_context.js", () => ({
     default: {
         triggerCommand: (...args: unknown[]) => triggerCommand(...args),
         tabManager: {
-            openTabWithNoteWithHoisting: (...args: unknown[]) => openTabWithNoteWithHoisting(...args)
+            openTabWithNoteWithHoisting: (...args: unknown[]) => openTabWithNoteWithHoisting(...args),
+            getNoteContextById: (ntxId: string) => getNoteContextById(ntxId)
         }
     }
+}));
+
+const showAnchor = vi.fn();
+const showBlockReference = vi.fn();
+vi.mock("@triliumnext/ckeditor5/src/plugins/block_reference/block_reference_read_only.js", () => ({
+    showAnchor: (...args: unknown[]) => showAnchor(...args),
+    showBlockReference: (...args: unknown[]) => showBlockReference(...args)
 }));
 
 const openInCurrentNoteContext = vi.fn();
@@ -55,15 +64,22 @@ vi.mock("./i18n.js", () => ({
     t: (key: string) => key
 }));
 
+import type { CachedTocResponse } from "@triliumnext/commons";
+
 import { buildNote } from "../test/easy-froca";
 import froca from "./froca.js";
 import treeService from "./tree.js";
 import linkService, {
     calculateExtraWindowUrl,
     calculateHash,
+    getTocUrl,
     goToLinkExt,
-    parseNavigationStateFromUrl
+    loadLinkTargetLabel,
+    parseNavigationStateFromUrl,
+    rememberHeadingTitles,
+    setupLinkHandlers
 } from "./link.js";
+import server from "./server.js";
 import utils from "./utils.js";
 
 beforeEach(() => {
@@ -156,6 +172,9 @@ describe("parseNavigationStateFromUrl", () => {
         const page = parseNavigationStateFromUrl("#root/aaaaaaaaaaaa?page=5");
         expect((page as any).viewScope).toMatchObject({ page: "5" });
 
+        const heading = parseNavigationStateFromUrl("#root/aaaaaaaaaaaa?page=5&heading=0k3x9aa1h7q2mz.Kp3vXq0aB7.p");
+        expect((heading as any).viewScope).toMatchObject({ page: "5", heading: "0k3x9aa1h7q2mz.Kp3vXq0aB7.p" });
+
         const annotation = parseNavigationStateFromUrl("#root/aaaaaaaaaaaa?page=5&annotation=12R");
         expect((annotation as any).viewScope).toMatchObject({ page: "5", annotation: "12R" });
     });
@@ -242,6 +261,8 @@ describe("calculateHash", () => {
     });
 
     it("writes a PDF reference back into the hash it was read from", () => {
+        expect(calculateHash({ notePath: "root/abc", viewScope: { page: "5", heading: "h.1" } } as any))
+            .toBe("#root/abc?page=5&heading=h.1");
         const hash = calculateHash({
             notePath: "root/abc",
             viewScope: { page: "5", annotation: "12R" }
@@ -743,22 +764,139 @@ describe("goToLinkExt", () => {
         openSpy.mockRestore();
     });
 
-    it("scrolls to an in-page anchor for non-root hash links", () => {
-        const target = document.createElement("p");
-        target.id = "fn1";
+    it("scrolls to an in-page anchor for non-root hash links, and flashes its block", async () => {
         const content = document.createElement("div");
         content.className = "ck-content";
-        content.appendChild(target);
+        content.innerHTML = "<p id=\"fn1\">note</p><p><a id=\"a&quot;b\"></a>held</p>";
         document.body.appendChild(content);
-        target.scrollIntoView = vi.fn();
 
-        const $link = $("<a id='ref'>").attr("href", "#fn1");
-        content.appendChild($link[0]);
-
-        const handled = goToLinkExt(leftClick(), "#fn1", $link);
-        expect(handled).toBe(true);
-        expect(target.scrollIntoView).toHaveBeenCalled();
+        // One at a time: concurrent imports of a mocked module can each resolve differently.
+        for (const name of [ "fn1", "a\"b" ]) {
+            const $link = $("<a>").attr("href", `#${name}`);
+            content.appendChild($link[0]);
+            expect(goToLinkExt(leftClick(), `#${name}`, $link)).toBe(true);
+            await vi.waitFor(() => expect(showAnchor).toHaveBeenLastCalledWith(content, name));
+        }
+        expect(showAnchor).toHaveBeenCalledTimes(2);
+        expect(openInCurrentNoteContext).not.toHaveBeenCalled();
         document.body.removeChild(content);
+    });
+
+    it("jumps to an anchor of an editable text note on a ctrl+click or a double click only", async () => {
+        const $content = $("<div class='ck-content note-detail-editable-text-editor'>"
+            + "<p><a id='top'></a>text</p><p id='fn1'>note</p></div>").appendTo(document.body);
+        const $anchorLink = $("<a href='#top'>").appendTo($content);
+        const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+        // The text editor shows the link toolbar, whose first button jumps.
+        goToLinkExt(leftClick(), "#top", $anchorLink);
+        await flush();
+        expect(showAnchor).not.toHaveBeenCalled();
+
+        goToLinkExt(leftClick({ ctrlKey: true }), "#top", $anchorLink);
+        await vi.waitFor(() => expect(showAnchor).toHaveBeenCalledExactlyOnceWith(
+            $content[0], "top"));
+        goToLinkExt(leftClick({ type: "dblclick" }), "#top", $anchorLink);
+        await vi.waitFor(() => expect(showAnchor).toHaveBeenCalledTimes(2));
+
+        // A footnote has no toolbar, so a click on its link still jumps.
+        const $footnoteLink = $("<a href='#fn1'>")
+            .appendTo($("<span class='footnote-reference'>").appendTo($content));
+        goToLinkExt(leftClick(), "#fn1", $footnoteLink);
+        await vi.waitFor(() => expect(showAnchor).toHaveBeenLastCalledWith($content[0], "fn1"));
+        $content.remove();
+    });
+
+    it("follows a link to blocks of the note it is in within the page", async () => {
+        const split = $("<div data-ntx-id='ntx1'><div class='ck-content'>"
+            + "<h2 data-trilium-block-id='h'>Intro</h2></div></div>").appendTo(document.body);
+        const content = split.find(".ck-content")[0];
+        const click = (href: string, $link = $("<a>").appendTo(content), extra = {}) => {
+            goToLinkExt(leftClick(extra), href, $link);
+        };
+
+        click("#root/abcdefghijkl?block=h");
+        await vi.waitFor(() => expect(showBlockReference).toHaveBeenCalledExactlyOnceWith(
+            content, "h"));
+        expect(getNoteContextById).toHaveBeenCalledWith("ntx1");
+        expect(openInCurrentNoteContext).not.toHaveBeenCalled();
+
+        // Another note, a broken range, content outside a note context, or a modifier navigates.
+        click("#root/bcdefghijklm?block=h");
+        click("#root/abcdefghijkl?block=h:gone");
+        click("#root/abcdefghijkl?block=h", $("<a>"));
+        click("#root/abcdefghijkl?block=h", $("<a>").appendTo($("<div class='ck-content'>")));
+        click("#root/abcdefghijkl?block=h", undefined, { shiftKey: true });
+        expect(openInCurrentNoteContext).toHaveBeenCalledTimes(4);
+        expect(triggerCommand).toHaveBeenCalledOnce();
+        // So does a link that asks for a popup or a new tab.
+        click("#root/abcdefghijkl?block=h&popup");
+        click("#root/abcdefghijkl?block=h", $("<a target='_blank'>").appendTo(content));
+        expect(triggerCommand).toHaveBeenLastCalledWith("openInPopup", expect.anything());
+        expect(openTabWithNoteWithHoisting).toHaveBeenCalledOnce();
+        expect(showBlockReference).toHaveBeenCalledOnce();
+        split.remove();
+    });
+
+    it("tells a jump to a heading of the note a link is in from a jump to other blocks", async () => {
+        const split = $("<div data-ntx-id='ntx1'><div class='ck-content'>"
+            + "<h2 data-trilium-block-id='h'>Intro</h2><p data-trilium-block-id='p'>Text</p>"
+            + "</div></div>").appendTo(document.body);
+        const $link = $("<a>").appendTo(split.children());
+        const jump = (noteId: string, block: string) => linkService.getBlockJump($link, noteId, block);
+
+        expect([ "h", "p", "h:p" ].map((block) => jump("abcdefghijkl", block)?.isHeading))
+            .toStrictEqual([ true, false, false ]);
+        expect(jump("bcdefghijklm", "h")).toBeNull();
+        expect(jump("abcdefghijkl", "gone")).toBeNull();
+        expect(linkService.getBlockJump($("<a>"), "abcdefghijkl", "h")).toBeNull();
+
+        jump("abcdefghijkl", "p")?.show();
+        await vi.waitFor(() => expect(showBlockReference).toHaveBeenCalledExactlyOnceWith(
+            split.children()[0], "p"));
+        split.remove();
+    });
+
+    it("jumps in the embed that shows the note of a link, else in the note of the split", async () => {
+        const split = $("<div data-ntx-id='ntx1'><div class='ck-content'>"
+            + "<h2 data-trilium-block-id='intro'>Host intro</h2>"
+            + "<figure class='include-note' data-note-id='embeddedNote'><div class='ck-content'>"
+            + "<h2 data-trilium-block-id='intro'>Embedded intro</h2></div>"
+            + "<figcaption><a class='in-caption'></a></figcaption></figure>"
+            + "</div></div>").appendTo(document.body);
+        const page = split.children()[0];
+        const embed = split.find("figure")[0];
+        const inEmbed = $("<a>").appendTo(split.find("figure > .ck-content"));
+        const inPage = $("<a>").appendTo(page);
+        const inCaption = split.find(".in-caption");
+
+        const embedJump = linkService.getBlockJump(inEmbed, "embeddedNote", "intro");
+        expect(embedJump?.isHeading).toBe(true);
+        embedJump?.show();
+        await vi.waitFor(() => expect(showBlockReference).toHaveBeenLastCalledWith(embed, "intro"));
+        // A link in the embed to the note around it jumps in that note, past the embed.
+        linkService.getBlockJump(inEmbed, "abcdefghijkl", "intro")?.show();
+        await vi.waitFor(() => expect(showBlockReference).toHaveBeenLastCalledWith(page, "intro"));
+        // The caption and the rest of the page do not show the embedded note.
+        expect(linkService.getBlockJump(inCaption, "embeddedNote", "intro")).toBeNull();
+        expect(linkService.getBlockJump(inPage, "embeddedNote", "intro")).toBeNull();
+        split.remove();
+    });
+
+    it("leaves a jump of the link toolbar's preview button to the editor", () => {
+        const $preview = $("<a class='ck-link-toolbar__preview' target='_blank'>");
+        const handled = leftClick({ isDefaultPrevented: () => true });
+        expect(goToLinkExt(handled, "#root/aaaaaaaaaaaa?block=h", $preview)).toBe(true);
+        expect(handled.preventDefault).not.toHaveBeenCalled();
+        // A double click is two clicks of the button.
+        goToLinkExt(leftClick({ type: "dblclick" }), "#root/aaaaaaaaaaaa", $preview);
+        expect(openInCurrentNoteContext).not.toHaveBeenCalled();
+        expect(openTabWithNoteWithHoisting).not.toHaveBeenCalled();
+        // A native event, as the canvas hands over, is read the same way.
+        const native = new MouseEvent("click", { cancelable: true });
+        native.preventDefault();
+        expect(goToLinkExt(native, "#intro", $preview)).toBe(true);
+        expect(openInCurrentNoteContext).not.toHaveBeenCalled();
     });
 
     it("does nothing for an unhandled external link without a protocol match", () => {
@@ -778,6 +916,92 @@ describe("goToLinkExt", () => {
         // inside a contenteditable, a plain left click should not open the link
         expect(openSpy).not.toHaveBeenCalled();
         openSpy.mockRestore();
+    });
+
+    it("leaves a plain left click on a note link in an editable text note to the link toolbar", () => {
+        const $editor = $("<div class='ck-content note-detail-editable-text-editor'>");
+        const $link = $("<a href='#root/aaaaaaaaaaaa'>").appendTo($editor);
+
+        goToLinkExt(leftClick(), "#root/aaaaaaaaaaaa", $link);
+        goToLinkExt(leftClick(), "#root/aaaaaaaaaaaa?popup=1", $link);
+        expect(openInCurrentNoteContext).not.toHaveBeenCalled();
+        expect(triggerCommand).not.toHaveBeenCalled();
+    });
+
+    it("follows a link in the read-only content of an embed on a click, as in a read-only note", () => {
+        const openSpy = vi.spyOn(window, "open").mockImplementation(() => null);
+        const $editor = $("<div class='ck-content note-detail-editable-text-editor'"
+            + " contenteditable='true'><figure class='include-note' contenteditable='false'>"
+            + "<div class='include-note-content'>"
+            + "<div class='ck-content'><a class='text' href='#root/aaaaaaaaaaaa'></a></div>"
+            // A collection or a diagram has no content element of its own.
+            + "<a class='card' href='#root/bbbbbbbbbbbb'></a>"
+            + "<a class='web' href='https://example.com'></a>"
+            + "<div class='ck-content note-detail-editable-text-editor' contenteditable='true'>"
+            + "<a class='edited' href='#root/cccccccccccc'></a></div>"
+            + "</div></figure></div>").appendTo(document.body);
+        const click = (selector: string) => {
+            const $link = $editor.find(selector);
+            goToLinkExt(leftClick(), $link.attr("href"), $link);
+        };
+
+        for (const selector of [ "a.text", "a.card", "a.web" ]) {
+            click(selector);
+        }
+        expect(openInCurrentNoteContext.mock.calls.map(([ , notePath ]) => notePath))
+            .toStrictEqual([ "root/aaaaaaaaaaaa", "root/bbbbbbbbbbbb" ]);
+        expect(openSpy).toHaveBeenCalledExactlyOnceWith("https://example.com", "_blank");
+
+        // The text of an included note being edited is edited too.
+        click("a.edited");
+        expect(openInCurrentNoteContext).toHaveBeenCalledTimes(2);
+        openSpy.mockRestore();
+        $editor.remove();
+    });
+
+    it("follows a link in an editable text note on a ctrl+click or a double click", async () => {
+        const split = $("<div data-ntx-id='ntx1'>"
+            + "<div class='ck-content note-detail-editable-text-editor'>"
+            + "<h2 data-trilium-block-id='h'>Intro</h2></div></div>").appendTo(document.body);
+        const follow = (evt: ReturnType<typeof leftClick>, href: string) =>
+            goToLinkExt(evt, href, $("<a>").attr("href", href).appendTo(split.children()));
+        const openSpy = vi.spyOn(window, "open").mockImplementation(() => null);
+
+        for (const evt of [ leftClick({ ctrlKey: true }), leftClick({ type: "dblclick" }) ]) {
+            follow(evt, "#root/aaaaaaaaaaaa");
+            follow(evt, "https://example.com");
+        }
+        expect(openInCurrentNoteContext).toHaveBeenCalledTimes(2);
+        expect(openInCurrentNoteContext).toHaveBeenLastCalledWith(
+            expect.anything(), "root/aaaaaaaaaaaa", expect.anything());
+        expect(openSpy).toHaveBeenCalledTimes(2);
+        expect(openTabWithNoteWithHoisting).not.toHaveBeenCalled();
+
+        // A link to blocks of the note it is in jumps to them.
+        follow(leftClick({ ctrlKey: true }), "#root/abcdefghijkl?block=h");
+        await vi.waitFor(() => expect(showBlockReference).toHaveBeenCalledOnce());
+        expect(openInCurrentNoteContext).toHaveBeenCalledTimes(2);
+
+        // Shift and the middle button still open the note elsewhere.
+        follow(leftClick({ ctrlKey: true, shiftKey: true }), "#root/aaaaaaaaaaaa");
+        follow({ ...leftClick(), type: "auxclick", which: 2 }, "#root/aaaaaaaaaaaa");
+        follow(leftClick({ shiftKey: true }), "#root/aaaaaaaaaaaa");
+        expect(openTabWithNoteWithHoisting).toHaveBeenNthCalledWith(1,
+            "root/aaaaaaaaaaaa", expect.objectContaining({ activate: true }));
+        expect(openTabWithNoteWithHoisting).toHaveBeenCalledTimes(2);
+        expect(triggerCommand).toHaveBeenCalledExactlyOnceWith("openInWindow", expect.anything());
+        openSpy.mockRestore();
+        split.remove();
+    });
+
+    it("opens a note in place from the preview button of the link toolbar", () => {
+        const $preview = $("<a class='ck-link-toolbar__preview' target='_blank'>");
+        goToLinkExt(leftClick(), "#root/aaaaaaaaaaaa", $preview);
+        expect(openInCurrentNoteContext).toHaveBeenCalledOnce();
+        expect(openTabWithNoteWithHoisting).not.toHaveBeenCalled();
+
+        goToLinkExt(leftClick({ ctrlKey: true }), "#root/aaaaaaaaaaaa", $preview);
+        expect(openTabWithNoteWithHoisting).toHaveBeenCalledOnce();
     });
 
     it("does nothing when there is neither a note path nor an href", () => {
@@ -920,11 +1144,198 @@ describe("getReferenceLinkTitle / getReferenceLinkTitleSync", () => {
             .toBe("Paper - pdf.page_reference");
     });
 
-    it("getReferenceLinkTitleSync returns [missing note] when the note is not in cache", () => {
-        const orig = froca.getNoteFromCache;
-        froca.getNoteFromCache = vi.fn(() => null) as unknown as typeof froca.getNoteFromCache;
-        expect(linkService.getReferenceLinkTitleSync("#root/aaaaaaaaaaaa")).toBe("[missing note]");
-        froca.getNoteFromCache = orig;
+    it("getReferenceLinkTitleSync returns the stored title or [missing note] when the note is not in cache", () => {
+        const getNoteFromCache = vi.spyOn(froca, "getNoteFromCache").mockReturnValue(undefined);
+        const unknownTitle = linkService.getReferenceLinkTitleSync("#root/aaaaaaaaaaaa");
+        const storedTitle = linkService.getReferenceLinkTitleSync("#root/aaaaaaaaaaaa", "Stored");
+        getNoteFromCache.mockRestore();
+
+        expect(unknownTitle).toBe("[missing note]");
+        expect(storedTitle).toBe("Stored");
+    });
+});
+
+describe("the labels of links to PDF headings", () => {
+    const headings = [ { id: "h1", title: "Methods", level: 1 }, { id: "h2.Kp3vXq0aB7", title: "Summary", level: 1 } ];
+
+    function answerToc(...responses: CachedTocResponse[]) {
+        const get = vi.spyOn(server, "get");
+        for (const response of responses) {
+            get.mockResolvedValueOnce(response);
+        }
+        return get;
+    }
+
+    async function label(href: string) {
+        const $el = $("<span>");
+        await linkService.loadReferenceLinkTitle($el, href);
+        return $el;
+    }
+
+    it("shows the heading title from the ToC cache, and remembers a cache of the current blob", async () => {
+        const pdf = buildNote({ title: "Paper" });
+        pdf.blobId = "blobA";
+        const get = answerToc({ status: "ready", blobId: "blobA", headings });
+        const href = `#root/${pdf.noteId}?page=3&heading=h2.Kp3vXq0aB7`;
+
+        const $first = await label(href);
+        const $second = await label(href);
+
+        expect($first.text()).toBe("PaperSummary");
+        expect($first.find("small span").hasClass("bx-heading")).toBe(true);
+        expect($second.text()).toBe("PaperSummary");
+        expect(get).toHaveBeenCalledExactlyOnceWith(`notes/${pdf.noteId}/toc`, undefined, false,
+            { silentBadRequest: true, silentNotFound: true });
+        expect(linkService.getReferenceLinkTitleSync(href)).toBe("Paper - Summary");
+        get.mockRestore();
+    });
+
+    it("shows the page while no cache names the heading, and asks again for the next label", async () => {
+        const pdf = buildNote({ title: "Paper" });
+        const get = answerToc({ status: "missing", pendingToc: { format: "pdf" } },
+            { status: "ready", blobId: pdf.blobId, headings });
+        const href = `#root/${pdf.noteId}?page=12&heading=h1`;
+
+        expect((await label(href)).text()).toBe("Paperpdf.page_reference");
+        expect(linkService.getReferenceLinkTitleSync(href)).toBe("Paper - pdf.page_reference");
+        expect((await label(href)).text()).toBe("PaperMethods");
+        expect(get).toHaveBeenCalledTimes(2);
+        get.mockRestore();
+    });
+
+    it("shows the page for a document whose cache is unavailable, and asks again later",
+        async () => {
+        const pdf = buildNote({ title: "Paper" });
+        const get = answerToc(
+            { status: "unavailable" }, { status: "ready", blobId: pdf.blobId, headings });
+        const href = `#root/${pdf.noteId}?page=12&heading=h1`;
+
+        expect((await label(href)).text()).toBe("Paperpdf.page_reference");
+        expect((await label(href)).text()).toBe("PaperMethods");
+        expect(get).toHaveBeenCalledTimes(2);
+        get.mockRestore();
+    });
+
+    it("shows the title from a stale cache without remembering it", async () => {
+        const pdf = buildNote({ title: "Paper" });
+        const get = answerToc({ status: "stale", blobId: "older", headings },
+            { status: "stale", blobId: "older", headings });
+        const href = `#root/${pdf.noteId}?page=12&heading=h1`;
+
+        expect((await label(href)).text()).toBe("PaperMethods");
+        expect((await label(href)).text()).toBe("PaperMethods");
+        expect(get).toHaveBeenCalledTimes(2);
+        expect(linkService.getReferenceLinkTitleSync(href)).toBe("Paper - pdf.page_reference");
+        get.mockRestore();
+    });
+
+    it("shows the page for an id the cache does not hold, such as one made under the other protection", async () => {
+        const pdf = buildNote({ title: "Paper" });
+        rememberHeadingTitles(`notes/${pdf.noteId}/toc`, pdf.blobId, headings);
+        const get = vi.spyOn(server, "get");
+
+        expect((await label(`#root/${pdf.noteId}?page=4&heading=h2.Kp3vXq0aB7.p`)).text())
+            .toBe("Paperpdf.page_reference");
+        expect(get).not.toHaveBeenCalled();
+        get.mockRestore();
+    });
+
+    it("shows the page for a heading that the ToC cache it reads does not list", async () => {
+        const pdf = buildNote({ title: "Paper" });
+        const get = answerToc({ status: "ready", blobId: pdf.blobId, headings });
+
+        const $small = (await label(`#root/${pdf.noteId}?page=4&heading=gone`)).find("small");
+
+        expect([ $small.length, $small.text() ]).toStrictEqual([ 1, "pdf.page_reference" ]);
+        expect($small.find("span").hasClass("bx-file")).toBe(true);
+        expect(get).toHaveBeenCalledOnce();
+        get.mockRestore();
+    });
+
+    it("shows the note title alone for a document heading before a list built a cache", async () => {
+        const docx = buildNote({ title: "Report" });
+        const get = answerToc({ status: "missing" },
+            { status: "ready", blobId: docx.blobId, headings });
+        const href = `#root/${docx.noteId}?heading=h2.Kp3vXq0aB7`;
+
+        expect((await label(href)).text()).toBe("Report");
+        expect(linkService.getReferenceLinkTitleSync(href)).toBe("Report");
+        expect((await label(href)).text()).toBe("ReportSummary");
+        expect(linkService.getReferenceLinkTitleSync(href)).toBe("Report - Summary");
+        get.mockRestore();
+    });
+
+    it("shares one read between labels, and shows the page when the read fails", async () => {
+        const pdf = buildNote({ title: "Paper" });
+        const get = vi.spyOn(server, "get").mockRejectedValueOnce(new Error("offline"));
+        const href = `#root/${pdf.noteId}?page=2&heading=h1`;
+
+        const labels = await Promise.all([ label(href), label(href) ]);
+
+        expect(labels.map(($el) => $el.text())).toStrictEqual([ "Paperpdf.page_reference", "Paperpdf.page_reference" ]);
+        expect(get).toHaveBeenCalledOnce();
+        get.mockRestore();
+    });
+
+    it("reads the ToC cache of an attachment for a link to its heading", async () => {
+        const owner = buildNote({ title: "Owner" });
+        vi.spyOn(froca, "getAttachmentOfNote").mockImplementation(async (_noteId, attachmentId) =>
+            (attachmentId === "att1" ? { attachmentId: "att1", blobId: "attBlob", title: "Book.pdf" } : null) as any);
+        const get = answerToc({ status: "ready", blobId: "attBlob", headings });
+
+        const $el = await label(`#root/${owner.noteId}?viewMode=attachments&attachmentId=att1&page=3&heading=h1`);
+        const $missing = await label(`#root/${owner.noteId}?viewMode=attachments&attachmentId=gone&page=3&heading=h1`);
+
+        expect($el.text()).toContain("Methods");
+        expect(get).toHaveBeenCalledExactlyOnceWith("attachments/att1/toc", undefined, false,
+            { silentBadRequest: true, silentNotFound: true });
+        expect($missing.find("small").text()).toBe("pdf.page_reference");
+        vi.restoreAllMocks();
+    });
+
+    it("gives the label that the Markdown chips show", async () => {
+        const pdf = buildNote({ title: "Paper" });
+        rememberHeadingTitles(getTocUrl("notes", pdf.noteId), pdf.blobId, headings);
+
+        expect(await loadLinkTargetLabel(pdf, { heading: "h1", page: "3" }))
+            .toStrictEqual({ text: "Methods", icon: "bx bx-heading", isBroken: false });
+        expect(await loadLinkTargetLabel(pdf, { page: "3", annotation: "12R" })).toStrictEqual({
+            text: "pdf.annotation_reference", icon: "bx bx-comment-detail", isBroken: false
+        });
+        expect(await loadLinkTargetLabel(pdf, {})).toBeNull();
+    });
+
+    it("names the most specific place a link points at, in every label", async () => {
+        const note = buildNote({
+            title: "Doc", content: "<p data-trilium-block-id=\"b1\">First block</p>"
+        });
+        rememberHeadingTitles(getTocUrl("notes", note.noteId), note.blobId, headings);
+        const cases: [ Record<string, string>, string ][] = [
+            [ { block: "b1", bookmark: "Intro", page: "3" }, "First block" ],
+            [ { heading: "h1", bookmark: "Intro", page: "3" }, "Methods" ],
+            [ { heading: "gone", bookmark: "Intro", page: "3" }, "Intro" ],
+            [ { heading: "gone", page: "3" }, "pdf.page_reference" ]
+        ];
+
+        for (const [ params, text ] of cases) {
+            const href = `#root/${note.noteId}?${new URLSearchParams(params)}`;
+            const $small = (await label(href)).find("small");
+            expect([ $small.length, $small.text() ]).toStrictEqual([ 1, text ]);
+            expect(linkService.getReferenceLinkTitleSync(href)).toBe(`Doc - ${text}`);
+        }
+    });
+
+    it("keeps the titles of the last documents it read", () => {
+        const pdfs = Array.from({ length: 21 }, (_, index) => buildNote({ title: `Paper ${index}` }));
+        for (const pdf of pdfs) {
+            rememberHeadingTitles(`notes/${pdf.noteId}/toc`, pdf.blobId, headings);
+        }
+        rememberHeadingTitles(`notes/${pdfs[20].noteId}/toc`, pdfs[20].blobId, headings);
+
+        expect(linkService.getReferenceLinkTitleSync(`#root/${pdfs[0].noteId}?page=1&heading=h1`))
+            .toBe("Paper 0 - pdf.page_reference");
+        expect(linkService.getReferenceLinkTitleSync(`#root/${pdfs[1].noteId}?page=1&heading=h1`))
+            .toBe("Paper 1 - Methods");
     });
 });
 
@@ -1040,17 +1451,22 @@ describe("loadReferenceLinkTitle", () => {
         expect($el.text()).toContain("Inner");
     });
 
-    it("renders the title without color class / icon when the note is not found", async () => {
-        const orig = froca.getNote;
-        // First lookup (for color/icon) returns null; getReferenceLinkTitle also returns missing note.
-        froca.getNote = vi.fn(async () => null) as typeof froca.getNote;
-        const $a = $("<a>").attr("href", "#root/aaaaaaaaaaaa");
-        const $el = $("<span>").append($a);
-        await linkService.loadReferenceLinkTitle($el, "#root/aaaaaaaaaaaa");
-        expect($el.text()).toBe("[missing note]");
-        // no color class span and no prepended icon since the note was absent
-        expect($el.find("small").length).toBe(0);
-        froca.getNote = orig;
+    it("renders a missing note with the title stored in the content, an X icon and in red", async () => {
+        const getNote = vi.spyOn(froca, "getNote").mockResolvedValue(null);
+        const $stored = $("<span>");
+        const $unknown = $("<span>");
+
+        await linkService.loadReferenceLinkTitle($stored, "#root/aaaaaaaaaaaa?bookmark=Sec", undefined,
+            "Deleted note");
+        await linkService.loadReferenceLinkTitle($unknown, "#root/aaaaaaaaaaaa");
+        getNote.mockRestore();
+
+        expect($stored.text()).toBe("Deleted note");
+        expect($stored.is(".reference-link-missing.no-link-navigation")).toBe(true);
+        expect($stored.children("span").first().is(".tn-icon.bx.bx-x")).toBe(true);
+        expect($stored.find("small").length).toBe(0);
+        expect($unknown.text()).toBe("[missing note]");
+        expect($unknown.hasClass("reference-link-missing")).toBe(true);
     });
 
     it("does not prepend an icon when the resolved note has no icon", async () => {
@@ -1072,7 +1488,9 @@ describe("loadReferenceLinkTitle", () => {
     });
 });
 
-describe("module-level click handlers", () => {
+describe("setupLinkHandlers", () => {
+    beforeAll(() => setupLinkHandlers());
+
     it("prevents default paste on middle mouse button down on an anchor", () => {
         const $a = $("<a href='#root/aaaaaaaaaaaa'>link</a>");
         $("body").append($a);
@@ -1110,11 +1528,12 @@ describe("module-level click handlers", () => {
         $card.remove();
     });
 
-    it("opens the link context menu on contextmenu of an internal link", () => {
+    it("opens the link context menu on contextmenu of an internal link", async () => {
         const $a = $("<a href='#root/aaaaaaaaaaaa'>link</a>");
         $("body").append($a);
         $a.trigger($.Event("contextmenu", { button: 2 }));
-        expect(openContextMenu).toHaveBeenCalled();
+        // The menu module is imported on the first right-click.
+        await vi.waitFor(() => expect(openContextMenu).toHaveBeenCalled());
         $a.remove();
     });
 
@@ -1124,6 +1543,26 @@ describe("module-level click handlers", () => {
         $a.trigger($.Event("contextmenu", { button: 2 }));
         expect(openContextMenu).not.toHaveBeenCalled();
         $a.remove();
+    });
+
+    it("leaves a link in the text being edited to the menu of its toolbar", async () => {
+        const $editor = $(`<div class="ck-content note-detail-editable-text-editor">`
+            + `<p><a href='#root/aaaaaaaaaaaa'>link</a></p>`
+            + `<figure class="include-note"><a href='#root/bbbbbbbbbbbb'>title</a></figure></div>`);
+        $("body").append($editor);
+        const rightClick = (selector: string) => {
+            const event = $.Event("contextmenu", { button: 2 });
+            $editor.find(selector).trigger(event);
+            return event.isDefaultPrevented();
+        };
+
+        expect(rightClick("p a")).toBe(false);
+        expect(openContextMenu).not.toHaveBeenCalled();
+
+        // A link in an included note is not one of the text.
+        expect(rightClick("figure a")).toBe(true);
+        await vi.waitFor(() => expect(openContextMenu).toHaveBeenCalledOnce());
+        $editor.remove();
     });
 
     it("does nothing on context menu when the link has no resolvable note path", () => {
@@ -1152,12 +1591,35 @@ describe("module-level click handlers", () => {
         $a.remove();
     });
 
-    it("falls back to data-href when an anchor has no href (context menu handler)", () => {
+    it("falls back to data-href when an anchor has no href (context menu handler)", async () => {
         const $a = $("<a data-href='#root/aaaaaaaaaaaa'>link</a>");
         $("body").append($a);
         $a.trigger($.Event("contextmenu", { button: 2 }));
-        expect(openContextMenu).toHaveBeenCalled();
+        await vi.waitFor(() => expect(openContextMenu).toHaveBeenCalled());
         $a.remove();
+    });
+
+    it("marks the document while Ctrl is held, for the pointer over a link being edited", () => {
+        const isMarked = () => document.documentElement.classList.contains("follow-link-key-held");
+        // A widget that keeps its keys from the editor stops them on the way down.
+        const widget = $("<input>").appendTo("body")[0];
+        widget.addEventListener("keydown", (e) => e.stopPropagation(), { capture: true });
+        const press = (type: string, init: KeyboardEventInit) =>
+            widget.dispatchEvent(new KeyboardEvent(type, { bubbles: true, ...init }));
+
+        press("keydown", { key: "Control", ctrlKey: true });
+        expect(isMarked()).toBe(true);
+        press("keyup", { key: "a", ctrlKey: true });
+        expect(isMarked()).toBe(true);
+        press("keyup", { key: "Control" });
+        expect(isMarked()).toBe(false);
+
+        // Leaving the window while the key is held drops its keyup.
+        press("keydown", { key: "Control", ctrlKey: true });
+        expect(isMarked()).toBe(true);
+        window.dispatchEvent(new Event("blur"));
+        expect(isMarked()).toBe(false);
+        widget.remove();
     });
 
     it("does not prevent default on a left mouse button down", () => {
@@ -1167,5 +1629,111 @@ describe("module-level click handlers", () => {
         $a.trigger($.Event("mousedown", { which: 1, preventDefault }));
         expect(preventDefault).not.toHaveBeenCalled();
         $a.remove();
+    });
+});
+
+describe("block references", () => {
+    const content = "<p data-trilium-block-id=\"b1\">First block</p>"
+        + "<p data-trilium-block-id=\"b2\">Second</p>";
+
+    it("parses and writes the block parameter, keeping the colon of a range", () => {
+        expect(parseNavigationStateFromUrl("#root/a1b2/c3d4?block=b1:b%202").viewScope)
+            .toMatchObject({ block: "b1:b 2" });
+        expect(calculateHash({ notePath: "root/c3d4", viewScope: { block: "b1:b 2" } }))
+            .toBe("#root/c3d4?block=b1:b%202");
+    });
+
+    it("labels a reference by the text of its blocks, or as broken", async () => {
+        const note = buildNote({ title: "Source", content });
+        const $el = $("<span>");
+        const $broken = $("<span>");
+
+        const href = `#root/${note.noteId}?block=b1:b2`;
+        const brokenHref = `#root/${note.noteId}?block=gone`;
+
+        expect(linkService.getReferenceLinkTitleSync(href)).toBe("Source");
+        await linkService.loadReferenceLinkTitle($el, href);
+        await linkService.loadReferenceLinkTitle($broken, brokenHref);
+
+        expect($el.find("small span.bx.bx-paragraph")).toHaveLength(1);
+        expect($el.find("small").text()).toBe("First block … Second");
+        expect($el.find("small").hasClass("block-reference-broken")).toBe(false);
+        expect($broken.find("small").text()).toBe("block_reference.broken");
+        expect($broken.find("small").hasClass("block-reference-broken")).toBe(true);
+        expect(linkService.getReferenceLinkTitleSync(href)).toBe("Source - First block … Second");
+        expect(linkService.getReferenceLinkTitleSync(brokenHref)).toBe("Source");
+    });
+
+    it("labels a reference to the blocks of the note it is in by their text alone", async () => {
+        const note = buildNote({ title: "Source", content });
+        const $own = $("<span>");
+        const $broken = $("<span>");
+        const $elsewhere = $("<span>");
+
+        const href = `#root/${note.noteId}?block=b1`;
+        const brokenHref = `#root/${note.noteId}?block=gone`;
+        await linkService.loadReferenceLinkTitle($own, href, note.noteId);
+        await linkService.loadReferenceLinkTitle($broken, brokenHref, note.noteId);
+        await linkService.loadReferenceLinkTitle($elsewhere, href, "otherNote");
+
+        expect($own.text()).toBe("First block");
+        expect($own.children("span.tn-icon.bx.bx-paragraph")).toHaveLength(1);
+        expect($own.find("small")).toHaveLength(0);
+        expect($own.hasClass("block-reference-broken")).toBe(false);
+        expect($broken.text()).toBe("block_reference.broken");
+        expect($broken.hasClass("block-reference-broken")).toBe(true);
+        expect($elsewhere.text()).toBe("SourceFirst block");
+        expect($elsewhere.find("small").text()).toBe("First block");
+    });
+
+    it("labels a reference to blocks of the content it is in from that content", async () => {
+        const note = buildNote({
+            title: "Source", content: "<h2 data-trilium-block-id=\"h\">Saved</h2>" + content
+        });
+        const live = document.createElement("div");
+        live.innerHTML = "<h2 data-trilium-block-id=\"h\">Live heading</h2>" + content;
+        const href = (block: string) => `#root/${note.noteId}?block=${block}`;
+        const $heading = $("<span>");
+        const $paragraph = $("<span>");
+        const $saved = $("<span>");
+
+        await linkService.loadReferenceLinkTitle($heading, href("h"), undefined, undefined, live);
+        await linkService.loadReferenceLinkTitle($paragraph, href("b1"), undefined, undefined, live);
+        await linkService.loadReferenceLinkTitle($saved, href("h"), note.noteId);
+
+        // A heading reads as its text alone, without an icon.
+        expect($heading.html()).toBe("Live heading");
+        expect($paragraph.text()).toBe("First block");
+        expect($paragraph.children("span.tn-icon.bx.bx-paragraph")).toHaveLength(1);
+        expect($saved.html()).toBe("Saved");
+        expect(linkService.getReferenceLinkTitleSync(href("h"), "Stored", live))
+            .toBe("Live heading");
+        expect(linkService.getReferenceLinkTitleSync(href("gone"), "Stored", live))
+            .toBe("block_reference.broken");
+
+        // The editor of an excerpt holds only some blocks, and the others are read from the note.
+        // In an editor of the whole note, a block missing from it is gone, whatever the note saved.
+        const partial = document.createElement("div");
+        partial.innerHTML = content;
+        const $excerpt = $("<span>");
+        const $whole = $("<span>");
+        await linkService.loadReferenceLinkTitle(
+            $excerpt, href("h"), undefined, undefined, partial, true);
+        await linkService.loadReferenceLinkTitle($whole, href("h"), undefined, undefined, partial);
+        expect([ $excerpt, $whole ].map(($el) => [
+            $el.text(), $el.hasClass("block-reference-broken")
+        ])).toStrictEqual([ [ "Saved", false ], [ "block_reference.broken", true ] ]);
+        expect([ true, false ].map((isExcerpt) =>
+            linkService.getReferenceLinkTitleSync(href("h"), "Stored", partial, isExcerpt)))
+            .toStrictEqual([ "Saved", "block_reference.broken" ]);
+    });
+
+    it("adds no label to a reference to the blocks of a note that cannot be read", async () => {
+        const note = buildNote({ title: "Code", type: "code", content });
+        const $el = $("<span>");
+
+        await linkService.loadReferenceLinkTitle($el, `#root/${note.noteId}?block=b1`);
+
+        expect($el.find("small")).toHaveLength(0);
     });
 });

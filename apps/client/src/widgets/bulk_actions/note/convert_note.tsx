@@ -1,4 +1,7 @@
-import { NOTE_CONVERSION_IDS, NoteConversionId, RISKY_NOTE_CONVERSION_IDS } from "@triliumnext/commons";
+import type { NoteConversionId } from "@triliumnext/commons";
+import {
+    NOTE_CONVERSION_IDS, RISKY_NOTE_CONVERSION_IDS
+} from "@triliumnext/commons/src/lib/bulk_actions.js";
 import { useState } from "preact/hooks";
 
 import { t } from "../../../services/i18n";
@@ -27,13 +30,12 @@ function ConvertNoteBulkActionComponent({ bulkAction, actionDef }: { bulkAction:
     return (
         <BulkAction
             bulkAction={bulkAction}
-            label={t("convert_note.convert_note_to")}
-            helpText={<p>{t("convert_note.help_text")}</p>}
         >
             <FormSelect
                 values={conversionOptions}
                 keyProperty="value"
                 titleProperty="title"
+                required
                 currentValue={conversion}
                 onChange={onChange}
             />
@@ -64,5 +66,11 @@ export default class ConvertNoteBulkAction extends AbstractBulkAction {
 
     static get actionTitle() {
         return t("convert_note.convert_note");
+    }
+    static get actionIcon() {
+        return "bx bx-note bulk-action-marker-convert";
+    }
+    static get actionDescription() {
+        return t("convert_note.description");
     }
 }

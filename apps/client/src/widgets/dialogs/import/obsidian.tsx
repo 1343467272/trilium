@@ -4,9 +4,8 @@ import { t } from "../../../services/i18n.js";
 import Button from "../../react/Button.js";
 import { Card, CardSection } from "../../react/Card.js";
 import FileDropZone from "../../react/FileDropZone.js";
-import { useTriliumOptionBool } from "../../react/hooks.js";
+import { useTriliumOptionBool } from "../../react/hooks/options.js";
 import { OptionsRowWithToggle } from "../../type_widgets/options/components/OptionsRow.js";
-import iconUrl from "./icons/obsidian.svg?url";
 import type { ImportProvider, ImportProviderPanelProps } from "./types.js";
 import useProviderImport from "./useProviderImport.js";
 
@@ -56,7 +55,7 @@ const provider: ImportProvider = {
     id: "obsidian",
     helpPage: "iWD7wiIuMtgV",
     name: t("obsidian_import.name"),
-    iconUrl,
+    icon: "tn-brand tn-brand-obsidian",
     description: t("obsidian_import.description"),
     Panel: ObsidianPanel
 };

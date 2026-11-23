@@ -5,7 +5,9 @@ _Active content_ is a generic name for powerful features in Trilium, these range
 
 Active content problem of safety, especially when this active content comes from a third-party such as if it is downloaded from a website and then imported into Trilium.
 
-When [importing](Import%20%26%20Export.md) .zip archives into Trilium, _safe mode_ is active by default which will try to prevent untrusted code from executing. For example, a [custom widget](../Scripting/Frontend%20Basics/Custom%20Widgets.md) needs the `#widget` [label](../Advanced%20Usage/Attributes/Labels.md) in order to function; safe import works by renaming that label to `#disabled:widget`.
+When [importing](Import%20%26%20Export.md) into Trilium, _safe mode_ is active by default which will try to prevent untrusted code from executing. For example, a [custom widget](../Scripting/Frontend%20Basics/Custom%20Widgets.md) needs the `#widget` [label](../Advanced%20Usage/Attributes/Labels.md) in order to function; safe import works by renaming that label to `#disabled:widget`.
+
+This applies to every attribute an import creates: those in a Trilium .zip export, and those made from the properties of other formats (such as the YAML front matter of a Markdown file, an Evernote tag, or a Notion, Anytype or Obsidian property).
 
 ## Safe mode
 
@@ -28,6 +30,6 @@ These are the types of active content in Trilium, along with a few examples of w
 
 ## Active content badge
 
-Starting with v0.102.0, on the <a class="reference-link" href="UI%20Elements/New%20Layout.md">New Layout</a> a badge will be displayed near the note title, indicating that an active content is detected. Clicking the badge will reveal a menu with various options related to that content type, for example to open the documentation or to configure the execution of scripts.
+If a note is considered to have active content, a badge is shown in the <a class="reference-link" href="Notes/Note%20badges.md">Note badges</a> area. Clicking the badge will reveal a menu with various options related to that content type, for example to open the documentation or to configure the execution of scripts.
 
 For some active content types, such as backend scripts with custom triggering conditions a toggle button will appear. This makes it possible to easily disable scripts or widgets, but also to re-enable them if an import was made with safe mode active.

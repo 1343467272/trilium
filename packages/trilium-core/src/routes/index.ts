@@ -3,6 +3,7 @@ import treeApiRoute from "./api/tree";
 import keysApiRoute from "./api/keys";
 import notesApiRoute from "./api/notes";
 import attachmentsApiRoute from "./api/attachments";
+import tocApiRoute from "./api/toc";
 import noteMapRoute from "./api/note_map";
 import recentNotesRoute from "./api/recent_notes";
 import otherRoute from "./api/others";
@@ -43,6 +44,9 @@ import spreadsheetRoute from "./api/spreadsheet";
 import llmRoute from "./api/llm";
 
 export { type CustomRequestResponse, handleCustomRequest } from "./custom";
+
+/** The options a client reads, as `/api/options` returns them, which `/bootstrap` hands over too. */
+export const getClientOptions = optionsApiRoute.getOptions;
 
 // TODO: Deduplicate with routes.ts
 const GET = "get",
@@ -103,6 +107,14 @@ export function buildSharedApiRoutes({ route, asyncRoute, asyncRouteWithoutTrans
     apiRoute(GET, "/api/notes/:noteId/metadata", notesApiRoute.getNoteMetadata);
     apiRoute(PST, "/api/notes/metadata", notesApiRoute.getNotesMetadata);
     apiRoute(PUT, "/api/notes/:noteId/data", notesApiRoute.updateNoteData);
+    apiRoute(GET, "/api/notes/:noteId/blocks", notesApiRoute.getNoteBlocks);
+    apiRoute(PUT, "/api/notes/:noteId/blocks", notesApiRoute.updateNoteBlocks);
+    asyncApiRoute(GET, "/api/notes/:noteId/references", notesApiRoute.getNoteReferences);
+    apiRoute(PST, "/api/notes/:noteId/references", notesApiRoute.createNoteReference);
+    apiRoute(GET, "/api/notes/:noteId/references/marked", notesApiRoute.getMarkedNoteHeadings);
+    apiRoute(GET, "/api/notes/:noteId/toc", tocApiRoute.getNoteToc);
+    apiRoute(PUT, "/api/notes/:noteId/toc", tocApiRoute.saveNoteToc);
+    asyncApiRoute(PST, "/api/notes/:noteId/toc/build", tocApiRoute.buildNoteToc);
     apiRoute(DEL, "/api/notes/:noteId", notesApiRoute.deleteNote);
     apiRoute(PUT, "/api/notes/:noteId/undelete", notesApiRoute.undeleteNote);
     apiRoute(PST, "/api/notes/:noteId/revision", notesApiRoute.forceSaveRevision);
@@ -125,6 +137,12 @@ export function buildSharedApiRoutes({ route, asyncRoute, asyncRouteWithoutTrans
     apiRoute(DEL, "/api/attachments/:attachmentId", attachmentsApiRoute.deleteAttachment);
     apiRoute(PUT, "/api/attachments/:attachmentId/rename", attachmentsApiRoute.renameAttachment);
     apiRoute(GET, "/api/attachments/:attachmentId/blob", attachmentsApiRoute.getAttachmentBlob);
+    asyncApiRoute(GET, "/api/attachments/:attachmentId/references",
+        tocApiRoute.getAttachmentReferences);
+    apiRoute(GET, "/api/attachments/:attachmentId/toc", tocApiRoute.getAttachmentToc);
+    apiRoute(PUT, "/api/attachments/:attachmentId/toc", tocApiRoute.saveAttachmentToc);
+    asyncApiRoute(PST, "/api/attachments/:attachmentId/toc/build",
+        tocApiRoute.buildAttachmentToc);
 
     apiRoute(GET, "/api/notes/:noteId/attributes", attributesRoute.getEffectiveNoteAttributes);
     apiRoute(PST, "/api/notes/:noteId/attributes", attributesRoute.addNoteAttribute);
@@ -139,6 +157,7 @@ export function buildSharedApiRoutes({ route, asyncRoute, asyncRouteWithoutTrans
 
     apiRoute(GET, "/api/notes/:noteId/revisions", revisionsApiRoute.getRevisions);
     apiRoute(DEL, "/api/notes/:noteId/revisions", revisionsApiRoute.eraseAllRevisions);
+    apiRoute(PST, "/api/notes/:noteId/revisions/draft", revisionsApiRoute.saveDraftRevision);
     apiRoute(PST, "/api/revisions/erase-all-excess-revisions", revisionsApiRoute.eraseAllExcessRevisions);
     apiRoute(GET, "/api/revisions/:revisionId", revisionsApiRoute.getRevision);
     apiRoute(GET, "/api/revisions/:revisionId/blob", revisionsApiRoute.getRevisionBlob);
@@ -175,6 +194,9 @@ export function buildSharedApiRoutes({ route, asyncRoute, asyncRouteWithoutTrans
     // POSTed rather than taking the URL in a query string: a link can carry a one-time token or a
     // signature, and a query string ends up in every access log along the way.
     asyncApiRoute(PST, "/api/link-embed/metadata", linkEmbedRoute.getMetadata);
+    asyncApiRoute(PST, "/api/link-embed/details", linkEmbedRoute.getPageDetails);
+    asyncApiRoute(PST, "/api/link-embed/status", linkEmbedRoute.getHttpStatus);
+    asyncApiRoute(PST, "/api/link-embed/thumbnail", linkEmbedRoute.storeMediaThumbnail);
 
     asyncRoute(GET, "/api/spreadsheet/:noteId/xlsx", [checkApiAuthOrElectron], spreadsheetRoute.exportXlsx);
 
@@ -252,7 +274,11 @@ export function buildSharedApiRoutes({ route, asyncRoute, asyncRouteWithoutTrans
     // The server and the desktop app answer `/api/llm-chat/stream` with Server-Sent
     // Events; standalone, whose bridge cannot hold a response open, registers
     // `llmRoute.startChatStream` itself. See `apps/standalone`'s browser_routes.ts.
+    // Answering a tool call is here: it reaches the turn by its stream id, whichever
+    // transport streams it.
     asyncApiRoute(PST, "/api/llm-chat/provider-models", llmRoute.getProviderModels);
+    asyncApiRoute(PST, "/api/llm-chat/test-search-provider", llmRoute.testSearchProvider);
+    apiRoute(PST, "/api/llm-chat/tool-approval", llmRoute.answerToolCall);
 
     apiRoute(GET, "/api/autocomplete", autocompleteApiRoute.getAutocomplete);
 
@@ -260,6 +286,8 @@ export function buildSharedApiRoutes({ route, asyncRoute, asyncRouteWithoutTrans
     apiRoute(PUT, "/api/notes/:noteId/toggle-in-parent/:parentNoteId/:present", cloningApiRoute.toggleNoteInParent);
     apiRoute(PUT, "/api/notes/:noteId/clone-to-note/:parentNoteId", cloningApiRoute.cloneNoteToParentNote);
     apiRoute(PUT, "/api/notes/:noteId/clone-after/:afterBranchId", cloningApiRoute.cloneNoteAfter);
+    apiRoute(PUT, "/api/notes/:noteId/clone-before/:beforeBranchId",
+        cloningApiRoute.cloneNoteBefore);
 
     asyncApiRoute(GET, "/api/special-notes/inbox/:date", specialNotesRoute.getInboxNote);
     apiRoute(GET, "/api/special-notes/inbox-target", specialNotesRoute.getInboxTarget);
@@ -318,15 +346,20 @@ export function buildSharedApiRoutes({ route, asyncRoute, asyncRouteWithoutTrans
     asyncApiRoute(PST, "/api/database/backup-database", backupRoute.backupDatabase);
     asyncRoute(GET, "/api/database/backup/download", [checkApiAuthOrElectron], backupRoute.downloadBackup);
 
+    apiRoute(GET, "/api/other/icon-registry", otherRoute.getIconRegistry);
     apiRoute(GET, "/api/other/icon-usage", otherRoute.getIconUsage);
     apiRoute(PST, "/api/other/render-markdown", otherRoute.renderMarkdown);
     apiRoute(PST, "/api/other/to-markdown", otherRoute.toMarkdown);
 
     route(GET, "/api/fonts", [checkApiAuthOrElectron], fontsRoute.getFontCss);
+    // Unauthenticated like `/bootstrap`, which hands the same icon packs to the login screen.
+    route(GET, "/api/icon-packs.css", [], otherRoute.serveIconPackGlyphCss);
 
     asyncApiRoute(GET, "/api/similar-notes/:noteId", similarNotesRoute.getSimilarNotes);
     apiRoute(PST, "/api/relation-map", relationMapApiRoute.getRelationMap);
     apiRoute(GET, "/api/recent-changes/:ancestorNoteId", recentChangesApiRoute.getRecentChanges);
+    apiRoute(GET, "/api/recent-changes/:ancestorNoteId/note-ids",
+        recentChangesApiRoute.getRecentlyChangedNoteIds);
 
     apiRoute(GET, "/api/deleted-notes/:noteId/metadata", deletedNotesApiRoute.getDeletedNoteMetadata);
     apiRoute(GET, "/api/deleted-notes/:noteId/blob", deletedNotesApiRoute.getDeletedNoteBlob);
@@ -336,8 +369,10 @@ export function buildSharedApiRoutes({ route, asyncRoute, asyncRouteWithoutTrans
     // What the media players stream from: same content as /open, but answering byte ranges so they can seek.
     route(GET, "/api/notes/:noteId/open-partial", [checkApiAuthOrElectron], filesRoute.openPartialFile);
     route(GET, "/api/attachments/:attachmentId/open-partial", [checkApiAuthOrElectron], filesRoute.openPartialAttachment);
-    asyncApiRoute(GET, "/api/notes/:noteId/office-preview", filesRoute.getNoteOfficePreview);
-    asyncApiRoute(GET, "/api/attachments/:attachmentId/office-preview", filesRoute.getAttachmentOfficePreview);
+    asyncRouteWithoutTransaction(GET, "/api/notes/:noteId/office-preview", [checkApiAuth, csrfMiddleware], filesRoute.getNoteOfficePreview);
+    asyncRouteWithoutTransaction(GET, "/api/attachments/:attachmentId/office-preview", [checkApiAuth, csrfMiddleware], filesRoute.getAttachmentOfficePreview);
+    asyncRouteWithoutTransaction(GET, "/api/notes/:noteId/spreadsheet-workbook", [checkApiAuth, csrfMiddleware], filesRoute.getNoteSpreadsheetWorkbook);
+    asyncRouteWithoutTransaction(GET, "/api/attachments/:attachmentId/spreadsheet-workbook", [checkApiAuth, csrfMiddleware], filesRoute.getAttachmentSpreadsheetWorkbook);
     route(GET, "/api/notes/:noteId/download", [checkApiAuthOrElectron], filesRoute.downloadFile);
     // this "hacky" path is used for easier referencing of CSS resources
     route(GET, "/api/notes/download/:noteId", [checkApiAuthOrElectron], filesRoute.downloadFile);

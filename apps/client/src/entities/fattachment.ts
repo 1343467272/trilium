@@ -6,6 +6,9 @@ export interface FAttachmentRow {
     role: string;
     mime: string;
     title: string;
+    /** The blob of the content, which an edit of the attachment is based on. */
+    blobId?: string;
+    isProtected?: boolean;
     dateModified: string;
     utcDateModified: string;
     utcDateScheduledForErasureSince: string;
@@ -23,13 +26,11 @@ class FAttachment {
     role!: string;
     mime!: string;
     title!: string;
-    isProtected!: boolean; // TODO: Is this used?
+    blobId?: string;
+    isProtected!: boolean;
     private dateModified!: string;
     utcDateModified!: string;
     utcDateScheduledForErasureSince!: string;
-    /**
-     * optionally added to the entity
-     */
     contentLength!: number;
 
     constructor(froca: Froca, row: FAttachmentRow) {
@@ -45,6 +46,8 @@ class FAttachment {
         this.role = row.role;
         this.mime = row.mime;
         this.title = row.title;
+        this.blobId = row.blobId;
+        this.isProtected = !!row.isProtected;
         this.dateModified = row.dateModified;
         this.utcDateModified = row.utcDateModified;
         this.utcDateScheduledForErasureSince = row.utcDateScheduledForErasureSince;

@@ -8,6 +8,12 @@
     min-width: 20em;
 }
 
+.tn-menu-actions.global-menu-strip {
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: 1fr;
+}
+
 button.global-menu-button {
     --update-badge-x-offset: 4%;
     --update-badge-y-offset: -16%;
@@ -17,6 +23,7 @@ button.global-menu-button {
     height: 100% !important;
     border: none;
     padding: 6px;
+    font-size: 16px;
 }
 
 .global-menu-button svg > g {

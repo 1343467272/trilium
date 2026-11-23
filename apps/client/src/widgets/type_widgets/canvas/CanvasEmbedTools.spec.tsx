@@ -1,18 +1,24 @@
 import type { AppState, ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
 import { render } from "preact";
-import { useRef } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
 import { act } from "preact/test-utils";
 import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "vitest";
 
 const translate = vi.hoisted(() => (key: string) => `t:${key}`);
 vi.mock("@excalidraw/excalidraw", () => ({
-    useI18n: () => ({ t: translate, langCode: "en" })
+    useI18n: () => ({ t: translate, langCode: "en" }),
+    getCommonBounds: (elements: FakeElement[]) => [
+        Math.min(...elements.map(({ x }) => x)),
+        Math.min(...elements.map(({ y }) => y)),
+        Math.max(...elements.map(({ x, width }) => x + width)),
+        Math.max(...elements.map(({ y, height }) => y + height))
+    ]
 }));
 vi.mock("../../../services/i18n", () => ({ t: (key: string) => key }));
 
-const { default: CanvasEmbedTools } = await import("./CanvasEmbedTools");
+const { default: CanvasEmbedTools, CanvasTools, NO_TOOL } = await import("./CanvasEmbedTools");
 const {
-    getContentEmbedTools, watchContentEmbedTools
+    getContentEmbedTools, registerContentEmbedTools, watchContentEmbedTools
 } = await import("../text/content_embed_tools");
 
 const MAIN_TOOL_IDS = [
@@ -39,12 +45,20 @@ describe("CanvasEmbedTools", () => {
         container.remove();
     });
 
-    /** A drawing with Excalidraw's container and its undo and redo buttons. */
+    /**
+     * A drawing with Excalidraw's container and its undo and redo buttons, which adds its tools to
+     * the toolbar of its embed, as `CanvasDrawing` does.
+     */
     function Drawing({ isEditable }: { isEditable: boolean }) {
         const rootRef = useRef<HTMLDivElement>(null);
         const apiRef = useRef<ExcalidrawImperativeAPI>(api.api);
+        const [ tools ] = useState(() => new CanvasTools(rootRef));
+        useEffect(() => {
+            const root = rootRef.current;
+            return root ? registerContentEmbedTools(root, tools) : undefined;
+        }, [ tools ]);
         return (
-            <figure className="include-note" data-box-size="medium">
+            <figure className="include-note" data-box-size="resizable">
                 <div className="include-note-content">
                     <div ref={rootRef}>
                         <div className="excalidraw-container" tabIndex={0} />
@@ -53,6 +67,7 @@ describe("CanvasEmbedTools", () => {
                         <CanvasEmbedTools
                             rootRef={rootRef}
                             apiRef={apiRef}
+                            tools={tools}
                             isEditable={isEditable}
                         />
                     </div>
@@ -78,15 +93,20 @@ describe("CanvasEmbedTools", () => {
 
         expect(getContentEmbedTools(document.createElement("figure"))).toBeNull();
         expect(provider.hiddenToolbarItems).toEqual([
-            "contentEmbedBoxSizeDropdown", "toggleContentEmbedTitle", "convertEmbedToLink"
+            "contentEmbedBoxSizeDropdown", "contentEmbedPositionDropdown"
         ]);
-        expect(provider.hasEditableFlag).toBe(true);
+        expect(provider.hiddenToolbarItemsWhileEditable).toEqual([ "toggleContentEmbedEditable" ]);
+        expect([ provider.hasEditableFlag, provider.hasPositions ]).toEqual([ true, true ]);
+        expect(provider.toolbarTitle).toBe("note_types.canvas");
         const tools = provider.getTools();
         const count = MAIN_TOOL_IDS.length;
         expect(tools[0]).toEqual({
             id: "lock", label: "t:toolBar.lock", icon: ICON, isOn: false, group: "lock"
         });
-        expect(tools.slice(1, count + 1)).toEqual(MAIN_TOOL_IDS.map((id) => ({
+        expect(tools[1]).toEqual({
+            id: "noTool", label: "canvas.no_tool", icon: ICON, isOn: false, group: "tools"
+        });
+        expect(tools.slice(2, count + 2)).toEqual(MAIN_TOOL_IDS.map((id) => ({
             id,
             label: `t:toolBar.${id}`,
             icon: ICON,
@@ -94,19 +114,30 @@ describe("CanvasEmbedTools", () => {
             group: "tools"
         })));
         expect(tools.find((tool) => tool.id === "diamond")?.icon).toContain("rotate(45)");
-        expect(tools[count + 1]).toEqual({
+        expect(tools[count + 2]).toEqual({
             id: "moreTools",
             label: "t:toolBar.extraTools",
             icon: ICON,
             isOn: false,
             group: "moreTools",
-            children: EXTRA_TOOL_IDS.map((id) => ({
-                id,
-                label: `t:toolBar.${id}`,
-                isOn: id === "selection"
-            }))
+            children: [
+                ...EXTRA_TOOL_IDS.map((id) => ({
+                    id,
+                    label: `t:toolBar.${id}`,
+                    isOn: id === "selection"
+                })),
+                {
+                    id: "exportImage",
+                    label: "t:buttons.exportImage",
+                    keystroke: "Ctrl+Shift+E",
+                    group: "export"
+                },
+                { id: "searchMenu", label: "t:search.title", group: "canvas" },
+                { id: "library", label: "t:toolBar.library", group: "canvas" },
+                { id: "help", label: "t:helpDialog.title", keystroke: "?", group: "canvas" }
+            ]
         });
-        expect(tools.slice(count + 2)).toEqual([
+        expect(tools.slice(count + 3)).toEqual([
             { id: "undo", label: "t:buttons.undo", icon: ICON, isEnabled: true, group: "history" },
             { id: "redo", label: "t:buttons.redo", icon: ICON, isEnabled: false, group: "history" },
             {
@@ -117,11 +148,15 @@ describe("CanvasEmbedTools", () => {
                 group: "zoom"
             },
             {
-                id: "resetZoom",
-                label: "t:buttons.resetZoom",
+                id: "zoomMenu",
+                label: "canvas.zoom",
                 text: "100%",
                 class: "canvas-drawing-zoom-level",
-                group: "zoom"
+                group: "zoom",
+                children: [
+                    { id: "zoomToFit", label: "canvas.zoom_to_fit", isEnabled: false },
+                    { id: "resetZoom", label: "t:buttons.resetZoom" }
+                ]
             },
             { id: "zoomIn", label: "t:buttons.zoomIn", icon: ICON, isEnabled: true, group: "zoom" }
         ]);
@@ -178,22 +213,32 @@ describe("CanvasEmbedTools", () => {
         expect(listener).toHaveBeenCalledTimes(3);
         expect(getOn()).toEqual([ "lock", "moreTools", "frame" ]);
 
-        api.change({ zoom: { value: 30 } });
+        api.change({ activeTool: { type: "custom", customType: "none", locked: false } });
         expect(listener).toHaveBeenCalledTimes(4);
+        expect(getOn()).toEqual([ "noTool" ]);
+
+        api.change({ zoom: { value: 30 } });
+        expect(listener).toHaveBeenCalledTimes(5);
         expect(getEnabled()).toEqual([
-            "undo:true", "redo:false", "zoomOut:true", "resetZoom:true", "zoomIn:false"
+            "undo:true", "redo:false", "zoomOut:true", "zoomMenu:true", "zoomIn:false"
         ]);
-        expect(provider.getTools().find((tool) => tool.id === "resetZoom")?.text).toBe("3000%");
+        const getZoomMenu = () => provider.getTools().find((tool) => tool.id === "zoomMenu");
+        expect(getZoomMenu()?.text).toBe("3000%");
+
+        api.setElements([ { type: "line", locked: false, x: 0, y: 0, width: 10, height: 10 } ]);
+        api.change({});
+        expect(listener).toHaveBeenCalledTimes(6);
+        expect(getZoomMenu()?.children?.[0]?.isEnabled).toBe(true);
 
         await act(async () => {
             container.querySelector("[data-testid=button-redo]")?.removeAttribute("disabled");
         });
-        expect(listener).toHaveBeenCalledTimes(5);
+        expect(listener).toHaveBeenCalledTimes(7);
         expect(getEnabled()).toContain("redo:true");
 
         unsubscribe();
         api.change({ zoom: { value: 0.1 } });
-        expect(listener).toHaveBeenCalledTimes(5);
+        expect(listener).toHaveBeenCalledTimes(7);
         expect(getEnabled()).toContain("zoomOut:false");
     });
 
@@ -212,16 +257,37 @@ describe("CanvasEmbedTools", () => {
             id: "fullscreen", label: "common.fullscreen", icon: ICON, group: "zoom"
         });
         // The sizes whose title row has a fullscreen button.
-        const offeredBySize = [ "small", "full", "medium" ].map((size) => {
+        const offeredBySize = [ "compact", "full", "resizable" ].map((size) => {
             embed.dataset.boxSize = size;
             return `${size}:${getLastTool()?.id === "fullscreen"}`;
         });
-        expect(offeredBySize).toEqual([ "small:false", "full:true", "medium:true" ]);
+        expect(offeredBySize).toEqual([ "compact:false", "full:true", "resizable:true" ]);
 
         provider.execute("fullscreen");
         expect(box.requestFullscreen).toHaveBeenCalledOnce();
         expect(api.updateScene).not.toHaveBeenCalled();
         expect(api.setActiveTool).not.toHaveBeenCalled();
+    });
+
+    it("offers and runs fullscreen alone without Excalidraw, as for a picture", () => {
+        const embed = document.createElement("figure");
+        embed.className = "include-note";
+        Object.assign(embed.dataset, { hideTitle: "true", boxSize: "resizable" });
+        const box = document.createElement("div");
+        box.className = "include-note-content";
+        box.requestFullscreen = vi.fn(async () => {});
+        const root = document.createElement("div");
+        box.append(root);
+        embed.append(box);
+        container.append(embed);
+        const tools = new CanvasTools({ current: root });
+
+        expect(tools.getTools()).toEqual([
+            { id: "fullscreen", label: "common.fullscreen", icon: ICON, group: "zoom" }
+        ]);
+        tools.execute("zoomIn");
+        tools.execute("fullscreen");
+        expect(box.requestFullscreen).toHaveBeenCalledOnce();
     });
 
     it("runs a tool with the focus in the drawing", async () => {
@@ -233,6 +299,9 @@ describe("CanvasEmbedTools", () => {
 
         provider.execute("frame");
         expect(api.setActiveTool).toHaveBeenLastCalledWith({ type: "frame" });
+
+        provider.execute("noTool");
+        expect(api.setActiveTool).toHaveBeenLastCalledWith(NO_TOOL);
 
         provider.execute("lock");
         expect(api.updateScene).toHaveBeenLastCalledWith({
@@ -258,11 +327,93 @@ describe("CanvasEmbedTools", () => {
             appState: { scrollX: 210, scrollY: 120, zoom: { value: 1 } }
         });
 
+        // Fits the shapes in the 800 × 400 view and centers them, as Excalidraw's zoom to fit does.
+        provider.execute("zoomToFit");
+        expect(api.updateScene).toHaveBeenCalledTimes(3);
+        api.setElements([ { type: "line", locked: false, x: 0, y: 0, width: 1600, height: 400 } ]);
+        provider.execute("zoomToFit");
+        expect(api.updateScene).toHaveBeenLastCalledWith({
+            appState: { zoom: { value: 0.5 }, scrollX: 0, scrollY: 200 }
+        });
+
         provider.execute("magicframe");
         provider.execute("laser");
         provider.execute("moreTools");
-        expect(api.setActiveTool).toHaveBeenCalledTimes(2);
-        expect(api.updateScene).toHaveBeenCalledTimes(3);
+        provider.execute("zoomMenu");
+        expect(api.setActiveTool).toHaveBeenCalledTimes(3);
+        expect(api.updateScene).toHaveBeenCalledTimes(4);
+    });
+
+    it("fits the shapes beside the panels that cover the drawing", async () => {
+        const { embed, provider } = await mount();
+        const drawing = embed.querySelector<HTMLElement>(".excalidraw-container");
+        const root = drawing?.parentElement;
+        expect(drawing).not.toBeNull();
+        expect(root).not.toBeNull();
+        const properties = document.createElement("div");
+        properties.className = "App-menu__left";
+        const library = document.createElement("div");
+        library.className = "default-sidebar";
+        root?.append(properties, library);
+        // An 800 × 400 drawing at 100, the properties over its left 200, the library beside it.
+        const placeAt = (element: HTMLElement | null | undefined, left: number, width: number) =>
+            element && vi.spyOn(element, "getBoundingClientRect")
+                .mockReturnValue(new DOMRect(left, 0, width, 400));
+        placeAt(drawing, 100, 800);
+        placeAt(properties, 100, 200);
+        placeAt(library, 910, 300);
+
+        api.setElements([ { type: "line", locked: false, x: 0, y: 0, width: 1200, height: 400 } ]);
+        provider.execute("zoomToFit");
+        expect(api.updateScene).toHaveBeenLastCalledWith({
+            appState: { zoom: { value: 0.5 }, scrollX: 400, scrollY: 200 }
+        });
+    });
+
+    it("opens the export, the search, the library and the help from the menu", async () => {
+        const { provider } = await mount();
+
+        provider.execute("exportImage");
+        expect(api.updateScene).toHaveBeenLastCalledWith({
+            appState: { openDialog: { name: "imageExport" } }
+        });
+        expect(document.activeElement).toBe(container.querySelector(".excalidraw-container"));
+
+        provider.execute("searchMenu");
+        expect(api.toggleSidebar).toHaveBeenLastCalledWith({
+            name: "default", tab: "search", force: true
+        });
+
+        provider.execute("library");
+        expect(api.toggleSidebar).toHaveBeenLastCalledWith({ name: "default" });
+
+        provider.execute("help");
+        expect(api.updateScene).toHaveBeenLastCalledWith({
+            appState: { openDialog: { name: "help" } }
+        });
+        expect(api.updateScene).toHaveBeenCalledTimes(2);
+        expect(api.toggleSidebar).toHaveBeenCalledTimes(2);
+    });
+
+    it("keeps a zoom of a drawing over a locked image inside the image", async () => {
+        const { provider } = await mount();
+        api.setElements([ { type: "image", locked: true, x: 0, y: 0, width: 800, height: 400 } ]);
+
+        provider.execute("zoomOut");
+        expect(api.updateScene).toHaveBeenLastCalledWith({
+            appState: { zoom: { value: 1 }, scrollX: 0, scrollY: 0 }
+        });
+
+        api.setElements([
+            { type: "image", locked: true, x: 0, y: 0, width: 800, height: 400 },
+            { type: "rectangle", locked: false, x: 800, y: 0, width: 800, height: 400 }
+        ]);
+        api.change({ zoom: { value: 2 }, scrollX: -100, scrollY: -100 });
+        provider.execute("zoomToFit");
+        expect(api.updateScene).toHaveBeenCalledTimes(2);
+        expect(api.updateScene).toHaveBeenLastCalledWith({
+            appState: { zoom: { value: 1 }, scrollX: 0, scrollY: 0 }
+        });
     });
 
     it("offers and runs only the zoom while the drawing is read-only", async () => {
@@ -270,14 +421,15 @@ describe("CanvasEmbedTools", () => {
         const listener = vi.fn();
         provider.subscribe(listener);
         const getIds = () => provider.getTools().map((tool) => tool.id);
-        expect(getIds()).toEqual([ "zoomOut", "resetZoom", "zoomIn" ]);
+        expect(getIds()).toEqual([ "zoomOut", "zoomMenu", "zoomIn" ]);
         expect(provider.hasEditableFlag).toBe(true);
 
-        for (const id of [ "rectangle", "frame", "lock", "undo" ]) {
+        for (const id of [ "rectangle", "frame", "noTool", "lock", "undo", "help", "library" ]) {
             provider.execute(id);
         }
         expect(api.setActiveTool).not.toHaveBeenCalled();
         expect(api.updateScene).not.toHaveBeenCalled();
+        expect(api.toggleSidebar).not.toHaveBeenCalled();
         expect(undo).not.toHaveBeenCalled();
 
         provider.execute("zoomIn");
@@ -288,14 +440,24 @@ describe("CanvasEmbedTools", () => {
         await mount(true);
         expect(listener).toHaveBeenCalledTimes(1);
         expect(getIds()).toEqual([
-            "lock", ...MAIN_TOOL_IDS, "moreTools", "undo", "redo", "zoomOut", "resetZoom", "zoomIn"
+            "lock", "noTool", ...MAIN_TOOL_IDS, "moreTools", "undo", "redo", "zoomOut", "zoomMenu",
+            "zoomIn"
         ]);
     });
 });
 
 /** The part of Excalidraw's app state that the tools read. */
+interface FakeElement {
+    type: string;
+    locked: boolean;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+}
+
 interface FakeAppState {
-    activeTool: { type: string; locked: boolean };
+    activeTool: { type: string; customType?: string; locked: boolean };
     zoom: { value: number };
     scrollX: number;
     scrollY: number;
@@ -313,16 +475,20 @@ function createApi() {
         width: 800,
         height: 400
     };
+    let elements: FakeElement[] = [];
     let onChange: ((elements: unknown[], appState: AppState) => void) | undefined;
     const unsubscribe = vi.fn();
     const setActiveTool = vi.fn();
     const updateScene = vi.fn();
+    const toggleSidebar = vi.fn();
     const getAppState = () => appState as unknown as AppState;
 
     const api = {
         getAppState,
+        getSceneElements: () => elements,
         setActiveTool,
         updateScene,
+        toggleSidebar,
         onChange: (callback: typeof onChange) => {
             onChange = callback;
             return unsubscribe;
@@ -334,6 +500,10 @@ function createApi() {
         unsubscribe,
         setActiveTool,
         updateScene,
+        toggleSidebar,
+        setElements(next: FakeElement[]) {
+            elements = next;
+        },
         change(next: Partial<FakeAppState>) {
             appState = { ...appState, ...next };
             onChange?.([], getAppState());

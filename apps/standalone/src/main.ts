@@ -4,9 +4,8 @@ import {
     initSplashProgress, reportSplashPhase, type SplashPhase
 } from "../../client/src/services/splash.js";
 import { showErrorOverlay } from "./error-overlay.js";
-import { installIosInterceptors } from "./ios-interceptors.js";
 import { claimLeadership } from "./leader_election.js";
-import { announceLeadership, attachServiceWorkerBridge, downloadDatabase, localFetch, registerNativeHttpHandler, restoreBackup, saveDatabase, startLocalServerWorker } from "./local-bridge.js";
+import { announceLeadership, attachServiceWorkerBridge, downloadDatabase, localFetch, localUpload, registerNativeHttpHandler, restoreBackup, saveDatabase, startLocalServerWorker } from "./local-bridge.js";
 import { createSecurityApi } from "./security_gate.js";
 
 /**
@@ -15,14 +14,9 @@ import { createSecurityApi } from "./security_gate.js";
  * WASM binary and the core bundle — dominate; a warm start runs the same sequence from cache.
  *
  * The worker reports the middle of this sequence over `STARTUP_PROGRESS` (see local-bridge.ts),
- * and the client reports the last two once its entry point is loading its layout and note tree.
- * A follower tab has no worker of its own, so it sits on the first phase until the leader answers
- * its `/bootstrap` and the client's own phases carry the bar the rest of the way.
- *
- * The client's own `bootstrap` phase is deliberately absent: here `/bootstrap` is answered by the
- * worker, so it does not follow the worker's steps but spans them. Listing it would let index.ts
- * report it while the worker was still on `sqlite`, and the monotonic guard in reportSplashPhase()
- * would then swallow every later worker phase.
+ * and the client reports `application` once `/bootstrap` has answered, while it loads and renders
+ * its entry point. A follower tab has no worker of its own, so it sits on the first phase until
+ * the leader answers its `/bootstrap`.
  */
 const STANDALONE_STARTUP_PHASES: SplashPhase[] = [
     { id: "service-worker", weight: 1, status: "Setting up offline support…" },
@@ -31,9 +25,7 @@ const STANDALONE_STARTUP_PHASES: SplashPhase[] = [
     { id: "database", weight: 2, status: "Opening the database…" },
     { id: "core", weight: 4, status: "Loading Trilium…" },
     { id: "becca", weight: 2, status: "Reading your notes…" },
-    { id: "application", weight: 4, status: "Loading the application…" },
-    { id: "interface", weight: 2, status: "Building the interface…" },
-    { id: "notes", weight: 1, status: "Loading the note tree…" }
+    { id: "application", weight: 4, status: "Loading the application…" }
 ];
 
 async function waitForServiceWorkerControl(): Promise<void> {
@@ -121,18 +113,20 @@ async function bootstrap() {
             // The leader answers API requests from its own worker, so the client's server.ts
             // can skip the service-worker round trip.
             standaloneApi.localFetch = localFetch;
+            standaloneApi.localUpload = localUpload;
             // Its worker is also the one holding the lock on the security settings file, so it is
             // the only tab that can change what this instance is allowed to run. See security_gate.ts.
             standaloneApi.security = createSecurityApi();
             announceLeadership();
         });
 
-        // iOS Capacitor loads on the capacitor:// scheme, where WebKit rejects
-        // service worker registration. Fall back to in-page request interceptors
-        // that route API calls straight to the local SQLite worker; everywhere
-        // else (Android https, web) the service worker handles this.
-        if (location.protocol === "capacitor:") {
-            installIosInterceptors();
+        // The mobile shells answer local API requests natively (TriliumRequestBridge on Android
+        // and iOS, where WebKit rejects a service worker on capacitor://); on the web, or on an
+        // Android WebView without message listeners, the service worker does.
+        const answeredNatively = "Capacitor" in window
+            && (await import("./native-request-bridge.js")).installNativeRequestBridge();
+        if (answeredNatively) {
+            await removeStaleServiceWorkers();
         } else {
             attachServiceWorkerBridge();
             await waitForServiceWorkerControl();
@@ -149,6 +143,32 @@ async function bootstrap() {
             "Failed to Initialize",
             err instanceof Error ? err.message : String(err)
         );
+    }
+}
+
+/**
+ * Unregisters the service worker an older Android build installed. While it controls the page,
+ * engine-initiated requests (stylesheets, images, fonts) go to it instead of the native request
+ * bridge, and nothing answers them, so a controlled page reloads once the worker is gone.
+ */
+async function removeStaleServiceWorkers() {
+    try {
+        const registrations = await navigator.serviceWorker?.getRegistrations() ?? [];
+        let removed = false;
+        for (const registration of registrations) {
+            removed = await registration.unregister() || removed;
+        }
+
+        if (removed && navigator.serviceWorker?.controller) {
+            console.log("[Bootstrap] Removed a stale service worker - reloading page");
+            window.location.reload();
+            throw new Error("Reloading without the stale service worker");
+        }
+    } catch (err) {
+        if (err instanceof Error && err.message.startsWith("Reloading")) {
+            throw err;
+        }
+        console.warn("[Bootstrap] Could not remove a stale service worker:", err);
     }
 }
 

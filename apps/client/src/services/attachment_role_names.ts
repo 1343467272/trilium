@@ -1,4 +1,5 @@
-import { attachmentRoleTraits, type NamedAttachmentRole } from "@triliumnext/commons";
+import type { NamedAttachmentRole } from "@triliumnext/commons";
+import { attachmentRoleTraits } from "@triliumnext/commons/src/lib/attachment_roles.js";
 
 import { t } from "./i18n.js";
 
@@ -24,7 +25,9 @@ const ATTACHMENT_ROLE_NAMES: Record<NamedAttachmentRole, () => string> = {
     coverImage: () => t("attachment_roles.coverImage"),
     viewConfig: () => t("attachment_roles.viewConfig"),
     canvasLibraryItem: () => t("attachment_roles.canvasLibraryItem"),
-    importSource: () => t("attachment_roles.importSource")
+    importSource: () => t("attachment_roles.importSource"),
+    transcript: () => t("attachment_roles.transcript"),
+    tocCache: () => t("attachment_roles.tocCache")
 };
 
 /**

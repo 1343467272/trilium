@@ -1,29 +1,24 @@
 import type { CKTextEditor } from "@triliumnext/ckeditor5";
 import type CodeMirror from "@triliumnext/codemirror";
-import { type LOCALE_IDS, SqlExecuteResponse } from "@triliumnext/commons";
+import { SqlExecuteResponse } from "@triliumnext/commons";
 import { ColumnComponent } from "tabulator-tables";
 
 import type { Attribute } from "../services/attribute_parser.js";
-import bundleService from "../services/bundle.js";
-import froca from "../services/froca.js";
-import { initLocale, t } from "../services/i18n.js";
-import keyboardActionsService from "../services/keyboard_actions.js";
-import linkService, { type HashPane, type ViewScope } from "../services/link.js";
+import { t } from "../services/i18n.js";
 import type LoadResults from "../services/load_results.js";
+import { type HashPane, parseNavigationStateFromUrl, type ViewScope } from "../services/navigation_state.js";
 import type { CreateNoteOpts } from "../services/note_create.js";
-import options from "../services/options.js";
 import type { ShortcutHintSection } from "../services/shortcut_hints.js";
-import { reportSplashPhase } from "../services/splash.js";
 import toast from "../services/toast.js";
-import utils from "../services/utils.js";
-import { ReactWrappedWidget } from "../widgets/basic_widget.js";
-import type RootContainer from "../widgets/containers/root_container.js";
-import { AddLinkOpts } from "../widgets/dialogs/add_link.jsx";
+import { reuseAcrossHotReloads } from "../services/utils.js";
+import type { ReactWrappedWidget } from "../widgets/basic_widget.js";
 import type { ConfirmWithMessageOptions, ConfirmWithTitleOptions } from "../widgets/dialogs/confirm.js";
 import { ContentEmbedOpts } from "../widgets/dialogs/content_embed.jsx";
 import type { ResolveOptions } from "../widgets/dialogs/delete_notes.js";
+import { EditLinkOpts } from "../widgets/dialogs/edit_link.jsx";
 import { IconPickerOpts } from "../widgets/dialogs/icon_picker.jsx";
 import type { InfoProps } from "../widgets/dialogs/info.jsx";
+import type { ResourceDownloadDialogOptions } from "../widgets/dialogs/resource_download.jsx";
 import type { LightboxOptions } from "../widgets/dialogs/lightbox.jsx";
 import type { MarkdownImportOpts } from "../widgets/dialogs/markdown_import.jsx";
 import { ChooseNoteTypeCallback } from "../widgets/dialogs/note_type_chooser.jsx";
@@ -31,23 +26,15 @@ import type { PrintPreviewData } from "../widgets/dialogs/print_preview.jsx";
 import type { NotePickerDialogOptions } from "../widgets/dialogs/note_picker.js";
 import type { ItemPickerDialogOptions } from "../widgets/dialogs/item_picker.js";
 import type { PromptDialogOptions } from "../widgets/dialogs/prompt.js";
+import type { InsertMediaOpts } from "../widgets/dialogs/insert_media.js";
 import type NoteTreeWidget from "../widgets/note_tree.js";
+import type { PaneId, PaneMode } from "../widgets/react/peek_pane.js";
 import type { RightPaneTabId } from "../widgets/sidebar/RightPaneTabs.jsx";
 import type { ToolCall } from "../widgets/type_widgets/llm_chat/llm_chat_types.js";
 import Component from "./component.js";
-import Entrypoints from "./entrypoints.js";
-import MainTreeExecutors from "./main_tree_executors.js";
-import MobileScreenSwitcherExecutor, { type Screen } from "./mobile_screen_switcher.js";
+import type { Screen } from "./mobile_screen_switcher.js";
 import type { default as NoteContext, GetTextEditorCallback } from "./note_context.js";
-import RootCommandExecutor from "./root_command_executor.js";
-import ShortcutComponent from "./shortcut_component.js";
-import { StartupChecks } from "./startup_checks.js";
-import TabManager from "./tab_manager.js";
-import zoomComponent from "./zoom.js";
-
-interface Layout {
-    getRootWidget: (appContext: AppContext) => RootContainer;
-}
+import type TabManager from "./tab_manager.js";
 
 export interface BeforeUploadListener extends Component {
     beforeUnloadEvent(): boolean;
@@ -89,6 +76,23 @@ export interface NoteCommandData extends CommandData {
     splits?: HashPane[] | null;
     /** Index into `[main pane, ...splits]` of the pane to focus. Defaults to the main pane. */
     activeSplit?: number;
+    /** Screen position, in CSS pixels, of the new window's top-left corner. Honoured only by `openInWindow`. */
+    windowPosition?: WindowPosition;
+}
+
+export interface WindowPosition {
+    x: number;
+    y: number;
+}
+
+/** The note a quick-edit popup opens, and how. */
+export interface OpenInPopupData extends CommandData {
+    noteIdOrPath: string;
+    viewScope?: ViewScope;
+    /** Offers the note type switcher while the note is still blank, as the tab layout does. */
+    showNoteTypeSwitcher?: boolean;
+    /** Focuses the title with all of it selected instead of the content, for a note to name. */
+    selectTitle?: boolean;
 }
 
 export interface ExecuteCommandData<T> extends CommandData {
@@ -145,12 +149,6 @@ export type CommandMappings = {
         forceDeleteAllClones: boolean;
     };
     showConfirmDeleteNoteBoxWithNoteDialog: ConfirmWithTitleOptions;
-    openedFileUpdated: CommandData & {
-        entityType: string;
-        entityId: string;
-        lastModifiedMs?: number;
-        filePath: string;
-    };
     focusAndSelectTitle: CommandData & {
         isNewNote?: boolean;
     };
@@ -161,18 +159,16 @@ export type CommandMappings = {
     showLightbox: LightboxOptions;
     showToolCallDetails: { toolCall: ToolCall };
     showConfirmDialog: ConfirmWithMessageOptions;
+    showResourceDownloadDialog: ResourceDownloadDialogOptions;
     showRecentChanges: CommandData & { ancestorNoteId: string };
     showDeletedNotes: CommandData & { ancestorNoteId?: string };
     showImportDialog: CommandData & { noteId: string };
     openNewNoteSplit: NoteCommandData;
     openInWindow: NoteCommandData;
     /** Opens a note in the quick-edit popup. A `viewScope` carrying an `attachmentId` opens that attachment instead of the note itself. */
-    openInPopup: CommandData & {
-        noteIdOrPath: string;
-        viewScope?: ViewScope;
-        /** Offers the note type switcher while the note is still blank, as the tab layout does. */
-        showNoteTypeSwitcher?: boolean;
-    };
+    openInPopup: OpenInPopupData;
+    /** Opens a note in a second quick-edit popup, over the first one, such as a help page asked for from within it. */
+    openInNestedPopup: OpenInPopupData;
     /** Dismisses the quick-edit popup, for something within it that has sent the reader elsewhere. Does nothing if it isn't open. */
     closePopupEditor: CommandData;
     openInTreePopup: CommandData & { noteIdOrPath: string; hoistedNoteId: string; };
@@ -180,7 +176,6 @@ export type CommandMappings = {
     openNoteInNewSplit: CommandData;
     openNoteInNewWindow: CommandData;
     openAboutDialog: CommandData;
-    hideFloatingButtons: {};
     hideLeftPane: CommandData;
     showCpuArchWarning: CommandData;
     showLeftPane: CommandData;
@@ -196,6 +191,7 @@ export type CommandMappings = {
         oldMainNtxId?: string | null;
         newMainNtxId?: string | null;
     };
+    openNote: ContextMenuCommandData;
     openInTab: ContextMenuCommandData;
     openNoteInSplit: ContextMenuCommandData;
     openNoteInWindow: ContextMenuCommandData;
@@ -270,10 +266,12 @@ export type CommandMappings = {
 
     showPasswordNotSet: CommandData;
     showProtectedSessionPasswordDialog: CommandData;
+    showProtectSubtreeDialog: CommandData & { noteId: string; protect: boolean };
     showUploadAttachmentsDialog: CommandData & { noteId: string };
     showContentEmbedDialog: CommandData & ContentEmbedOpts;
-    showAddLinkDialog: CommandData & AddLinkOpts;
+    showEditLinkDialog: CommandData & EditLinkOpts;
     showIconPickerDialog: CommandData & IconPickerOpts;
+    showInsertMediaDialog: CommandData & InsertMediaOpts;
     showPasteMarkdownDialog: CommandData & MarkdownImportOpts;
     closeProtectedSessionPasswordDialog: CommandData;
     copyImageReferenceToClipboard: CommandData;
@@ -305,7 +303,7 @@ export type CommandMappings = {
     pinTab: CommandData;
     unpinTab: CommandData;
     reopenLastTab: CommandData;
-    moveTabToNewWindow: CommandData;
+    moveTabToNewWindow: CommandData & { windowPosition?: WindowPosition };
     copyTabToNewWindow: CommandData;
     closeActiveTab: CommandData & {
         $el: JQuery<HTMLElement>;
@@ -314,7 +312,6 @@ export type CommandMappings = {
         zoomFactor: string;
     };
 
-    reEvaluateRightPaneVisibility: CommandData;
     runActiveNote: CommandData;
     scrollContainerTo: CommandData & {
         position: number;
@@ -380,6 +377,7 @@ export type CommandMappings = {
     insertDateTimeToText: CommandData;
     pasteMarkdownIntoText: CommandData;
     cutIntoNote: CommandData;
+    saveNoteDetailNow: CommandData;
     addIncludeNoteToText: CommandData;
     editReadOnlyNote: CommandData;
     toggleRibbonTabClassicEditor: CommandData;
@@ -422,6 +420,7 @@ export type CommandMappings = {
     openDevTools: CommandData;
     findInText: CommandData & { searchTerms?: string[] };
     toggleLeftPane: CommandData;
+    peekLeftPane: CommandData;
     toggleFullscreen: CommandData;
     zoomOut: CommandData;
     zoomIn: CommandData;
@@ -467,6 +466,11 @@ type EventMappings = {
     frocaReloaded: {};
     setLeftPaneVisibility: {
         leftPaneVisible: boolean | null;
+    }
+    /** Raised by a side pane after it is closed, peeked or docked. See `peek_pane.ts`. */
+    paneModeChanged: {
+        pane: PaneId;
+        mode: PaneMode;
     }
     protectedSessionStarted: {};
     notesReloaded: {
@@ -514,6 +518,10 @@ type EventMappings = {
     beforeNoteSwitch: {
         noteContext: NoteContext;
     };
+    /** Makes every editor of the note `noteId` in this window save its pending changes now. */
+    saveNoteChanges: {
+        noteId: string;
+    };
     beforeNoteContextRemove: {
         ntxIds: string[];
     };
@@ -521,18 +529,6 @@ type EventMappings = {
     noteSwitchedAndActivated: NoteSwitchedContext;
     setNoteContext: {
         noteContext: NoteContext;
-    };
-    reEvaluateHighlightsListWidgetVisibility: {
-        noteId: string | undefined;
-    };
-    reEvaluateTocWidgetVisibility: {
-        noteId: string | undefined;
-    };
-    showHighlightsListWidget: {
-        noteId: string;
-    };
-    showTocWidget: {
-        noteId: string;
     };
     showSearchError: {
         error: string;
@@ -561,6 +557,8 @@ type EventMappings = {
     newNoteContextCreated: {
         noteContext: NoteContext;
     };
+    /** `TabManager.loadTabs()` has opened the saved tabs, or an empty one if that failed. */
+    tabsRestored: {};
     noteContextRemoved: {
         ntxIds: string[];
     };
@@ -576,8 +574,10 @@ type EventMappings = {
     geoMapCreateChildNote: {
         ntxId: string | null | undefined; // TODO: deduplicate ntxId
     };
-    /** Opens the board's properties dialog, which only the board itself can show. */
-    showBoardProperties: { ntxId: string | null | undefined; };
+    /** Opens the properties dialog of a board or calendar, which only the view itself can show. */
+    showCollectionProperties: { ntxId: string | null | undefined; };
+    /** Opens the properties dialog of a template note. */
+    showTemplateProperties: { noteId: string; };
     tabReorder: {
         ntxIdsInOrder: string[];
     };
@@ -590,12 +590,8 @@ type EventMappings = {
     };
     noteTypeMimeChanged: { noteId: string };
     zenModeChanged: { isEnabled: boolean };
-    relationMapCreateChildNote: { ntxId: string | null | undefined };
-    relationMapResetPanZoom: { ntxId: string | null | undefined };
-    relationMapResetZoomIn: { ntxId: string | null | undefined };
-    relationMapResetZoomOut: { ntxId: string | null | undefined };
     activeNoteChanged: {ntxId: string | null | undefined};
-    showAddLinkDialog: AddLinkOpts;
+    showEditLinkDialog: EditLinkOpts;
     showContentEmbedDialog: ContentEmbedOpts;
     openBulkActionsDialog: {
         selectedOrActiveNoteIds: string[];
@@ -604,10 +600,6 @@ type EventMappings = {
         noteIds: string[];
     };
     refreshData: { ntxId: string | null | undefined };
-    contentSafeMarginChanged: {
-        top: number;
-        noteContext: NoteContext;
-    };
 };
 
 export type EventListener<T extends EventNames> = {
@@ -642,7 +634,6 @@ export class AppContext extends Component {
     components: Component[];
     beforeUnloadListeners: (WeakRef<BeforeUploadListener> | (() => boolean))[];
     tabManager!: TabManager;
-    layout?: Layout;
     noteTreeWidget?: NoteTreeWidget;
 
     lastSearchString?: string;
@@ -654,86 +645,6 @@ export class AppContext extends Component {
         // non-widget/layout components needed for the application
         this.components = [];
         this.beforeUnloadListeners = [];
-    }
-
-    /**
-     * Must be called as soon as possible, before the creation of any components since this method is in charge of initializing the locale. Any attempts to read translation before this method is called will result in `undefined`.
-     */
-    async earlyInit() {
-        await options.initializedPromise;
-        await initLocale((options.get("locale") || "en") as LOCALE_IDS);
-    }
-
-    setLayout(layout: Layout) {
-        this.layout = layout;
-    }
-
-    async start() {
-        this.initComponents();
-        this.renderWidgets();
-
-        reportSplashPhase("notes");
-        await froca.initializedPromise;
-
-        this.tabManager.loadTabs();
-
-        setTimeout(() => bundleService.executeStartupBundles(), 2000);
-    }
-
-    initComponents() {
-        this.tabManager = new TabManager();
-
-        this.components = [
-            this.tabManager,
-            new RootCommandExecutor(),
-            new Entrypoints(),
-            new MainTreeExecutors(),
-            new ShortcutComponent(),
-            new StartupChecks()
-        ];
-
-        if (utils.isMobile()) {
-            this.components.push(new MobileScreenSwitcherExecutor());
-        }
-
-        for (const component of this.components) {
-            this.child(component);
-        }
-
-        if (utils.isElectron()) {
-            this.child(zoomComponent);
-        }
-
-        void keyboardActionsService.setupWindowShortcuts();
-    }
-
-    renderWidgets() {
-        if (!this.layout) {
-            throw new Error("Missing layout.");
-        }
-
-        const rootWidget = this.layout.getRootWidget(this);
-        const $renderedWidget = rootWidget.render();
-
-        keyboardActionsService.updateDisplayedShortcuts($renderedWidget);
-
-        $("body").append($renderedWidget);
-
-        $renderedWidget.on("click", "[data-trigger-command]", function () {
-            if ($(this).hasClass("disabled")) {
-                return;
-            }
-
-            const commandName = $(this).attr("data-trigger-command");
-            const $component = $(this).closest(".component");
-            const component = $component.prop("component");
-
-            component.triggerCommand(commandName, { $el: $(this) });
-        });
-
-        this.child(rootWidget as Component);
-
-        this.triggerEvent("initialRenderComplete", {});
     }
 
     triggerEvent<K extends EventNames>(name: K, data: EventData<K>) {
@@ -779,45 +690,51 @@ export class AppContext extends Component {
     }
 }
 
-const appContext = new AppContext(window.glob.isMainWindow);
-
-// we should save all outstanding changes before the page/app is closed
-$(window).on("beforeunload", () => {
-    let allSaved = true;
-
-    appContext.beforeUnloadListeners = appContext.beforeUnloadListeners.filter((wr) => typeof wr === "function" || !!wr.deref());
-
-    for (const listener of appContext.beforeUnloadListeners) {
-        if (typeof listener === "object") {
-            const component = listener.deref();
-
-            if (!component) {
-                continue;
-            }
-
-            if (!component.beforeUnloadEvent()) {
-                console.log(`Component ${component.componentId} is not finished saving its state.`);
-                allSaved = false;
-            }
-        } else if (!listener()) {
-            allSaved = false;
-        }
-    }
-
-    if (!allSaved) {
-        toast.showMessage(t("app_context.please_wait_for_save"), 10000);
-        return "some string";
-    }
-});
-
-$(window).on("hashchange", () => {
-    const { notePath, ntxId, viewScope, searchString } = linkService.parseNavigationStateFromUrl(window.location.href);
-
-    if (notePath || ntxId) {
-        appContext.tabManager.switchToNoteContext(ntxId, notePath, viewScope);
-    } else if (searchString) {
-        appContext.triggerCommand("searchNotes", { searchString });
-    }
+const appContext = reuseAcrossHotReloads(import.meta.hot, () => {
+    const context = new AppContext(window.glob.isMainWindow);
+    registerWindowHandlers(context);
+    return context;
 });
 
 export default appContext;
+
+function registerWindowHandlers(appContext: AppContext) {
+    // we should save all outstanding changes before the page/app is closed
+    $(window).on("beforeunload", () => {
+        let allSaved = true;
+
+        appContext.beforeUnloadListeners = appContext.beforeUnloadListeners.filter((wr) => typeof wr === "function" || !!wr.deref());
+
+        for (const listener of appContext.beforeUnloadListeners) {
+            if (typeof listener === "object") {
+                const component = listener.deref();
+
+                if (!component) {
+                    continue;
+                }
+
+                if (!component.beforeUnloadEvent()) {
+                    console.log(`Component ${component.componentId} is not finished saving its state.`);
+                    allSaved = false;
+                }
+            } else if (!listener()) {
+                allSaved = false;
+            }
+        }
+
+        if (!allSaved) {
+            toast.showMessage(t("app_context.please_wait_for_save"), 10000);
+            return "some string";
+        }
+    });
+
+    $(window).on("hashchange", () => {
+        const { notePath, ntxId, viewScope, searchString } = parseNavigationStateFromUrl(window.location.href);
+
+        if (notePath || ntxId) {
+            appContext.tabManager.switchToHistoryEntry(ntxId, notePath, viewScope);
+        } else if (searchString) {
+            appContext.triggerCommand("searchNotes", { searchString });
+        }
+    });
+}

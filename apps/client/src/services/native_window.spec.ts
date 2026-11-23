@@ -5,18 +5,14 @@ import { syncNativeWindowWithTheme } from "./native_window.js";
 
 type Glob = NonNullable<typeof window.glob>;
 
-const optionsCtrl = vi.hoisted(() => ({ get: vi.fn(() => "false") }));
 const themeCtrl = vi.hoisted(() => ({ getThemeStyle: vi.fn(() => "auto") }));
 
-vi.mock("./options.js", () => ({ default: optionsCtrl }));
 vi.mock("./theme.js", () => ({ getThemeStyle: themeCtrl.getThemeStyle }));
 
 /** The subset of the Electron window API this module drives, all spied. */
 const win = {
     getZoomFactor: vi.fn(() => 1),
     setNativeThemeSource: vi.fn(),
-    setBackgroundMaterial: vi.fn(),
-    setVibrancy: vi.fn(),
     setTitleBarOverlay: vi.fn(),
     setWindowButtonPosition: vi.fn()
 };
@@ -39,7 +35,6 @@ function setPlatform(platform: Glob["platform"]) {
 beforeEach(() => {
     vi.restoreAllMocks();
     vi.clearAllMocks();
-    optionsCtrl.get.mockReturnValue("false");
     themeCtrl.getThemeStyle.mockReturnValue("auto");
     win.getZoomFactor.mockReturnValue(1);
     setPlatform("linux");
@@ -61,26 +56,6 @@ describe("syncNativeWindowWithTheme", () => {
         themeCtrl.getThemeStyle.mockReturnValue("dark");
         syncNativeWindowWithTheme();
         expect(win.setNativeThemeSource).toHaveBeenCalledWith("dark");
-    });
-
-    it("applies the background material only where the platform supports it", () => {
-        stubThemeVariables({ "--background-material": " mica " });
-        setPlatform("win32");
-        syncNativeWindowWithTheme();
-        expect(win.setBackgroundMaterial).toHaveBeenCalledWith("mica");
-        expect(win.setVibrancy).not.toHaveBeenCalled();
-
-        // A material the platform does not know about is ignored rather than passed through.
-        vi.clearAllMocks();
-        stubThemeVariables({ "--background-material": "under-window" });
-        syncNativeWindowWithTheme();
-        expect(win.setBackgroundMaterial).not.toHaveBeenCalled();
-
-        vi.clearAllMocks();
-        setPlatform("darwin");
-        syncNativeWindowWithTheme();
-        expect(win.setVibrancy).toHaveBeenCalledWith("under-window");
-        expect(win.setBackgroundMaterial).not.toHaveBeenCalled();
     });
 
     it("sets the title bar overlay colors on Windows and Linux, with an opt-in height", () => {
@@ -173,7 +148,7 @@ describe("syncNativeWindowWithTheme", () => {
     });
 
     it("leaves the title bar alone when the native one is visible, since setting the overlay then throws", () => {
-        optionsCtrl.get.mockReturnValue("true");
+        window.glob.hasNativeTitleBar = true;
         stubThemeVariables({
             "--native-titlebar-background": "#111",
             "--native-titlebar-foreground": "#eee"

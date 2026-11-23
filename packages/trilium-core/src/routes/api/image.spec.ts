@@ -105,6 +105,26 @@ describe("Image API (core)", () => {
             expect(Buffer.from(res.body as Buffer)).toEqual(PNG_BYTES);
         });
 
+        it("sandboxes an image note or attachment whose mime renders as HTML", async () => {
+            const payload = "<html><script>alert(document.domain)</script></html>";
+            const noteId = await createImageNote({
+                mime: "text/html",
+                content: payload,
+                attachments: [ { title: "page.html", role: "image", mime: "text/html", content: payload } ]
+            });
+
+            const fromNote = await api.get<string>(`/api/images/${noteId}/file.png`);
+            expect(fromNote.status).toBe(200);
+            expect(fromNote.headers["Content-Security-Policy"]).toBe("sandbox");
+            expect(fromNote.headers["X-Content-Type-Options"]).toBe("nosniff");
+
+            const [ attachment ] = becca.getNoteOrThrow(noteId).getAttachments();
+            const fromAttachment = await api.get<string>(`/api/attachments/${attachment.attachmentId}/image/file.png`);
+            expect(fromAttachment.status).toBe(200);
+            expect(fromAttachment.headers["Content-Security-Policy"]).toBe("sandbox");
+            expect(fromAttachment.headers["X-Content-Type-Options"]).toBe("nosniff");
+        });
+
         it("sanitizes a real SVG image note", async () => {
             const noteId = await createImageNote({
                 mime: "image/svg+xml",
@@ -293,6 +313,18 @@ describe("Image API (core)", () => {
             cls.init(() => {
                 expect(becca.getNoteOrThrow(noteId).getOwnedLabelValue("originalFileName")).toBe("x.png");
             });
+        });
+    });
+
+    describe("cancelImageCompression (POST /api/image-compression/:taskId/cancel)", () => {
+        it("calls off the run of that name, which then leaves every image alone", async () => {
+            const noteId = await createImageNote({ content: PNG_BYTES });
+
+            expect((await api.post("/api/image-compression/cancelledSpecRun/cancel")).status).toBe(204);
+
+            const res = await api.post<{ items: { compressed: boolean; skipReason?: string }[] }>(
+                `/api/notes/${noteId}/compress-images`, { body: { taskId: "cancelledSpecRun" } });
+            expect(res.body.items).toEqual([ expect.objectContaining({ compressed: false, skipReason: "cancelled" }) ]);
         });
     });
 

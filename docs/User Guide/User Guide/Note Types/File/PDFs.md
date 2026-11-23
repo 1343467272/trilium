@@ -12,7 +12,7 @@ Since v0.102.0, PDFs will be rendered using Trilium's built-in PDF viewer, which
 *   Forms can be filled.
 *   Can be printed or downloaded.
 *   Can be saved as a [template](../../Advanced%20Usage/Templates.md) and the content of the PDF will be copied over to the new note. This is especially useful in combination with annotations or filled forms.
-*   Integrates with the sidebar in the <a class="reference-link" href="../../Basic%20Concepts%20and%20Features/UI%20Elements/New%20Layout.md">New Layout</a>, by displaying the list of pages with thumbnails, table of contents and a listing of the annotations.
+*   Integrates with the <a class="reference-link" href="../../Basic%20Concepts%20and%20Features/UI%20Elements/Right%20Sidebar.md">Right Sidebar</a> by displaying the list of pages with thumbnails, table of contents and a listing of the annotations.
 *   Basic support for signatures (the hand-drawn ones, not proper digital signatures), similar to annotations. Signatures are stored and can be reused across multiple documents (up to 5).
 
 ## Storing last position and settings
@@ -36,7 +36,7 @@ Since v0.103.0:
 
 *   Annotations are disabled if the note is marked as <a class="reference-link" href="../../Basic%20Concepts%20and%20Features/Notes/Read-Only%20Notes.md">Read-Only Notes</a>.
 *   Comments can also be added, which is similar to highlights but also attach a text.
-*   The <a class="reference-link" href="../../Basic%20Concepts%20and%20Features/UI%20Elements/Right%20Sidebar.md">Right Sidebar</a> also displays a list of annotations (highlights, comments), but only in the <a class="reference-link" href="../../Basic%20Concepts%20and%20Features/UI%20Elements/New%20Layout.md">New Layout</a>.
+*   The <a class="reference-link" href="../../Basic%20Concepts%20and%20Features/UI%20Elements/Right%20Sidebar.md">Right Sidebar</a> also displays a list of annotations (highlights, comments).
 
 ### Supported annotations
 
@@ -67,11 +67,27 @@ The benefit of “baked-in annotations” is that they are also accessible if do
 
 The downside is that the entire PDF needs to be sent back to the server, which can slow down performance for larger documents. If you encounter any issues from this system, feel free to [report it](../../Troubleshooting/Reporting%20issues.md).
 
+## Linking to a heading
+
+Since v0.108.0, a link can point at a heading of a PDF: an entry of the outline that the file defines, the same headings the table of contents of the <a class="reference-link" href="../../Basic%20Concepts%20and%20Features/UI%20Elements/Right%20Sidebar.md">Right Sidebar</a> lists. To create one from a text or Markdown note:
+
+*   In the _Add link_ dialog, pick the PDF on the _Note_ page. Its headings are listed below the _Link title_, under _Link to a heading_. Check one, then press <kbd>Enter</kbd> or _Insert link_.
+*   Alternatively, type `@` and pick the PDF: the menu then lists the same headings.
+
+To copy a link to a heading while reading the PDF, right-click the heading in the table of contents of the <a class="reference-link" href="../../Basic%20Concepts%20and%20Features/UI%20Elements/Right%20Sidebar/Outline%20tab.md">Outline tab</a> and select _Copy reference_.
+
+The link shows the title of the PDF followed by the title of the heading, and opens the PDF at the heading. It also carries the page of the heading, which the PDF opens at when the heading cannot be found, for example once the outline of the file has changed. A heading whose title is repeated among the headings beside it is found only in the very same file, so once the PDF is saved again, for example with new annotations, a link to it opens its page.
+
+To link to a heading of a PDF attachment, edit a link to the attachment: the dialog lists the headings of the attachment.
+
+> [!NOTE]
+> Trilium keeps the headings of each PDF in an attachment of the note named `toc-cache.json`, read again whenever the file changes. Revisions, exports and copies of the note leave it out. On the standalone (browser) and mobile versions, the headings of a PDF are listed only once the PDF has been opened, since it is the PDF viewer that reads them there.
+
 ## Linking to a page or an annotation
 
 A link can open a PDF at a given page, or at one of its annotations. To create one:
 
-*   To link to a page, right-click the page in the _Pages_ section of the <a class="reference-link" href="../../Basic%20Concepts%20and%20Features/UI%20Elements/Right%20Sidebar.md">Right Sidebar</a> and select _Copy reference_.
+*   To link to a page, right-click the page in the _Pages_ section of the <a class="reference-link" href="../../Basic%20Concepts%20and%20Features/UI%20Elements/Right%20Sidebar.md">Right Sidebar</a> and select _Copy reference_.
 *   To link to an annotation, right-click it in the _Annotations_ section of the sidebar and select _Copy reference_.
 
 Pasted into a text note, the reference becomes one of the <a class="reference-link" href="../Text/Links/Internal%20(reference)%20links.md">Internal (reference) links</a>, showing the title of the PDF followed by the page (_Page 5_), or by _Annotation on page 5_ for a reference to an annotation. Clicking it opens the PDF and scrolls to the page or to the annotation.
@@ -88,9 +104,6 @@ Similar to annotations, forms are also supported by Trilium since v0.102.0. If t
 Simply type text in the forms and they will be automatically saved.
 
 ## Sidebar navigation
-
-> [!NOTE]
-> This feature is only available if <a class="reference-link" href="../../Basic%20Concepts%20and%20Features/UI%20Elements/New%20Layout.md">New Layout</a> is enabled. If you are using the old layout, these features are still available by looking for a sidebar button in the PDF viewer toolbar.
 
 See the dedicated section on PDFs in <a class="reference-link" href="../../Basic%20Concepts%20and%20Features/UI%20Elements/Right%20Sidebar/Outline%20tab.md">Outline tab</a>.
 

@@ -1,12 +1,17 @@
 import "./Attachment.css";
 
+import type { AttachmentRow } from "@triliumnext/commons";
 import {
-    type AttachmentRow, attachmentIcon, CANVAS_ATTACHMENT_MIME, isImageAttachmentRole
-} from "@triliumnext/commons";
+    attachmentIcon, isImageAttachmentRole
+} from "@triliumnext/commons/src/lib/attachment_roles.js";
+import { CANVAS_ATTACHMENT_MIME } from "@triliumnext/commons/src/lib/notes.js";
+import { XLSX_MIME } from "@triliumnext/commons/src/lib/office.js";
+import { findActivePdfHeading, type PdfTocHeading } from "@triliumnext/commons/src/lib/pdf_toc.js";
+import { findTocFormatName, TOC_HEADING_ATTRIBUTE } from "@triliumnext/commons/src/lib/toc.js";
 import { t } from "i18next";
 import { Fragment } from "preact";
 import { lazy, Suspense } from "preact/compat";
-import { useContext, useEffect, useMemo, useRef, useState } from "preact/hooks";
+import { useCallback, useContext, useEffect, useMemo, useRef, useState } from "preact/hooks";
 
 import type NoteContext from "../../components/note_context";
 import FAttachment from "../../entities/fattachment";
@@ -19,10 +24,17 @@ import {
 } from "../../services/attachment_actions";
 import { partitionAttachmentsByGroup } from "../../services/attachment_groups";
 import { attachmentRoleLabel } from "../../services/attachment_role_names";
-import content_renderer, { hasRenderedPreview } from "../../services/content_renderer";
+import { findDocumentTarget } from "../../services/bookmark_jump";
+import content_renderer, {
+    type ContentLandingOptions, type ContentLinkTarget, hasRenderedPreview,
+    type RenderedDocumentState
+} from "../../services/content_renderer";
 import froca from "../../services/froca";
 import image from "../../services/image";
-import { type ViewScope } from "../../services/link";
+import { getAttachmentImageUrl } from "../../services/image_urls";
+import importService from "../../services/import";
+import { getTocUrl, type ViewScope } from "../../services/link";
+import { takeLinkTarget, toLandingTarget } from "../../services/link_targets";
 import options from "../../services/options";
 import protected_session_holder from "../../services/protected_session_holder";
 import utils from "../../services/utils";
@@ -34,7 +46,12 @@ import { ExternallyControlledCollapsible } from "../react/Collapsible";
 import Dropdown from "../react/Dropdown";
 import { FormDropdownDivider, FormListItem } from "../react/FormList";
 import HelpButton from "../react/HelpButton";
-import { useAttachments, useTriliumEvent } from "../react/hooks";
+import type { ClientTocBuild, TocDocumentState } from "../sidebar/CachedToCProvider";
+import { useActiveHeading } from "../react/hooks/dom";
+import { useTriliumEvent } from "../react/hooks/events";
+import { useAttachments } from "../react/hooks/note";
+import { useLinkTargetLanding } from "../react/hooks/note_context";
+import { useFileDrop } from "../react/hooks/drag";
 import Icon from "../react/Icon";
 import ImageViewer from "../react/ImageViewer";
 import NoItems from "../react/NoItems";
@@ -43,23 +60,33 @@ import { ParentComponent, refToJQuerySelector } from "../react/react_utils";
 import SiblingNavigator from "../react/SiblingNavigator";
 import { TextPreview } from "./File";
 import MediaPreview from "./file/MediaPreview";
+import type { PdfReading } from "./file/PdfViewer";
+import TranscriptView from "./transcript/TranscriptView";
 import { TypeWidgetProps } from "./type_widget";
 
 const CanvasDrawingDetail = lazy(() =>
     import("./canvas/CanvasDrawing").then((module) => module.CanvasDrawingDetail));
+const SpreadsheetFile = lazy(() =>
+    import("./spreadsheet/Spreadsheet").then((module) => ({ default: module.SpreadsheetFile })));
 
 /**
  * Displays the full list of attachments of a note and allows the user to interact with them.
  */
 export function AttachmentList({ note }: TypeWidgetProps) {
+    const containerRef = useRef<HTMLDivElement>(null);
     const attachments = useAttachments(note);
-    const groups = useMemo(() => partitionAttachmentsByGroup(attachments), [ attachments ]);
+    const groups = useMemo(
+        () => partitionAttachmentsByGroup(attachments, note.type), [ attachments, note.type ]);
     // Nothing to fold away until the app has made an attachment of its own, which most notes never give
     // it reason to — so an ordinary note's list looks exactly as it did.
     const hasFoldedAway = groups.system.length > 0;
+    const isDraggingFiles = useFileDrop(containerRef, (files) => {
+        const shrinkImages = options.is("compressImages");
+        void importService.uploadFiles("attachments", note.noteId, files, { shrinkImages });
+    });
 
     return (
-        <div className="attachment-list-container">
+        <div ref={containerRef} className="attachment-list-container">
             <AttachmentListHeader noteId={note.noteId} />
             <div className="attachment-list-body">
                 {groups.user.length ? (
@@ -86,6 +113,12 @@ export function AttachmentList({ note }: TypeWidgetProps) {
                     opened on the last. */}
                 {hasFoldedAway && <SystemAttachments key={note.noteId} attachments={groups.system} />}
             </div>
+            {isDraggingFiles && (
+                <div className="attachment-list-drop-overlay">
+                    <Icon icon="bx bx-cloud-upload" />
+                    {t("attachment_list.drop_files")}
+                </div>
+            )}
         </div>
     );
 }
@@ -168,12 +201,24 @@ function AttachmentListHeader({ noteId }: { noteId: string }) {
 /**
  * Displays information about a single attachment.
  */
-export function AttachmentDetail({ note, viewScope, noteContext }: TypeWidgetProps) {
+export function AttachmentDetail({
+    note, viewScope, noteContext, isVisible = true
+}: TypeWidgetProps) {
     const [ attachment, setAttachment ] = useState<FAttachment | null | undefined>(undefined);
 
+    // Only the lookup of the latest navigation is shown, whichever lookup resolves last.
     useEffect(() => {
-        if (!viewScope?.attachmentId) return;
-        froca.getAttachment(viewScope.attachmentId).then(setAttachment);
+        const attachmentId = viewScope?.attachmentId;
+        if (!attachmentId) return;
+        let isLatest = true;
+        froca.getAttachment(attachmentId).then((found) => {
+            if (isLatest && viewScope.attachmentId === attachmentId) {
+                setAttachment(found);
+            }
+        });
+        return () => {
+            isLatest = false;
+        };
     }, [ viewScope ]);
 
     return (
@@ -195,7 +240,17 @@ export function AttachmentDetail({ note, viewScope, noteContext }: TypeWidgetPro
 
             <div className="attachment-wrapper">
                 {attachment !== null ? (
-                    attachment && <AttachmentInfo attachment={attachment} isFullDetail ownerNote={note} noteContext={noteContext} viewScope={viewScope} />
+                    attachment && (
+                        <AttachmentInfo
+                            key={attachment.attachmentId}
+                            attachment={attachment}
+                            isFullDetail
+                            ownerNote={note}
+                            noteContext={noteContext}
+                            viewScope={viewScope}
+                            isVisible={isVisible}
+                        />
+                    )
                 ) : (
                     <strong>{t("attachment_detail.attachment_deleted")}</strong>
                 )}
@@ -204,8 +259,12 @@ export function AttachmentDetail({ note, viewScope, noteContext }: TypeWidgetPro
     );
 }
 
-function AttachmentInfo({ attachment, isFullDetail, ownerNote, noteContext, viewScope }: { attachment: FAttachment, isFullDetail?: boolean, ownerNote?: FNote, noteContext?: NoteContext, viewScope?: ViewScope }) {
-    const parentComponent = useContext(ParentComponent);
+function AttachmentInfo({
+    attachment, isFullDetail, ownerNote, noteContext, viewScope, isVisible = true
+}: {
+    attachment: FAttachment, isFullDetail?: boolean, ownerNote?: FNote, noteContext?: NoteContext,
+    viewScope?: ViewScope, isVisible?: boolean
+}) {
     const contentWrapper = useRef<HTMLDivElement>(null);
     const imageViewerWrapper = useRef<HTMLDivElement>(null);
     const [ title, setTitle ] = useState(attachment.title);
@@ -217,8 +276,6 @@ function AttachmentInfo({ attachment, isFullDetail, ownerNote, noteContext, view
     // Same reason, for the content itself: replacing an attachment changes neither its id nor its title, so
     // without this nothing here re-renders and the viewer/player would keep showing what it first loaded.
     const [ modified, setModified ] = useState(attachment.utcDateModified);
-    // Counts the changes that another component saved, which the drawing editor loads again.
-    const [ externalRevision, setExternalRevision ] = useState(0);
     // "importSource" attachments (e.g. OneNote debug source) behave like ordinary files for
     // preview, OCR and link-copying purposes.
     const isFileLike = isFileLikeAttachment(attachment);
@@ -235,8 +292,45 @@ function AttachmentInfo({ attachment, isFullDetail, ownerNote, noteContext, view
     const isEditableDrawing = !!isFullDetail && !!ownerNote && isFileLike
         && attachment.mime === CANVAS_ATTACHMENT_MIME
         && (!attachment.isProtected || protected_session_holder.isProtectedSessionAvailable());
-    const rendersItself = isZoomableImage || isPlayableMedia || isEditableDrawing;
-    const imageSrc = `api/attachments/${attachment.attachmentId}/image/${encodeURIComponent(attachment.title)}?${modified}`;
+    const isTranscript = attachment.role === "transcript";
+    // A workbook gets the read-only spreadsheet, and its whole HTML preview if it cannot be read as
+    // one, until its content changes.
+    const [ workbookFailedFor, setWorkbookFailedFor ] = useState<string>();
+    const workbookKey = `${attachment.attachmentId}-${modified}`;
+    const isWorkbook = !!isFullDetail && attachment.mime === XLSX_MIME
+        && workbookFailedFor !== workbookKey;
+    const rendersItself = isZoomableImage || isPlayableMedia || isEditableDrawing || isTranscript || isWorkbook;
+    const imageSrc = getAttachmentImageUrl(attachment.attachmentId, attachment.title, modified);
+    /** Shows the content of the latest render at the place that a link names. */
+    const showTargetRef = useRef<
+        ((target: ContentLinkTarget, options?: ContentLandingOptions) => void) | null
+    >(null);
+    /** Counts the renders of `refresh()`: only the content of the latest one is shown. */
+    const renderGenerationRef = useRef(0);
+    /** Whether a render has started whose content is not in place yet. */
+    const isRenderingRef = useRef(false);
+    const tocDocument = useAttachmentTocDocument({
+        attachment, noteContext, contentWrapper, renderGenerationRef, isRenderingRef, showTargetRef,
+        isEnabled: !!isFullDetail && !!findTocFormatName(attachment.role, attachment.mime),
+        isVisible
+    });
+
+    /**
+     * Shows the place that the latest link names, once the content of the latest render is in
+     * place. Until then the view scope holds it, and the render that completes shows it.
+     */
+    function showLinkTarget() {
+        const showTarget = showTargetRef.current;
+        const scope = noteContext?.viewScope;
+        if (!showTarget || isRenderingRef.current || !isFullDetail
+            || scope?.attachmentId !== attachment.attachmentId) {
+            return;
+        }
+        const target = takeLinkTarget(scope, [ "page", "annotation", "heading", "bookmark" ]);
+        if (target) {
+            showTarget(target);
+        }
+    }
 
     /** Unmounts whatever the content renderer previously mounted here (a media player), so that replacing
      *  or discarding the content doesn't leak its Preact root — or leave its audio playing. */
@@ -247,12 +341,28 @@ function AttachmentInfo({ attachment, isFullDetail, ownerNote, noteContext, view
 
     function refresh() {
         if (!rendersItself) {
-            // The full-detail view has a pane to itself, so it gets the pdf.js toolbar; a list-view preview
-            // stays bare.
-            content_renderer.getRenderedContent(attachment, { pdfToolbar: !!isFullDetail })
-                .then(({ $renderedContent }) => {
+            // The full-detail view has a pane to itself, so it gets the pdf.js toolbar and the whole
+            // document; a list-view preview stays bare and shows only the corner of a workbook.
+            const generation = ++renderGenerationRef.current;
+            const renderOptions = {
+                pdfToolbar: !!isFullDetail,
+                buildsPdfToc: !!isFullDetail,
+                trim: !isFullDetail,
+                ...tocDocument.getRenderOptions(generation)
+            };
+            isRenderingRef.current = true;
+            content_renderer.getRenderedContent(attachment, renderOptions)
+                .then(({ $renderedContent, showTarget }) => {
+                    if (generation !== renderGenerationRef.current) {
+                        content_renderer.disposeInteractiveContent($renderedContent);
+                        return;
+                    }
                     disposeContent();
                     contentWrapper.current?.replaceChildren(...$renderedContent);
+                    showTargetRef.current = showTarget ?? null;
+                    isRenderingRef.current = false;
+                    tocDocument.place(generation);
+                    showLinkTarget();
                 });
         }
 
@@ -267,17 +377,23 @@ function AttachmentInfo({ attachment, isFullDetail, ownerNote, noteContext, view
 
     useEffect(() => {
         refresh();
-        return disposeContent;
+        return () => {
+            // A render that resolves after this is disposed unseen.
+            renderGenerationRef.current++;
+            isRenderingRef.current = false;
+            showTargetRef.current = null;
+            tocDocument.clear();
+            disposeContent();
+        };
     }, [ attachment, rendersItself ]);
     useTriliumEvent("entitiesReloaded", ({ loadResults }) => {
         const isThis = (row: AttachmentRow) => row.attachmentId === attachment.attachmentId;
-        if (!loadResults.getAttachmentRows().some(isThis)) return;
-
-        if (loadResults.getAttachmentRows(parentComponent?.componentId).some(isThis)) {
-            setExternalRevision((revision) => revision + 1);
+        if (loadResults.getAttachmentRows().some(isThis)) {
+            refresh();
         }
-        refresh();
     });
+    // A link to the attachment the pane shows keeps its viewer, which opens the link's place.
+    useLinkTargetLanding({ note: ownerNote, ntxId: noteContext?.ntxId }, showLinkTarget);
 
     // Electron right-click menu (copy image / reference) for the interactive image viewer.
     useEffect(() => {
@@ -357,12 +473,26 @@ function AttachmentInfo({ attachment, isFullDetail, ownerNote, noteContext, view
                         <Suspense fallback={null}>
                             <CanvasDrawingDetail
                                 key={attachment.attachmentId}
-                                revision={externalRevision}
                                 attachment={attachment}
                                 note={ownerNote}
                                 noteContext={noteContext}
                             />
                         </Suspense>
+                    </div>
+                ) : isWorkbook ? (
+                    <div key="spreadsheet" className="attachment-content-wrapper attachment-spreadsheet">
+                        <Suspense fallback={null}>
+                            <SpreadsheetFile
+                                key={workbookKey}
+                                entity={attachment}
+                                noteContext={noteContext}
+                                onError={() => setWorkbookFailedFor(workbookKey)}
+                            />
+                        </Suspense>
+                    </div>
+                ) : isTranscript ? (
+                    <div key="transcript" className="attachment-content-wrapper attachment-transcript">
+                        <TranscriptView attachment={attachment} />
                     </div>
                 ) : (
                     <div key="rendered" ref={contentWrapper} className="attachment-content-wrapper" />
@@ -468,4 +598,181 @@ function AttachmentActions({ attachment, copyAttachmentReferenceToClipboard }: {
             </Dropdown>
         </div>
     );
+}
+
+interface AttachmentTocDocumentOptions {
+    attachment: FAttachment;
+    noteContext: NoteContext | undefined;
+    contentWrapper: { current: HTMLDivElement | null };
+    renderGenerationRef: { current: number };
+    isRenderingRef: { current: boolean };
+    showTargetRef: {
+        current: ((target: ContentLinkTarget, options?: ContentLandingOptions) => void) | null;
+    };
+    /** Whether the attachment is a document whose outline comes from its ToC cache. */
+    isEnabled: boolean;
+    /** Whether `NoteDetailWrapper` displays the pane, which stays mounted while hidden. */
+    isVisible: boolean;
+}
+
+/** What a render of an attachment reported for the outline. */
+interface RenderedTocDocument {
+    generation: number;
+    state?: RenderedDocumentState;
+    /** Whether the content of the render is in place. */
+    isPlaced: boolean;
+    build?: ClientTocBuild;
+    /** Where the viewer of a PDF reads. */
+    reading?: PdfReading;
+}
+
+/**
+ * Publishes `tocDocument` for the attachment that the full-detail view shows: `rendering` while a
+ * render puts the content in place, then the blob that the render reported. Each state belongs to
+ * a render generation, and is published only while the pane is visible and its view scope names
+ * this attachment. The state of a placed render is published again when the pane shows it again.
+ */
+function useAttachmentTocDocument({
+    attachment, noteContext, contentWrapper, renderGenerationRef, isRenderingRef, showTargetRef,
+    isEnabled, isVisible
+}: AttachmentTocDocumentOptions) {
+    const renderedRef = useRef<RenderedTocDocument>({ generation: 0, isPlaced: false });
+    const [ marks, setMarks ] = useState<{
+        headings: { id: string; element: HTMLElement }[];
+        scrollingContainer: HTMLElement | null;
+    }>({ headings: [], scrollingContainer: null });
+    const getHeadingElement = useCallback(
+        (heading: { element: HTMLElement }) => heading.element, []);
+    const activeHeadingId = useActiveHeading({ ...marks, getHeadingElement });
+    const activeHeadingRef = useRef(activeHeadingId);
+    activeHeadingRef.current = activeHeadingId;
+    // The callbacks that `refresh()` passes to the content renderer outlive their render.
+    const isVisibleRef = useRef(isVisible);
+    isVisibleRef.current = isVisible;
+    const { attachmentId } = attachment;
+
+    function isInScope() {
+        return isEnabled && isVisibleRef.current
+            && noteContext?.viewScope?.attachmentId === attachmentId;
+    }
+
+    /** Lands on `params` while the render `generation` is the latest and in place. */
+    function showTarget(generation: number, params: Record<string, string>) {
+        const show = showTargetRef.current;
+        if (generation !== renderGenerationRef.current || isRenderingRef.current || !show
+            || !isInScope()) {
+            return false;
+        }
+        const target = toLandingTarget(params);
+        const body = contentWrapper.current?.querySelector(".office-preview-body");
+        if (body && !findDocumentTarget(body, target)) {
+            return false;
+        }
+        show(target, { isFallbackToTop: false });
+        return true;
+    }
+
+    function toState(): TocDocumentState {
+        const rendered = renderedRef.current;
+        const { generation, state, isPlaced, build } = rendered;
+        if (state?.status === "unavailable") {
+            return { status: "unavailable", attachmentId };
+        }
+        if (!isPlaced || state?.status !== "shown") {
+            return { status: "rendering", attachmentId };
+        }
+        const notePath = noteContext?.notePath ?? attachment.ownerId;
+        return {
+            status: "shown",
+            attachmentId,
+            tocUrl: getTocUrl("attachments", attachmentId),
+            renderedBlobId: state.blobId,
+            ownerNoteId: attachment.ownerId,
+            linkPath: `${notePath}?viewMode=attachments&attachmentId=${attachmentId}`,
+            title: attachment.title,
+            showTarget: (params) => showTarget(generation, params),
+            findActiveHeading: (headings) => {
+                const reading = rendered.reading;
+                return reading?.position
+                    ? findActivePdfHeading(headings as PdfTocHeading[], reading.position,
+                        reading.rotations)
+                    : activeHeadingRef.current;
+            },
+            clientBuild: build
+        };
+    }
+
+    function publish() {
+        if (isInScope()) {
+            noteContext?.setContextData("tocDocument", toState());
+        }
+    }
+
+    /** Reads the headings that the server marked in a preview, for the active heading. */
+    function readMarks() {
+        const wrapper = contentWrapper.current;
+        const elements = wrapper?.querySelectorAll<HTMLElement>(`[${TOC_HEADING_ATTRIBUTE}]`) ?? [];
+        setMarks({
+            // Entries that land on one element share it; the deepest is the last of its ids.
+            headings: Array.from(elements, (element) => ({
+                id: element.getAttribute(TOC_HEADING_ATTRIBUTE)?.split(" ").at(-1) ?? "",
+                element
+            })),
+            scrollingContainer:
+                wrapper?.querySelector<HTMLElement>(".office-preview-scroll") ?? null
+        });
+    }
+
+    useEffect(() => {
+        if (renderedRef.current.isPlaced) {
+            publish();
+        }
+    }, [ activeHeadingId, isVisible ]);
+
+    return {
+        /** The options that report the render `generation` to the outline. */
+        getRenderOptions(generation: number) {
+            if (!isEnabled) {
+                return {};
+            }
+            renderedRef.current = { generation, isPlaced: false };
+            publish();
+            const isCurrent = () => renderedRef.current.generation === generation;
+            return {
+                onDocumentState(state: RenderedDocumentState) {
+                    if (isCurrent()) {
+                        renderedRef.current.state = state;
+                        publish();
+                    }
+                },
+                onTocBuild(build: ClientTocBuild) {
+                    if (isCurrent()) {
+                        renderedRef.current.build = build;
+                        publish();
+                    }
+                },
+                onReadingChange(reading: PdfReading) {
+                    if (isCurrent()) {
+                        renderedRef.current.reading = reading;
+                        publish();
+                    }
+                }
+            };
+        },
+        /** The content of the render `generation` is in place. */
+        place(generation: number) {
+            if (!isEnabled || renderedRef.current.generation !== generation) {
+                return;
+            }
+            renderedRef.current.isPlaced = true;
+            readMarks();
+            publish();
+        },
+        clear() {
+            const current = noteContext?.getContextData("tocDocument");
+            if (isEnabled && current?.attachmentId === attachmentId) {
+                noteContext?.clearContextData("tocDocument");
+            }
+        }
+    };
 }

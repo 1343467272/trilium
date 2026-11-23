@@ -1,14 +1,23 @@
 import { dayjs } from "@triliumnext/commons";
-import express, { type Application } from "express";
+import express, { type Application, type Request as ExpressRequest, type Response as ExpressResponse } from "express";
 import { SessionData } from "express-session";
 import supertest, { type Response } from "supertest";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
-import { cls, options } from "@triliumnext/core";
+import { cls, events, initMessaging, options, password as passwordService } from "@triliumnext/core";
 import { refreshAuth } from "../services/auth.js";
 import config from "../services/config.js";
-import { createLoginRateLimiter } from "./login.js";
+import { markAsInternalElectronRequest } from "../services/electron_request.js";
+import openID from "../services/open_id.js";
+import totp from "../services/totp.js";
+import loginRoute, { createLoginRateLimiter } from "./login.js";
 import { type SQLiteSessionStore } from "./session_parser.js";
+
+const desktop = vi.hoisted(() => ({ isElectron: false }));
+vi.mock("../services/utils.js", async (orig) => ({
+    ...await orig<typeof import("../services/utils.js")>(),
+    get isElectron() { return desktop.isElectron; }
+}));
 
 let app: Application;
 let sessionStore: SQLiteSessionStore;
@@ -41,6 +50,104 @@ describe("createLoginRateLimiter", () => {
     });
 });
 
+describe("set-password handlers", () => {
+    afterEach(() => {
+        vi.restoreAllMocks();
+        desktop.isElectron = false;
+    });
+
+    function setPasswordWith(body: Record<string, unknown>, opts: { internal?: boolean } = {}) {
+        const req = { body } as ExpressRequest;
+        if (opts.internal) {
+            markAsInternalElectronRequest(req);
+        }
+        const res = { redirect: vi.fn() };
+        const result = loginRoute.setPassword(req, res as unknown as ExpressResponse);
+        return { result, res };
+    }
+
+    it("redirects GET /set-password to the SPA root", () => {
+        const res = { redirect: vi.fn() };
+        loginRoute.setPasswordPage({} as ExpressRequest, res as unknown as ExpressResponse);
+        expect(res.redirect).toHaveBeenCalledWith(".");
+    });
+
+    it("refuses to overwrite a password that is already set", async () => {
+        vi.spyOn(passwordService, "isPasswordSet").mockReturnValue(true);
+        const setPassword = vi.spyOn(passwordService, "setPassword");
+
+        const { result, res } = setPasswordWith({ password1: "new-pass", password2: "new-pass" });
+
+        await expect(result).rejects.toThrow("Password has been already set");
+        expect(setPassword).not.toHaveBeenCalled();
+        expect(res.redirect).not.toHaveBeenCalled();
+    });
+
+    it("rejects mismatched or too-short passwords without storing them", async () => {
+        vi.spyOn(passwordService, "isPasswordSet").mockReturnValue(false);
+        const setPassword = vi.spyOn(passwordService, "setPassword");
+
+        await expect(setPasswordWith({ password1: "abcd", password2: "abce" }).result)
+            .rejects.toThrow("Entered passwords don't match.");
+        // Surrounding whitespace is trimmed before the length check.
+        await expect(setPasswordWith({ password1: " abc ", password2: "abc" }).result)
+            .rejects.toThrow("Password must be at least 4 characters long.");
+        expect(setPassword).not.toHaveBeenCalled();
+    });
+
+    it("refuses a desktop password sent over the network, but not from the desktop app", async () => {
+        desktop.isElectron = true;
+        vi.spyOn(passwordService, "isPasswordSet").mockReturnValue(false);
+        const setPassword = vi.spyOn(passwordService, "setPassword").mockResolvedValue({ success: true });
+
+        const network = setPasswordWith({ password1: "secret", password2: "secret" });
+        await expect(network.result).rejects.toMatchObject({ statusCode: 403 });
+        expect(network.res.redirect).not.toHaveBeenCalled();
+        expect(setPassword).not.toHaveBeenCalled();
+
+        const renderer = setPasswordWith({ password1: "secret", password2: "secret" }, { internal: true });
+        await renderer.result;
+        expect(setPassword).toHaveBeenCalledWith("secret");
+        expect(renderer.res.redirect).toHaveBeenCalledWith("login");
+    });
+
+    it("stores the trimmed password and redirects to the login page", async () => {
+        vi.spyOn(passwordService, "isPasswordSet").mockReturnValue(false);
+        const setPassword = vi.spyOn(passwordService, "setPassword").mockResolvedValue({ success: true });
+
+        const { result, res } = setPasswordWith({ password1: "  secret  ", password2: "secret" });
+        await result;
+
+        expect(setPassword).toHaveBeenCalledWith("secret");
+        expect(res.redirect).toHaveBeenCalledWith("login");
+    });
+});
+
+describe("login with OpenID enabled", () => {
+    afterEach(() => {
+        vi.restoreAllMocks();
+    });
+
+    it("hands the login to the OIDC provider without checking a password or logging the session in", async () => {
+        vi.spyOn(openID, "isOpenIDEnabled").mockReturnValue(true);
+        const oidcLogin = vi.fn().mockResolvedValue(undefined);
+        const regenerate = vi.fn();
+        const session: Record<string, unknown> = { regenerate };
+        const res = { oidc: { login: oidcLogin }, status: vi.fn(), redirect: vi.fn() };
+
+        await loginRoute.login(
+            { body: { password: "demo1234" }, session } as unknown as ExpressRequest,
+            res as unknown as ExpressResponse
+        );
+
+        expect(oidcLogin).toHaveBeenCalledWith({ returnTo: "/" });
+        expect(regenerate).not.toHaveBeenCalled();
+        expect(session.loggedIn).toBeUndefined();
+        expect(res.status).not.toHaveBeenCalled();
+        expect(res.redirect).not.toHaveBeenCalled();
+    });
+});
+
 describe("Login Route test", () => {
 
     beforeAll(async () => {
@@ -69,6 +176,32 @@ describe("Login Route test", () => {
             .send({ password: "fakePassword" })
             .expect(401);
 
+    });
+
+    it("returns a 401 status, when the password field is missing or not a string", async () => {
+        for (const body of [{}, { password: ["a"] }]) {
+            await supertest(app)
+                .post("/login")
+                .send(body)
+                .expect(401);
+        }
+    });
+
+    it("rejects a TOTP token that is not a string without verifying it", async () => {
+        vi.spyOn(totp, "isTotpEnabled").mockReturnValue(true);
+        const verifyTOTP = vi.spyOn(totp, "verifyTOTP");
+
+        try {
+            const res = await supertest(app)
+                .post("/login")
+                .send({ password: "demo1234", totpToken: ["123456"] })
+                .expect(401);
+
+            expect(res.body).toEqual({ success: false, factor: "totp" });
+            expect(verifyTOTP).not.toHaveBeenCalled();
+        } finally {
+            vi.restoreAllMocks();
+        }
     });
 
     describe("login stays reachable with redirectBareDomain enabled (#10552)", () => {
@@ -263,6 +396,67 @@ describe("Login Route test", () => {
             vi.advanceTimersByTime(CLEAN_UP_INTERVAL);
             ({ session } = await getSessionFromCookie(setCookieHeader));
             expect(session).toBeFalsy();
+        });
+    });
+
+    describe("Password change revokes sessions", () => {
+        let originalHash: string;
+        const disconnectAllClients = vi.fn();
+
+        beforeAll(() => {
+            originalHash = cls.init(() => options.getOption("passwordVerificationHash"));
+            initMessaging({
+                attachToHttpServer() {},
+                disconnectAllClients,
+                sendMessageToAllClients() {},
+                sendMessageToClient: () => false,
+                setClientMessageHandler() {}
+            } as Parameters<typeof initMessaging>[0]);
+        });
+
+        afterEach(() => {
+            cls.init(() => options.setOption("passwordVerificationHash", originalHash));
+            disconnectAllClients.mockClear();
+        });
+
+        async function logIn() {
+            const res = await supertest(app)
+                .post("/login")
+                .send({ password: "demo1234" })
+                .expect(302);
+            const cookie = res.headers["set-cookie"][0];
+            expect((await getSessionFromCookie(cookie)).session?.loggedIn).toBe(true);
+            return cookie;
+        }
+
+        it("keeps sessions when an unrelated option changes", async () => {
+            const cookie = await logIn();
+            cls.init(() => options.setOption("redirectBareDomain", "false"));
+            expect((await getSessionFromCookie(cookie)).session?.loggedIn).toBe(true);
+            expect(disconnectAllClients).not.toHaveBeenCalled();
+        });
+
+        it("removes every session when the password changes on this instance", async () => {
+            const first = await logIn();
+            const second = await logIn();
+
+            cls.init(() => options.setOption("passwordVerificationHash", "changed-locally"));
+
+            expect((await getSessionFromCookie(first)).session).toBeFalsy();
+            expect((await getSessionFromCookie(second)).session).toBeFalsy();
+            expect(disconnectAllClients).toHaveBeenCalled();
+        });
+
+        it("removes every session when a password change arrives by sync", async () => {
+            const cookie = await logIn();
+
+            cls.init(() => events.emit(events.ENTITY_CHANGE_SYNCED, {
+                entityName: "options",
+                entityRow: { name: "passwordVerificationHash", value: "changed-remotely", isSynced: 1 }
+            }));
+
+            expect((await getSessionFromCookie(cookie)).session).toBeFalsy();
+            expect(disconnectAllClients).toHaveBeenCalled();
         });
     });
 }, 100_000);

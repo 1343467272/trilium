@@ -1,15 +1,20 @@
 import type { CKTextEditor } from "@triliumnext/ckeditor5";
 
 import appContext, { type CommandNames } from "../components/app_context.js";
+import { buildBlockReferenceMenuItems } from "../services/block_reference.js";
 import { copyHtml, copyTextWithToast } from "../services/clipboard_ext.js";
 import { t } from "../services/i18n.js";
-import options from "../services/options.js";
+import { getSearchEngine } from "../services/search_engine.js";
 import server from "../services/server.js";
 import utils from "../services/utils.js";
+import { buildCodeEditorContextMenuItems } from "./code_editor_context_menu.js";
 import contextMenu, { type MenuItem } from "./context_menu.js";
 import { splitMenuItem } from "./context_menu_utils.js";
 import { buildTableContextMenuSections, hasTableCellSelection } from "./table_context_menu.js";
-import { buildAiActionsMenuItem, getTextEditorAtSelection } from "./text_editor_context_menu.js";
+import {
+    buildAiActionsMenuItem, buildSortSelectionMenuItem, getTextEditorAtSelection,
+    getTextEditorContaining
+} from "./text_editor_context_menu.js";
 
 /** What the pointer was over when the menu was summoned. */
 export interface ContextMenuTarget {
@@ -54,62 +59,6 @@ export interface ContextMenuHost {
 }
 
 /**
- * Puts Trilium's menu over the browser's own wherever the pointer sits on a selection. A click at a
- * bare caret keeps the native menu, the only way to spelling corrections and the browser's paste.
- * Electron replaces the menu everywhere; see `electron_context_menu.ts`.
- */
-export function setupContextMenu() {
-    document.addEventListener("contextmenu", (event) => {
-        // A widget that answers the click itself — the note tree, an internal link — has already
-        // put its own menu up.
-        if (event.defaultPrevented) {
-            return;
-        }
-
-        // Shift+right-click is Firefox's own way back to the browser's menu; honoring it gives
-        // Chrome and Safari, which have no bypass of their own, the same one.
-        if (event.shiftKey) {
-            return;
-        }
-
-        const element = event.target instanceof HTMLElement ? event.target : null;
-        const isEditable = acceptsTyping(element);
-
-        // `window.getSelection()` does not report a selection inside an `<input>` or `<textarea>`,
-        // so those keep the browser's menu, which is the better one for a plain text field.
-        // The clipboard and search rows act on the selection, so the pointer has to be on it: a
-        // right-click on the surrounding UI, which takes no selection of its own, leaves an
-        // earlier one standing.
-        const selection = window.getSelection();
-        const selectionText = selection?.toString() ?? "";
-        const isOnSelection = !!selection && !!selectionText.trim()
-            && isPointInSelection(selection, event.clientX, event.clientY);
-
-        // A table cell in the text editor is claimed even at a bare caret, for the table section.
-        const isOnEditableTableCell = isEditable && !!element?.closest("td, th");
-
-        if (!isOnSelection && !isOnEditableTableCell) {
-            return;
-        }
-
-        // Claimed before the items are built: after an await the default action has already run.
-        event.preventDefault();
-
-        const link = element?.closest("a[href]");
-
-        void showBrowserContextMenu(event.pageX, event.pageY, {
-            linkURL: link instanceof HTMLAnchorElement ? link.href : "",
-            linkText: link?.textContent ?? "",
-            isMedia: !!element?.closest("img, video, audio"),
-            isEditable,
-            // Claimed off the selection (a bare caret in a table cell), those rows get none.
-            selectionText: isOnSelection ? selectionText : "",
-            element
-        });
-    });
-}
-
-/**
  * The rows the menu shows for `target`, in order, leaving out whatever `host` cannot serve.
  *
  * Callers own the positioning and the `selectMenuItemHandler`, because the spelling suggestions
@@ -135,6 +84,18 @@ export async function buildNoteContextMenuItems(
     // A cell selection supersedes `selectionText`: over one, Electron reports the hidden
     // fake-selection label as the selected text, which no row should act on.
     const hasCellSelection = tableSections !== null && await hasTableCellSelection(target.element);
+    const blockReferenceItems = target.isEditable
+        ? await buildBlockReferenceMenuItems(target.element, host.paste)
+            ?? await buildMarkdownReferenceMenuItems(target.element, host.paste)
+        : null;
+    const codeEditorItems = target.isEditable
+        ? await buildCodeEditorContextMenuItems(target.element)
+        : null;
+    // The table section sorts the rows.
+    const sortItem = target.isEditable
+        ? buildSortSelectionMenuItem(await getTextEditorContaining(target.element),
+            { isRowsExcluded: tableSections !== null })
+        : null;
     const hasText = !hasCellSelection && target.selectionText.trim().length > 0;
     const hasClipboardContent = hasText || hasCellSelection;
 
@@ -186,6 +147,11 @@ export async function buildNoteContextMenuItems(
                 handler: copySelectionAsMarkdown
             }
         ];
+        const referenceItems = [ blockReferenceItems?.copy, blockReferenceItems?.copyTab ]
+            .filter((item): item is MenuItem<CommandNames> => !!item);
+        if (referenceItems.length) {
+            copyVariants.push({ kind: "separator" }, ...referenceItems);
+        }
 
         items.push(splitMenuItem({
             enabled: host.canCopy && hasClipboardContent,
@@ -220,6 +186,9 @@ export async function buildNoteContextMenuItems(
                 handler: runAsPlainText
             }
         ];
+        if (blockReferenceItems?.paste.length) {
+            pasteVariants.push({ kind: "separator" }, ...blockReferenceItems.paste);
+        }
         if (tableSections?.pasteRows.length) {
             pasteVariants.push({ kind: "separator" }, ...tableSections.pasteRows);
         }
@@ -234,8 +203,15 @@ export async function buildNoteContextMenuItems(
     }
 
     if (tableSections) {
-        items.push({ kind: "separator" }, tableSections.sort, { kind: "separator" },
+        const sortItems = sortItem ? [ tableSections.sort, sortItem ] : [ tableSections.sort ];
+        items.push({ kind: "separator" }, ...sortItems, { kind: "separator" },
             ...tableSections.delete, { kind: "separator" }, tableSections.select);
+    } else if (sortItem) {
+        items.push({ kind: "separator" }, sortItem);
+    }
+
+    if (codeEditorItems) {
+        items.push({ kind: "separator" }, ...codeEditorItems);
     }
 
     if (hasText) {
@@ -244,30 +220,20 @@ export async function buildNoteContextMenuItems(
             ? `${selectionText.slice(0, 13)}…`
             : selectionText;
 
-        const customSearchEngineName = options.get("customSearchEngineName");
-        const customSearchEngineUrl = options.get("customSearchEngineUrl") as string;
-        let searchEngineName;
-        let searchEngineUrl;
-        if (customSearchEngineName && customSearchEngineUrl) {
-            searchEngineName = customSearchEngineName;
-            searchEngineUrl = customSearchEngineUrl;
-        } else {
-            searchEngineName = "DuckDuckGo";
-            searchEngineUrl = "https://duckduckgo.com/?q={keyword}";
-        }
-
-        const searchUrl = searchEngineUrl.replace("{keyword}", encodeURIComponent(selectionText));
-
         items.push({ kind: "separator" });
 
-        items.push({
-            title: t("electron_context_menu.search_online", {
-                term: utils.escapeHtml(shortenedSelection),
-                searchEngine: utils.escapeHtml(searchEngineName)
-            }),
-            uiIcon: "bx bx-search-alt",
-            handler: () => host.openExternal(searchUrl)
-        });
+        const searchEngine = getSearchEngine();
+        if (searchEngine) {
+            const searchUrl = searchEngine.url.replace("{keyword}", encodeURIComponent(selectionText));
+            items.push({
+                title: t("electron_context_menu.search_online", {
+                    term: utils.escapeHtml(shortenedSelection),
+                    searchEngine: utils.escapeHtml(searchEngine.name)
+                }),
+                uiIcon: searchEngine.icon,
+                handler: () => host.openExternal(searchUrl)
+            });
+        }
 
         items.push({
             title: t("electron_context_menu.search_in_trilium", { term: utils.escapeHtml(shortenedSelection) }),
@@ -304,37 +270,30 @@ export async function getSelectedHtmlForMarkdown(): Promise<string> {
     return div.innerHTML;
 }
 
-async function showBrowserContextMenu(x: number, y: number, target: ContextMenuTarget) {
+/**
+ * The block reference rows of the editor of a Markdown note that holds `element`. The module that
+ * builds them loads only for a click in a code editor.
+ */
+async function buildMarkdownReferenceMenuItems(
+    element: Element | null | undefined,
+    clipboard: ContextMenuHost["paste"]
+) {
+    if (!element?.closest(".cm-editor")) {
+        return null;
+    }
+    const { buildMarkdownReferenceMenuItems: build } = await import(
+        "../widgets/type_widgets/markdown/block_reference_menu.js"
+    );
+    return build(element, clipboard);
+}
+
+/** Shows the menu for `target` at (`x`, `y`) in the page, as `browser_context_menu.ts` asks. */
+export async function showBrowserContextMenu(x: number, y: number, target: ContextMenuTarget) {
     const editor = await getTextEditorAtSelection();
     const items = await buildNoteContextMenuItems(target, browserHost(editor, target.element));
     if (!items.length) return;
 
     contextMenu.show({ x, y, items, selectMenuItemHandler: () => {} });
-}
-
-/** Whether the point (`x`, `y`), in viewport coordinates, lands on what `selection` highlights. */
-function isPointInSelection(selection: Selection, x: number, y: number) {
-    for (let i = 0; i < selection.rangeCount; i++) {
-        for (const rect of Array.from(selection.getRangeAt(i).getClientRects())) {
-            if (x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) {
-                return true;
-            }
-        }
-    }
-
-    return false;
-}
-
-/**
- * Whether `element` takes typing, which is what decides the rows that write to a note.
- *
- * `isContentEditable` alone does not answer it inside a code note. CodeMirror drives
- * `contenteditable` off its `editable` facet, which Trilium never lowers, and marks a read-only
- * note with `aria-readonly` on the same element instead — so the attribute is what tells the two
- * apart.
- */
-function acceptsTyping(element: HTMLElement | null) {
-    return !!element?.isContentEditable && !element.closest("[aria-readonly='true']");
 }
 
 /**

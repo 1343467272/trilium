@@ -41,10 +41,10 @@ vi.mock("../../../services/i18n", () => ({
 }));
 
 // Each call keeps its own copy of the value, as the real hook does until `entitiesReloaded` arrives.
-vi.mock("../../react/hooks", async (importOriginal) => {
+vi.mock("../../react/hooks/options", async (importOriginal) => {
     const { useState } = await import("preact/hooks");
     return {
-        ...(await importOriginal<typeof import("../../react/hooks")>()),
+        ...(await importOriginal<typeof import("../../react/hooks/options")>()),
         useTriliumOption: (name: string) => {
             const [ value, setValue ] = useState(mocks.stored[name] ?? "");
             return [ value, (newValue: string) => {
@@ -237,6 +237,18 @@ describe("the configured providers", () => {
 
         expect(host.querySelector(".no-items")).not.toBeNull();
         expect(providers()).toHaveLength(0);
+    });
+
+    it("adds from a creation row at the foot of each card, as the other lists do", () => {
+        withProviders([ { id: "a", name: "My OpenAI", provider: "openai", apiKey: "sk" } ]);
+        open();
+
+        for (const name of [ "add-llm-provider-button", "add-search-provider-button" ]) {
+            const row = host.querySelector(`button.tn-card-adder[name='${name}']`)
+                ?.closest(".tn-card-adders");
+            expect(row).toBeInstanceOf(HTMLElement);
+            expect(row?.parentElement?.lastElementChild).toBe(row);
+        }
     });
 
     it("survives a stored list that is not readable, rather than taking the page down with it", () => {

@@ -5,6 +5,7 @@ import { Autoformat, AutoLink, BlockQuote, BlockToolbar, Bold, CKFinderUploadAda
 // doc comment for the details.
 import type { Plugin } from "ckeditor5";
 import AdaptiveColors from "./plugins/adaptive_colors.js";
+import ChildNotePlugin from "./plugins/child_note.js";
 import CutToNotePlugin from "./plugins/cuttonote.js";
 import UploadimagePlugin from "./plugins/uploadimage.js";
 import ItalicAsEmPlugin from "./plugins/italic_as_em.js";
@@ -12,6 +13,15 @@ import StrikethroughAsDel from "./plugins/strikethrough_as_del.js";
 import InternalLinkPlugin from "./plugins/internallink.js";
 import InsertDateTimePlugin from "./plugins/insert_date_time.js";
 import ReferenceLink from "./plugins/referencelink.js";
+import NoPoweredByBadge from "./plugins/no_powered_by_badge.js";
+import DragOutOfEditor from "./plugins/drag_out_of_editor.js";
+import HiddenEditorBalloons from "./plugins/hidden_editor_balloons.js";
+import KeepBalloonPositions from "./plugins/keep_balloon_positions.js";
+import InlineFillerSpellcheck from "./plugins/inline_filler_spellcheck.js";
+import InlineWidgetCaret from "./plugins/inline_widget_caret.js";
+import KeepViewMappings from "./plugins/keep_view_mappings.js";
+import KeepDragSelection from "./plugins/keep_drag_selection.js";
+import DropDisallowedAttributes from "./plugins/drop_disallowed_attributes.js";
 import RemoveFormatLinksPlugin from "./plugins/remove_format_links.js";
 import IndentBlockShortcutPlugin from "./plugins/indent_block_shortcut.js";
 import MarkdownImportPlugin from "./plugins/markdownimport.js";
@@ -21,8 +31,10 @@ import TriliumMentionUI from "./plugins/mention/trilium_mention_ui.js";
 import TriliumSlashCommands from "./plugins/mention/slash_commands.js";
 import TriliumFormatPainter from "./plugins/format_painter/format_painter.js";
 import ContentEmbed from "./plugins/content_embed/content_embed.js";
+import BlockReference from "./plugins/block_reference/block_reference.js";
 import InlineIcon from "./plugins/inline_icon/inline_icon.js";
 import LinkEmbed from "./plugins/link_embed/link_embed.js";
+import InsertMediaPlugin from "./plugins/insert_media.js";
 import Uploadfileplugin from "./plugins/file_upload/uploadfileplugin.js";
 import FindInLinkWidgets from "./plugins/find_in_link_widgets.js";
 import SyntaxHighlighting from "./plugins/syntax_highlighting/index.js";
@@ -30,15 +42,21 @@ import Kbd from "./plugins/keyboard_marker/keyboard_marker.js";
 import Mermaid from "./plugins/mermaid/mermaid.js";
 import Admonition from "./plugins/admonition/admonition.js";
 import Collapsible from "./plugins/collapsible/collapsible.js";
+import Tabs from "./plugins/tabs/tabs.js";
+import Multicolumn from "./plugins/multicolumn/multicolumn.js";
+import Aside from "./plugins/aside/aside.js";
 import Footnotes from "./plugins/footnotes/footnotes.js";
 import Math from "./plugins/math/math.js";
 import AutoformatMath from "./plugins/math/autoformat_math.js";
 import CopyAnchorLinkButton from "./plugins/copy_anchor_link.js";
 import CopyLinkUrlButton from "./plugins/copy_link_url.js";
 import ImageActions from "./plugins/image_actions.js";
+import ImageToDrawing from "./plugins/image_to_drawing.js";
 import ClipboardBareImage from "./plugins/clipboard_bare_image.js";
 import ClipboardImageEmbed from "./plugins/clipboard_image_embed.js";
+import ImageEditingSource from "./plugins/image_editing_source.js";
 import ClipboardPageStyles from "./plugins/clipboard_page_styles.js";
+import ClipboardPlainTextIndent from "./plugins/clipboard_plain_text_indent.js";
 import PasteFromVsCode from "./plugins/paste_from_vscode.js";
 import TriliumSnippets from "./plugins/snippets/snippets.js";
 import TriliumAiAssistant from "./plugins/ai_assistant/ai_assistant.js";
@@ -48,6 +66,7 @@ import CodeBlockLanguageDropdown from "./plugins/code_block_language_dropdown.js
 import CodeBlockInsertParagraph from "./plugins/code_block_insert_paragraph.js";
 import CodeBlockHljsClass from "./plugins/code_block_hljs_class.js";
 import MoveBlockUpDownPlugin from "./plugins/move_block_updown.js";
+import DeleteBlocks from "./plugins/delete_blocks.js";
 import ScrollOnUndoRedoPlugin from "./plugins/scroll_on_undo_redo.js"
 import InlineCodeNoSpellcheck from "./plugins/inline_code_no_spellcheck.js";
 import InlineCodeToolbar from "./plugins/inline_code_toolbar.js";
@@ -55,19 +74,43 @@ import AdmonitionTypeDropdown from "./plugins/admonition/admonition_type_dropdow
 import AdmonitionToolbar from "./plugins/admonition/admonition_toolbar.js";
 import ContentEmbedBoxSizeDropdown
     from "./plugins/content_embed/content_embed_box_size_dropdown.js";
+import ContentEmbedPositionDropdown
+    from "./plugins/content_embed/content_embed_position_dropdown.js";
 import ContentEmbedToolbar from "./plugins/content_embed/content_embed_toolbar.js";
+import ContentEmbedCaret from "./plugins/content_embed/content_embed_caret.js";
+import ExtendedCodeBlock from "./plugins/content_embed/extended_code_block.js";
 import LinkEmbedToolbar from "./plugins/link_embed/link_embed_toolbar.js";
+import LinkMenu from "./plugins/link_menu.js";
+import NoteLinkToolbar from "./plugins/note_link_toolbar.js";
 import TodoListMultistate from "./plugins/todo_list_multistate/todo_list_multistate.js";
 import TodoListUncheckOnEnter from "./plugins/todo_list_uncheck_on_enter.js";
 import CollapsibleListItems from "./plugins/collapsible_list_items.js";
+import CollapsibleHeadings from "./plugins/collapsible_headings/collapsible_headings.js";
+import HeadingLevelOne from "./plugins/heading_level_one.js";
+import ListItemAlignment from "./plugins/list_item_alignment.js";
+import ListItemInsert from "./plugins/list_item_insert.js";
 import TableIndent from "./plugins/table_indent.js";
 import TableContextMenu from "./plugins/table_context_menu.js";
+import TableExitCaret from "./plugins/table_exit_caret.js";
 import TableMove from "./plugins/table_move/table_move.js";
 import TablePasteRows from "./plugins/table_paste_rows.js";
 import TableSort from "./plugins/table_sort.js";
+import SortSelection from "./plugins/sort_selection/sort_selection.js";
 import TableInsertUI from "./plugins/table_insert/table_insert_ui.js";
 import TableToolbarDropdowns from "./plugins/table_toolbar_dropdowns.js";
+import TriliumTableScroll from "./plugins/table_scroll.js";
+import TableStickyHeader from "./plugins/table_sticky_header.js";
+import TableColumnBar from "./plugins/table_column_bar/table_column_bar.js";
+import TableTouchSelection from "./plugins/table_touch_selection/table_touch_selection.js";
 import ToolbarGroupMenu from "./plugins/toolbar_group_menu.js";
+import MobileToolbarItems from "./plugins/mobile_toolbar_items.js";
+import TextFormattingToolbar from "./plugins/text_formatting_toolbar.js";
+import ContextToolbar from "./plugins/context_toolbar.js";
+import ImagePosition from "./plugins/image_position.js";
+import ColorMenu from "./plugins/color_menu.js";
+import BlockDragHandle from "./plugins/block_drag_handle.js";
+import SkipUnchangedAttributes from "./plugins/skip_unchanged_attributes.js";
+import TriliumVim from "./plugins/vim/vim.js";
 
 /**
  * Plugins that are specific to Trilium and not part of the CKEditor 5 core, included in both text editors but not in the attribute editor.
@@ -78,13 +121,16 @@ const TRILIUM_PLUGINS: typeof Plugin[] = [
     ItalicAsEmPlugin,
 	StrikethroughAsDel,
     InternalLinkPlugin,
+    ChildNotePlugin,
 	InsertDateTimePlugin,
     RemoveFormatLinksPlugin,
     IndentBlockShortcutPlugin,
     MarkdownImportPlugin,
     ContentEmbed,
+    BlockReference,
     InlineIcon,
     LinkEmbed,
+    InsertMediaPlugin,
     Uploadfileplugin,
     SyntaxHighlighting,
     CodeBlockLanguageDropdown,
@@ -92,35 +138,61 @@ const TRILIUM_PLUGINS: typeof Plugin[] = [
     CodeBlockInsertParagraph,
     CodeBlockHljsClass,
     MoveBlockUpDownPlugin,
+    DeleteBlocks,
     ScrollOnUndoRedoPlugin,
     InlineCodeNoSpellcheck,
     InlineCodeToolbar,
     AdmonitionTypeDropdown,
     AdmonitionToolbar,
     ContentEmbedBoxSizeDropdown,
+    ContentEmbedPositionDropdown,
     ContentEmbedToolbar,
+    ContentEmbedCaret,
+    ExtendedCodeBlock,
     LinkEmbedToolbar,
+    NoteLinkToolbar,
+    LinkMenu,
     TodoListMultistate,
     CollapsibleListItems,
+    CollapsibleHeadings,
+    HeadingLevelOne,
+    ListItemAlignment,
+    ListItemInsert,
     TableIndent,
     TableContextMenu,
+    TableExitCaret,
     TableMove,
     TablePasteRows,
     TableSort,
+    SortSelection,
     TableInsertUI,
     TableToolbarDropdowns,
+    TriliumTableScroll,
+    TableStickyHeader,
+    TableColumnBar,
+    TableTouchSelection,
     ToolbarGroupMenu,
+    MobileToolbarItems,
+    TextFormattingToolbar,
+    ContextToolbar,
+    ImagePosition,
+    ColorMenu,
     CopyAnchorLinkButton,
     CopyLinkUrlButton,
     ImageActions,
+    ImageToDrawing,
     ClipboardImageEmbed,
+    ImageEditingSource,
     ClipboardBareImage,
     ClipboardPageStyles,
+    ClipboardPlainTextIndent,
     PasteFromVsCode,
     AdaptiveColors,
     TriliumSnippets,
     TriliumAiAssistant,
     FindInLinkWidgets,
+    SkipUnchangedAttributes,
+    TriliumVim,
 ];
 
 /**
@@ -131,6 +203,9 @@ const EXTERNAL_PLUGINS: typeof Plugin[] = [
     Mermaid,
     Admonition,
     Collapsible,
+    Tabs,
+    Multicolumn,
+    Aside,
     Footnotes,
     Math,
 	AutoformatMath
@@ -151,7 +226,16 @@ export const CORE_PLUGINS: typeof Plugin[] = [
     // Trilium plugins
     TriliumMentionUI,
     MentionCustomization,
-    ReferenceLink
+    ReferenceLink,
+    NoPoweredByBadge,
+    InlineFillerSpellcheck,
+    InlineWidgetCaret,
+    KeepViewMappings,
+    KeepDragSelection,
+    DropDisallowedAttributes,
+    DragOutOfEditor,
+    HiddenEditorBalloons,
+    KeepBalloonPositions
 ];
 
 /**
@@ -270,6 +354,15 @@ export const COMMON_PLUGINS: typeof Plugin[] = [
 
     ...TRILIUM_PLUGINS,
     ...EXTERNAL_PLUGINS
+];
+
+/**
+ * The set of plugins specific to the fixed toolbar mode. `BlockDragHandle` gives it the block drag
+ * handle that the popup editor gets from `BlockToolbar`.
+ */
+export const CLASSIC_EDITOR_PLUGINS: typeof Plugin[] = [
+    ...COMMON_PLUGINS,
+    BlockDragHandle,
 ];
 
 /**

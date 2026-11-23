@@ -1,18 +1,23 @@
 import { Excalidraw } from "@excalidraw/excalidraw";
 import { TypeWidgetProps } from "../type_widget";
 import "@excalidraw/excalidraw/index.css";
-import { useColorScheme, useEffectiveReadOnly, useTriliumOption } from "../../react/hooks";
+import { useColorScheme, useTriliumOption, useTriliumOptionBool } from "../../react/hooks/options";
+import { useEffectiveReadOnly } from "../../react/hooks/note_context";
 import type { ComponentChildren, RefObject } from "preact";
 import { useCallback, useRef } from "preact/hooks";
 import {
     type AppState,
     type ExcalidrawImperativeAPI,
-    type ExcalidrawProps
+    type ExcalidrawProps,
+    type UIOptions
 } from "@excalidraw/excalidraw/types";
 import options from "../../../services/options";
 import "./Canvas.css";
-import { NonDeleted, NonDeletedExcalidrawElement, ExcalidrawEmbeddableElement } from "@excalidraw/excalidraw/element/types";
+import {
+    NonDeleted, NonDeletedExcalidrawElement, ExcalidrawEmbeddableElement
+} from "@excalidraw/excalidraw/element/types";
 import { goToLinkExt } from "../../../services/link";
+import { CanvasNoteMenu } from "./CanvasDrawingMenu";
 import useCanvasPersistence from "./persistence";
 import useCanvasNoteDrop from "./useCanvasNoteDrop";
 import { LANGUAGE_MAPPINGS } from "./i18n";
@@ -22,7 +27,7 @@ import NoteEmbeddable from "./NoteEmbeddable";
 
 // currently required by excalidraw, in order to allows self-hosting fonts locally.
 // this avoids making excalidraw load the fonts from an external CDN.
-window.EXCALIDRAW_ASSET_PATH = `${window.location.pathname}/node_modules/@excalidraw/excalidraw/dist/prod`;
+window.EXCALIDRAW_ASSET_PATH = getExcalidrawAssetPath(window.location.pathname);
 
 export default function Canvas({ note, noteContext }: TypeWidgetProps) {
     const apiRef = useRef<ExcalidrawImperativeAPI>(null);
@@ -36,7 +41,9 @@ export default function Canvas({ note, noteContext }: TypeWidgetProps) {
             isReadOnly={isReadOnly}
             colorScheme={colorScheme}
             persistence={persistence}
-        />
+        >
+            <CanvasNoteMenu />
+        </CanvasEditor>
     );
 }
 
@@ -49,6 +56,8 @@ export interface CanvasEditorProps {
     isEmbedded?: boolean;
     /** Whether Excalidraw keeps its desktop layout however small the editor is. */
     isDesktopLayout?: boolean;
+    /** Limits the pans and zooms of the user. Excalidraw compares it by identity. */
+    constrainView?: UIOptions["constrainView"];
     /** Rendered inside Excalidraw, where its hooks such as `useI18n()` work. */
     children?: ComponentChildren;
 }
@@ -56,15 +65,17 @@ export interface CanvasEditorProps {
 /** The Excalidraw editor of a canvas note or drawing, loaded and saved by `persistence`. */
 export function CanvasEditor({
     apiRef, isReadOnly, colorScheme, persistence, isEmbedded = false, isDesktopLayout = false,
-    children
+    constrainView, children
 }: CanvasEditorProps) {
     const [ locale ] = useTriliumOption("locale");
+    const [ isThinStroke ] = useTriliumOptionBool("canvasThinStroke");
     const noteDrop = useCanvasNoteDrop(apiRef, isReadOnly);
 
     // Excalidraw maps the pointer with the container position it read last. An embedded editor
-    // moves with the note, so it reads the position again before the pointer acts. `refresh()`
-    // renders all of Excalidraw, so it runs only once the position changed.
-    const refreshPosition = useCallback((e: PointerEvent) => {
+    // moves with the note, so it reads the position again before the pointer acts or something
+    // drops, and not on each scroll as `detectScroll` would. `refresh()` renders all of
+    // Excalidraw, the drawing included, so it runs only once the position changed.
+    const refreshPosition = useCallback((e: Event) => {
         const api = apiRef.current;
         const container = (e.currentTarget as HTMLElement).querySelector(".excalidraw-container");
         if (!api || !container) return;
@@ -117,6 +128,8 @@ export function CanvasEditor({
             onWheel={onWheel}
             onPointerOverCapture={isEmbedded ? refreshPosition : undefined}
             onPointerMoveCapture={isEmbedded ? refreshPosition : undefined}
+            onPointerDownCapture={isEmbedded ? refreshPosition : undefined}
+            onDragOverCapture={isEmbedded ? refreshPosition : undefined}
         >
             <div className="excalidraw-wrapper" {...noteDrop}>
                 <Excalidraw
@@ -124,7 +137,7 @@ export function CanvasEditor({
                     viewModeEnabled={isReadOnly || options.is("databaseReadonly")}
                     zenModeEnabled={false}
                     isCollaborating={false}
-                    detectScroll={isEmbedded}
+                    detectScroll={false}
                     handleKeyboardGlobally={false}
                     autoFocus={false}
                     langCode={LANGUAGE_MAPPINGS[locale as DISPLAYABLE_LOCALE_IDS] ?? undefined}
@@ -133,7 +146,9 @@ export function CanvasEditor({
                             saveToActiveFile: false,
                             export: false
                         },
-                        getFormFactor: isDesktopLayout ? getDesktopFormFactor : undefined
+                        getFormFactor: isDesktopLayout ? getDesktopFormFactor : undefined,
+                        constrainView,
+                        freedrawStrokeWidthFactor: isThinStroke ? THIN_STROKE_WIDTH_FACTOR : 1
                     }}
                     onLinkOpen={onLinkOpen}
                     validateEmbeddable={validateEmbeddable}
@@ -146,6 +161,12 @@ export function CanvasEditor({
         </div>
     )
 }
+
+/**
+ * The width of a pen stroke while thin strokes are on, as a factor of the picked width. Excalidraw
+ * after 0.18.1 draws its pen at the same widths.
+ */
+const THIN_STROKE_WIDTH_FACTOR = 0.5;
 
 /** The form factor of Excalidraw's desktop layout, for an editor of any size. */
 function getDesktopFormFactor() {
@@ -168,4 +189,9 @@ function getNoteIdFromEmbeddableLink(link: string | null) {
     }
 
     return tree.getNoteIdFromUrl(cleaned);
+}
+
+/** Where Excalidraw downloads its fonts from, for a page served at `pathname`. */
+export function getExcalidrawAssetPath(pathname: string) {
+    return `${pathname.replace(/\/+$/, "")}/node_modules/@excalidraw/excalidraw/dist/prod`;
 }

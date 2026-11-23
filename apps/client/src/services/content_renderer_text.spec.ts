@@ -2,15 +2,21 @@
 // DOMPurify relies on browser-faithful DOM traversal (NodeIterator); happy-dom
 // mishandles it and strips valid markup (surfaced by dompurify 3.4.8). Run the
 // sanitization-dependent specs under jsdom, which matches real-browser behavior.
-import { KATEX_MACROS, trimIndentation } from "@triliumnext/commons";
+import {
+    MULTICOLUMN_COLUMN_CLASS, MULTICOLUMN_LAYOUT_CLASS
+} from "@triliumnext/commons/src/lib/block_reference.js";
+import { KATEX_MACROS } from "@triliumnext/commons/src/lib/katex_macros.js";
+import { trimIndentation } from "@triliumnext/commons/src/lib/test-utils.js";
 import DOMPurify from "dompurify";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import FAttachment from "../entities/fattachment";
+import { buildNote } from "../test/easy-froca";
+import { loadEmbeddedNote } from "../widgets/type_widgets/text/utils";
 import content_renderer from "./content_renderer";
 import froca from "./froca";
+import link from "./link";
 import server from "./server";
-import { buildNote } from "../test/easy-froca";
 
 // `applyInlineMermaid` dynamically imports "mermaid"; provide a controllable
 // stub whose behavior we tune per-test via the shared `mermaidRenderImpl` hook.
@@ -51,14 +57,66 @@ vi.mock("./math.js", async (importOriginal) => {
     };
 });
 
+const blockReference = vi.hoisted(() => ({ loaded: false }));
+vi.mock("./block_reference.js", async (importOriginal) => {
+    blockReference.loaded = true;
+    return await importOriginal<typeof import("./block_reference.js")>();
+});
+
+const disposeStickyTableHeaders = vi.hoisted(() => vi.fn());
+const applyStickyTableHeaders = vi.hoisted(() => vi.fn(() => disposeStickyTableHeaders));
+vi.mock("@triliumnext/ckeditor5/src/plugins/table_sticky_header_read_only.js", () => ({
+    applyStickyTableHeaders
+}));
+
+const experimentalFeatures = vi.hoisted(() => ({ enabled: new Set<string>() }));
+vi.mock("./experimental_features.js", async (importOriginal) => ({
+    ...await importOriginal<typeof import("./experimental_features.js")>(),
+    isExperimentalFeatureEnabled: (id: string) => experimentalFeatures.enabled.has(id)
+}));
+
+const detectCodeLanguage = vi.hoisted(() => vi.fn(async (_code: string) => null as string | null));
+vi.mock("./syntax_highlight.js", async (importOriginal) => ({
+    ...await importOriginal<typeof import("./syntax_highlight.js")>(),
+    detectCodeLanguage
+}));
+
+const renderCodeNotePreview = vi.hoisted(() => vi.fn());
+vi.mock("./code_note_preview.js", async (importOriginal) => {
+    const original = await importOriginal<typeof import("./code_note_preview.js")>();
+    renderCodeNotePreview.mockImplementation(original.renderCodeNotePreview);
+    return { ...original, renderCodeNotePreview };
+});
+
+// jsdom has no `ResizeObserver`.
+const scrollFade = vi.hoisted(() => ({ measure: vi.fn(), disconnect: vi.fn() }));
+const watchScrollFade = vi.hoisted(() => vi.fn(() => scrollFade));
+vi.mock("@triliumnext/commons/src/lib/scroll_fade.js", async (importOriginal) => ({
+    ...await importOriginal<object>(),
+    watchScrollFade
+}));
+
 import renderText, {
     applyInlineMermaid,
+    emptyUnknownEmbeds,
     postProcessRichContent,
     renderChildrenList,
+    renderTextContent,
     rewriteMermaidDiagramsInContainer
 } from "./content_renderer_text";
 
 describe("Text content renderer", () => {
+    it("loads the block reference service only to highlight a block", async () => {
+        const note = buildNote({ title: "Plain", content: "<p data-trilium-block-id=\"b1\">Block</p>" });
+        await renderText(note, $(document.createElement("div")), {});
+        expect(blockReference.loaded).toBe(false);
+
+        const contentEl = document.createElement("div");
+        await renderText(note, $(contentEl), { highlightBlock: "b1" });
+        expect(blockReference.loaded).toBe(true);
+        expect(contentEl.querySelector(".block-reference-highlight")?.textContent).toBe("Block");
+    });
+
     it("renders embedded note", async () => {
         const contentEl = document.createElement("div");
         const embeddedNote = buildNote({
@@ -105,14 +163,17 @@ describe("Text content renderer", () => {
         expect(embed.querySelectorAll("figcaption")).toHaveLength(1);
     });
 
-    it("renders a Tiny embed as a link, without rendering what it shows", async () => {
-        const embeddedNote = buildNote({ title: "Tiny note", content: "<p>Not rendered.</p>" });
+    it("renders a Compact embed as a link, unless it is audio, whose controls it renders", async () => {
+        const embeddedNote = buildNote({ title: "Compact note", content: "<p>Not rendered.</p>" });
+        const song = buildNote({ title: "Song", type: "file", mime: "audio/mpeg" });
         const owner = buildNote({
-            title: "Tiny owner",
+            title: "Compact owner",
             content: `<figure class="include-note" data-note-id="${embeddedNote.noteId}"`
-                + ` data-box-size="tiny"><figcaption>Tiny caption</figcaption></figure>`
+                + ` data-box-size="compact"><figcaption>Compact caption</figcaption></figure>`
                 + `<figure class="include-note" data-attachment-id="tinyPic" data-box-size="tiny">`
                 + "</figure>"
+                + `<figure class="include-note" data-note-id="${song.noteId}" data-box-size="compact"`
+                + ` data-hide-title="true"></figure>`
         });
         new FAttachment(froca, {
             attachmentId: "tinyPic",
@@ -125,17 +186,20 @@ describe("Text content renderer", () => {
             utcDateScheduledForErasureSince: "",
             contentLength: 0
         });
-        const getRenderedContent = vi.spyOn(content_renderer, "getRenderedContent");
+        const getRenderedContent = vi.spyOn(content_renderer, "getRenderedContent")
+            .mockResolvedValue({ $renderedContent: $("<div class=\"player\">"), type: "audio" } as never);
 
         try {
             const contentEl = document.createElement("div");
             await renderText(owner, $(contentEl));
 
-            expect(getRenderedContent).not.toHaveBeenCalled();
-            expect(contentEl.querySelector(".include-note")).toBeNull();
+            expect(getRenderedContent.mock.calls.map(([ entity ]) => entity)).toEqual([ song ]);
+            const boxes = contentEl.querySelectorAll(".include-note");
+            expect([ ...boxes ].map((box) => box.getAttribute("data-box-size"))).toEqual([ "compact" ]);
+            expect(boxes[0]?.querySelector(".player")).not.toBeNull();
             expect(contentEl.querySelector("img")).toBeNull();
             expect(contentEl.textContent).not.toContain("Not rendered.");
-            expect(contentEl.textContent).not.toContain("Tiny caption");
+            expect(contentEl.textContent).not.toContain("Compact caption");
             const links = Array.from(contentEl.querySelectorAll("a.reference-link"));
             expect(links.map((link) => link.getAttribute("href"))).toEqual([
                 `#root/${embeddedNote.noteId}`,
@@ -249,6 +313,66 @@ describe("Text content renderer", () => {
         expect(items[1].textContent).toBe("Child note 3");
     });
 
+    it("renders given content in place of the saved one, and the children list when empty", async () => {
+        const note = buildNote({
+            title: "Edited note",
+            content: "<p>Saved</p>",
+            children: [ { title: "Child note" } ]
+        });
+
+        const edited = document.createElement("div");
+        await renderTextContent(note, "<p>Edited</p>", $(edited));
+        expect(edited.querySelector(".ck-content")?.innerHTML).toBe("<p>Edited</p>");
+
+        const emptied = document.createElement("div");
+        await renderTextContent(note, "<p>&nbsp;</p>", $(emptied));
+        expect(emptied.querySelector("a")?.textContent).toBe("Child note");
+    });
+
+    it("sizes the tables for scrolling and keeps their header rows in view", async () => {
+        const note = buildNote({ title: "Tables" });
+        const table = `<figure class="table" style="width:800px;" data-trilium-block-id="t1">`
+            + "<table><tbody><tr><td>a</td></tr></tbody></table></figure>";
+        const tableWidth = (contentEl: HTMLElement) => contentEl
+            .querySelector<HTMLElement>(".ck-content > figure.table")
+            ?.style.getPropertyValue("--table-width");
+
+        const full = document.createElement("div");
+        await renderTextContent(note, table, $(full));
+        expect(tableWidth(full)).toBe("800px");
+        expect(applyStickyTableHeaders).toHaveBeenCalledWith(full.querySelector(".ck-content"));
+        expect(watchScrollFade).toHaveBeenCalledWith(full.querySelector("figure.table"),
+            expect.any(Function), { direction: "horizontal" });
+
+        // Both passes stop with the rest of the rendered content.
+        content_renderer.disposeInteractiveContent($(full));
+        expect(scrollFade.disconnect).toHaveBeenCalledTimes(1);
+        expect(disposeStickyTableHeaders).toHaveBeenCalledTimes(1);
+
+        // The excerpt of a table in one column of a layout has the table at its top level.
+        const excerpt = document.createElement("div");
+        const layout = `<div class="${MULTICOLUMN_LAYOUT_CLASS}">`
+            + `<div class="${MULTICOLUMN_COLUMN_CLASS}">${table}</div>`
+            + `<div class="${MULTICOLUMN_COLUMN_CLASS}"><p>Other</p></div></div>`;
+        await renderTextContent(note, layout, $(excerpt), { block: "t1" });
+        expect(tableWidth(excerpt)).toBe("800px");
+    });
+
+    it("marks the list items whose first paragraph is aligned, in text and Markdown", async () => {
+        const list = "<ul><li><p style=\"text-align:center;\">a</p></li><li>b</li></ul>";
+        const classes = (root: HTMLElement) =>
+            [ ...root.querySelectorAll("li") ].map((item) => item.className);
+
+        const text = document.createElement("div");
+        await renderTextContent(buildNote({ title: "Lists" }), list, $(text));
+        expect(classes(text)).toEqual([ "trilium-list-item-aligned-center", "" ]);
+
+        // The Markdown renderers run only `postProcessRichContent()` on their HTML.
+        const $markdown = $("<div>").append($("<div class=\"ck-content\">").html(list));
+        await postProcessRichContent(buildNote({ title: "Markdown" }), $markdown);
+        expect(classes($markdown[0])).toEqual([ "trilium-list-item-aligned-center", "" ]);
+    });
+
     it("renders nothing for an empty note with no children when noChildrenList is set", async () => {
         const contentEl = document.createElement("div");
         const note = buildNote({ title: "Empty note" });
@@ -298,6 +422,20 @@ describe("Text content renderer", () => {
         expect(refLink).not.toBeNull();
         // The original "stale" child text was replaced with a span carrying the live title.
         expect(refLink?.textContent).toContain("Referenced Title");
+    });
+
+    it("labels a reference to a block of the rendered note by the text of the block", async () => {
+        const contentEl = document.createElement("div");
+        const note = buildNote({
+            id: "selfRef1",
+            title: "Self",
+            content: "<p data-trilium-block-id=\"b1\">Opening words</p>"
+                + "<p><a class=\"reference-link\" href=\"#root/selfRef1?block=b1\">stale</a></p>"
+        });
+        await renderText(note, $(contentEl));
+        const refLink = contentEl.querySelector("a.reference-link");
+        expect(refLink).not.toBeNull();
+        expect(refLink?.textContent).toBe("Opening words");
     });
 
     it("tolerates reference links without an href", async () => {
@@ -380,6 +518,25 @@ describe("Nested embeds (single-level display vs recursive print)", () => {
         expect(contentEl.querySelector("a.reference-link")).toBeNull();
     });
 
+    it("on print, links back to a note already expanded on the path instead of looping", async () => {
+        buildNote({
+            id: "cycB",
+            title: "Note B",
+            content: `<p>B body</p><section class="include-note" data-note-id="cycA" data-box-size="medium">&nbsp;</section>`
+        });
+        const noteA = buildNote({
+            id: "cycA",
+            title: "Note A",
+            content: `<p>A body</p><section class="include-note" data-note-id="cycB" data-box-size="medium">&nbsp;</section>`
+        });
+        const contentEl = document.createElement("div");
+        await renderText(noteA, $(contentEl), { expandNestedEmbeds: true });
+
+        expect(contentEl.textContent).toContain("B body");
+        expect(contentEl.querySelector('section.include-note[data-note-id="cycA"]')).toBeNull();
+        expect(contentEl.querySelector("a.reference-link")?.getAttribute("href")).toBe("#root/cycA");
+    });
+
     it("on print, expands a note shared across sibling branches in each branch (not a false cycle)", async () => {
         // Diamond: A embeds B and C; both B and C embed D. D is not a cycle, so under recursive
         // expansion it must render in both branches (the ancestor path is tracked per-branch).
@@ -414,6 +571,22 @@ describe("Nested embeds (single-level display vs recursive print)", () => {
         expect(contentEl.querySelector("a.reference-link")?.getAttribute("href")).toContain("nestC");
     });
 
+    it("keeps the block id of an embed it renders as a reference link", async () => {
+        const target = buildNote({ id: "linkedTarget", title: "Target", content: "<p>body</p>" });
+        const note = buildNote({
+            id: "linkedHost",
+            title: "Host",
+            content: `<figure class="include-note" data-note-id="${target.noteId}" `
+                + `data-trilium-block-id="embed1"></figure>`
+        });
+        const contentEl = document.createElement("div");
+        await renderText(note, $(contentEl), { embedsAsReferenceLinks: true });
+
+        const link = contentEl.querySelector("a.reference-link");
+        expect(link?.getAttribute("href")).toBe(`#root/${target.noteId}`);
+        expect(link?.getAttribute("data-trilium-block-id")).toBe("embed1");
+    });
+
     it("leaves include-note sections with a missing or invalid note ID untouched when degrading to reference links", async () => {
         const note = buildNote({
             id: "badRefHost",
@@ -431,6 +604,189 @@ describe("Nested embeds (single-level display vs recursive print)", () => {
         // both are left in place.
         expect(contentEl.querySelector("a.reference-link")).toBeNull();
         expect(contentEl.querySelectorAll("section.include-note").length).toBe(2);
+    });
+});
+
+describe("Embed boxes", () => {
+    const figure = (noteId: string) =>
+        `<figure class="include-note" data-note-id="${noteId}"></figure>`;
+
+    it("shows the embeds of a box as title rows, and links to the notes shown around them", async () => {
+        // A box shows its content in its wrapper, as `ContentEmbed` does once it mounts.
+        const mountBox = vi.spyOn(content_renderer, "mountInteractiveWidget")
+            .mockImplementation(async (vnode, container) => {
+                const { content } = vnode.props as { content?: HTMLElement };
+                if (content) container.append(content);
+            });
+        const createLink = vi.spyOn(link, "createLink").mockResolvedValue($("<a>"));
+        buildNote({
+            id: "boxChild",
+            title: "Child",
+            content: `<p>Child body</p>${figure("boxGrandchild")}${figure("boxParent")}`
+        });
+        buildNote({
+            id: "boxGrandchild",
+            title: "Grandchild",
+            content: `<p>Grandchild body</p><pre><code class="language-javascript">a;</code></pre>`
+                + `${figure("boxChild")}${figure("boxGrandchild")}`
+        });
+        buildNote({ id: "boxParent", title: "Parent", content: figure("boxChild") });
+        const wrapper = document.createElement("div");
+        wrapper.className = "include-note-wrapper";
+        document.body.append(wrapper);
+
+        try {
+            // As the editor of the parent note loads the box of the child.
+            await loadEmbeddedNote("boxChild", $(wrapper), "full", {
+                seenNoteIds: new Set([ "boxParent" ])
+            });
+
+            expect(wrapper.textContent).toContain("Child body");
+            expect(wrapper.textContent).not.toContain("Grandchild body");
+            expect(mountBox).toHaveBeenCalledTimes(2);
+            const grandchildBox = mountBox.mock.calls[0][0].props as Record<string, unknown>;
+            expect(grandchildBox.notePath).toBe("boxGrandchild");
+            expect(grandchildBox.content).toBeUndefined();
+            expect(wrapper.querySelector("figure.include-note[data-note-id=boxGrandchild]")
+                ?.getAttribute("data-box-size")).toBe("compact");
+            expect([ ...wrapper.querySelectorAll("a.reference-link") ]
+                .map((referenceLink) => referenceLink.getAttribute("href")))
+                .toEqual([ "#root/boxParent" ]);
+            expect(wrapper.querySelector("pre")).toBeNull();
+        } finally {
+            wrapper.remove();
+            mountBox.mockRestore();
+            createLink.mockRestore();
+        }
+    });
+});
+
+describe("Code blocks as static code previews", () => {
+    const codeBlock = `<pre><code class="language-text-css">a {}</code></pre>`;
+
+    beforeEach(() => {
+        experimentalFeatures.enabled.add("extendedCodeBlocks");
+        renderCodeNotePreview.mockClear();
+        detectCodeLanguage.mockReset().mockResolvedValue(null);
+    });
+
+    afterEach(() => {
+        experimentalFeatures.enabled.clear();
+    });
+
+    it("shows each code block of a text note as CodeMirror highlights it", async () => {
+        detectCodeLanguage.mockResolvedValueOnce("text-x-python");
+        const note = buildNote({
+            title: "Code blocks",
+            content: `<pre data-code-wrap-lines="true" data-code-line-numbers="false"`
+                + ` data-code-tab-width="2"><code class="language-text-css"`
+                + ` data-trilium-block-id="b1">a {}\nb {}</code></pre>`
+                + `<pre><code class="language-text-x-trilium-auto">print(1)</code></pre>`
+                + `<pre><code class="language-text-x-trilium-auto">lorem</code></pre>`
+                + `<pre><code>plain</code></pre>`
+                + `<pre><code class="language-python">x = 1</code></pre>`
+                + `<pre><code class="language-mermaid">graph TD;</code></pre>`
+                + `<pre>no code</pre>`
+                + `<p><code>inline</code></p>`
+        });
+        const contentEl = document.createElement("div");
+
+        await renderText(note, $(contentEl), { highlightBlock: "b1" });
+
+        const lines = { isWrapped: undefined, hasLineNumbers: undefined };
+        expect(renderCodeNotePreview.mock.calls).toEqual([
+            [ "a {}\nb {}", "text/css", null, { isWrapped: true, hasLineNumbers: false } ],
+            [ "print(1)", "text/x-python", null, lines ],
+            [ "lorem", "text/plain", null, lines ],
+            [ "plain", "text/plain", null, lines ],
+            [ "x = 1", "text/plain", null, lines ]
+        ]);
+        expect(detectCodeLanguage.mock.calls).toEqual([ [ "print(1)" ], [ "lorem" ] ]);
+
+        const previews = contentEl.querySelectorAll("pre.code-preview.code-block-preview");
+        expect(previews).toHaveLength(5);
+        expect(contentEl.querySelectorAll("pre.code-block-preview > button.copy-button"))
+            .toHaveLength(5);
+        expect(contentEl.querySelector(".rendered-mermaid-diagram")).not.toBeNull();
+        expect(contentEl.querySelector("pre:not(.code-preview)")?.textContent).toBe("no code");
+        expect(contentEl.querySelector("p > code")?.classList).toContain("copyable-inline-code");
+
+        // The elements of the block stay, with what they carry.
+        const [ pre ] = previews;
+        const code = pre.querySelector<HTMLElement>(":scope > code");
+        expect([ ...pre.classList ]).toEqual(expect.arrayContaining([
+            "code-preview", "code-preview-wrap", "code-preview-no-line-numbers"
+        ]));
+        expect(pre.classList).not.toContain("hljs");
+        expect([ ...code?.classList ?? [] ]).toEqual(expect.arrayContaining([
+            "language-text-css", "code-preview-content", "block-reference-highlight"
+        ]));
+        expect(code?.dataset.triliumBlockId).toBe("b1");
+        expect(code?.style.tabSize).toBe("2");
+        expect(code?.textContent).toBe("a {}\nb {}");
+        expect(code?.querySelectorAll(".code-preview-line")).toHaveLength(2);
+    });
+
+    it("shows the code blocks of an included text note the same way", async () => {
+        const included = buildNote({ title: "Included code", content: codeBlock });
+        const note = buildNote({
+            title: "Includes code",
+            content: `<figure class="include-note" data-note-id="${included.noteId}"></figure>`
+        });
+        const contentEl = document.createElement("div");
+
+        await renderText(note, $(contentEl));
+
+        expect(contentEl.querySelector(".include-note pre.code-block-preview")).not.toBeNull();
+    });
+
+    it("keeps highlight.js while the feature is off, in print and in Markdown", async () => {
+        const render = async (prepare: () => void) => {
+            prepare();
+            const note = buildNote({ title: "Code block", content: codeBlock });
+            const contentEl = document.createElement("div");
+            await renderText(note, $(contentEl));
+            return contentEl;
+        };
+
+        const off = await render(() => experimentalFeatures.enabled.clear());
+        expect(off.querySelector("pre.code-preview")).toBeNull();
+        expect(off.querySelector("pre > button.copy-button")).not.toBeNull();
+
+        const device = glob.device;
+        try {
+            const printed = await render(() => {
+                experimentalFeatures.enabled.add("extendedCodeBlocks");
+                glob.device = "print";
+            });
+            expect(printed.querySelector("pre.code-preview")).toBeNull();
+        } finally {
+            glob.device = device;
+        }
+
+        const $markdown = $("<div>").append($("<div class=\"ck-content\">").html(codeBlock));
+        await postProcessRichContent(buildNote({ title: "Markdown" }), $markdown);
+        expect($markdown[0].querySelector("pre.code-preview")).toBeNull();
+
+        expect(renderCodeNotePreview).not.toHaveBeenCalled();
+    });
+
+    it("leaves the code blocks to the embed boxes of a box", async () => {
+        const mountBox = vi.spyOn(content_renderer, "mountInteractiveWidget")
+            .mockImplementation(async () => {});
+        const note = buildNote({ title: "Boxed code", content: codeBlock });
+        const contentEl = document.createElement("div");
+
+        try {
+            await renderText(note, $(contentEl), { embedBoxes: true });
+
+            expect(renderCodeNotePreview).not.toHaveBeenCalled();
+            expect(contentEl.querySelector("pre")).toBeNull();
+            expect(contentEl.querySelector("figure.include-note.extended-code-block"))
+                .not.toBeNull();
+        } finally {
+            mountBox.mockRestore();
+        }
     });
 });
 
@@ -467,6 +823,36 @@ describe("renderContentEmbeds via postProcessRichContent", () => {
     });
 });
 
+describe("Embeds of an unknown kind", () => {
+    it("become empty include-note boxes, keeping only their kind, box size and block ID", () => {
+        const container = document.createElement("div");
+        container.innerHTML = `<section class="future" data-trilium-embed="note-card"`
+            + ` data-note-id="n1" data-box-size="small" data-trilium-block-id="b1"`
+            + ` style="color: red">`
+            + `<p>Fallback</p><section data-trilium-embed="nested"><p>Inner</p></section>`
+            + `</section><p>Text</p>`;
+
+        const boxes = emptyUnknownEmbeds(container);
+
+        expect(boxes).toEqual([ container.firstElementChild ]);
+        // A box size saved by an older version reads as the size it became, at its height.
+        expect(container.innerHTML).toBe(`<section data-trilium-embed="note-card"`
+            + ` data-box-size="resizable" data-trilium-block-id="b1"`
+            + ` class="include-note unknown-content-embed" style="--include-note-height:10em">`
+            + `</section><p>Text</p>`);
+    });
+
+    it("show no fallback in rendered content", async () => {
+        const $rendered = $("<div>").append($('<div class="ck-content">').html(
+            `<section data-trilium-embed="note-card"><p>Fallback</p></section>`));
+
+        await postProcessRichContent(buildNote({ title: "Host" }), $rendered);
+
+        expect($rendered.find("section.include-note.unknown-content-embed").length).toBe(1);
+        expect($rendered.text()).not.toContain("Fallback");
+    });
+});
+
 describe("Attachment embeds", () => {
     it("renders an embedded attachment in place, and links to it one level down", async () => {
         const owner = buildNote({
@@ -495,6 +881,67 @@ describe("Attachment embeds", () => {
         expect(nestedEl.querySelector("section.include-note")).toBeNull();
         expect(nestedEl.querySelector("a.reference-link")?.getAttribute("href"))
             .toBe(`#root/${owner.noteId}?viewMode=attachments&attachmentId=embedPic`);
+    });
+
+    it("renders an embedded code file in the language and lines that its embed sets", async () => {
+        const owner = buildNote({
+            title: "Code owner",
+            content: `<figure class="include-note" data-attachment-id="embedCode"`
+                + ` data-code-language="text/x-sh" data-code-wrap-lines="true"`
+                + ` data-code-line-numbers="false">&nbsp;</figure>`
+        });
+        const attachment = new FAttachment(froca, {
+            attachmentId: "embedCode",
+            ownerId: owner.noteId,
+            role: "file",
+            mime: "text/plain",
+            title: "script.py",
+            dateModified: "",
+            utcDateModified: "",
+            utcDateScheduledForErasureSince: "",
+            contentLength: 0
+        });
+        attachment.getBlob = async () => null;
+        const getRenderedContent = vi.spyOn(content_renderer, "getRenderedContent");
+
+        await renderText(owner, $(document.createElement("div")));
+        expect(getRenderedContent).toHaveBeenCalledWith(
+            expect.objectContaining({ attachmentId: "embedCode" }),
+            { codeLanguage: "text/x-sh", isCodeWrapped: true, hasCodeLineNumbers: false }
+        );
+        getRenderedContent.mockRestore();
+    });
+
+    it("renders an embedded code note with the line numbers that its embed sets", async () => {
+        const code = buildNote({ title: "Script", type: "code", mime: "text/x-sh", content: "a" });
+        const owner = buildNote({
+            title: "Code note owner",
+            content: `<figure class="include-note" data-note-id="${code.noteId}"`
+                + ` data-code-line-numbers="false">&nbsp;</figure>`
+        });
+        const getRenderedContent = vi.spyOn(content_renderer, "getRenderedContent");
+
+        await renderText(owner, $(document.createElement("div")));
+        expect(getRenderedContent).toHaveBeenCalledWith(
+            code, expect.objectContaining({ hasCodeLineNumbers: false })
+        );
+        getRenderedContent.mockRestore();
+    });
+
+    it("leaves the embed of an attachment that cannot be loaded as it is", async () => {
+        const owner = buildNote({
+            title: "Missing embed owner",
+            content: `<section class="include-note" data-attachment-id="gonePic">&nbsp;</section>`
+        });
+        const getAttachment = vi.spyOn(froca, "getAttachment").mockResolvedValue(null);
+
+        const contentEl = document.createElement("div");
+        await renderText(owner, $(contentEl));
+
+        expect(getAttachment).toHaveBeenCalledWith("gonePic", true);
+        expect(contentEl.querySelector(`section.include-note[data-attachment-id="gonePic"]`)?.innerHTML)
+            .toBe("&nbsp;");
+        getAttachment.mockRestore();
     });
 });
 
@@ -565,18 +1012,34 @@ describe("rewriteMermaidDiagramsInContainer", () => {
         const container = document.createElement("div");
         container.innerHTML = `<pre><code class="language-js">x</code></pre>`;
         await rewriteMermaidDiagramsInContainer(container);
-        expect(container.querySelector("div.mermaid-diagram")).toBeNull();
+        expect(container.querySelector("div.rendered-mermaid-diagram")).toBeNull();
         expect(container.querySelector("pre")).not.toBeNull();
     });
 
-    it("converts mermaid pre/code blocks into mermaid-diagram divs", async () => {
+    it("converts mermaid pre/code blocks into rendered-mermaid-diagram divs", async () => {
         const container = document.createElement("div");
         container.innerHTML = `<pre><code class="language-mermaid">graph TD;A--&gt;B;</code></pre>`;
         await rewriteMermaidDiagramsInContainer(container);
-        const div = container.querySelector("div.mermaid-diagram");
+        const div = container.querySelector("div.rendered-mermaid-diagram");
         expect(div).not.toBeNull();
         expect(div?.textContent).toContain("graph TD;");
+        expect(div?.hasAttribute("data-trilium-block-id")).toBe(false);
         expect(container.querySelector("pre")).toBeNull();
+    });
+
+    it("keeps the block ID of a code block on its diagram, for links to the block", async () => {
+        const container = document.createElement("div");
+        container.innerHTML = `<pre><code class="language-mermaid" data-trilium-block-id="d1">`
+            + `graph TD;A--&gt;B;</code></pre>`;
+        await rewriteMermaidDiagramsInContainer(container);
+        const diagram = container.querySelector("div.rendered-mermaid-diagram");
+        expect(diagram?.getAttribute("data-trilium-block-id")).toBe("d1");
+
+        container.innerHTML = `<pre data-box-size="medium" data-trilium-block-id="d2">`
+            + `<code class="language-mermaid">graph TD;A--&gt;B;</code></pre>`;
+        await rewriteMermaidDiagramsInContainer(container);
+        const embedDiagram = container.querySelector("div.rendered-mermaid-diagram");
+        expect(embedDiagram?.getAttribute("data-trilium-block-id")).toBe("d2");
     });
 
     it("uses an empty body when the code element is missing", async () => {
@@ -585,7 +1048,7 @@ describe("rewriteMermaidDiagramsInContainer", () => {
         // rewritten div ends up with an empty body.
         container.innerHTML = `<pre><code class="language-mermaid"></code></pre>`;
         await rewriteMermaidDiagramsInContainer(container);
-        const div = container.querySelector("div.mermaid-diagram");
+        const div = container.querySelector("div.rendered-mermaid-diagram");
         expect(div).not.toBeNull();
         expect(div?.innerHTML).toBe("");
     });
@@ -601,7 +1064,7 @@ describe("applyInlineMermaid", () => {
         const container = document.createElement("div");
         for (const source of sources) {
             const div = document.createElement("div");
-            div.className = "mermaid-diagram";
+            div.className = "rendered-mermaid-diagram";
             div.textContent = source;
             container.appendChild(div);
         }
@@ -619,7 +1082,7 @@ describe("applyInlineMermaid", () => {
         const container = makeContainer(["graph A"]);
         await applyInlineMermaid(container);
         expect(mermaidInitialize).toHaveBeenCalledTimes(1);
-        const visible = container.querySelector("div.mermaid-diagram") as HTMLElement;
+        const visible = container.querySelector("div.rendered-mermaid-diagram") as HTMLElement;
         expect(visible.innerHTML).toBe("<svg>graph A</svg>");
         expect(visible.getAttribute("data-processed")).toBe("true");
     });
@@ -635,7 +1098,7 @@ describe("applyInlineMermaid", () => {
         expect(renderCount).toBe(1);
 
         // Reset the visible node so we can observe the cached repaint.
-        const node = container.querySelector("div.mermaid-diagram") as HTMLElement;
+        const node = container.querySelector("div.rendered-mermaid-diagram") as HTMLElement;
         node.removeAttribute("data-processed");
         node.innerHTML = "graph CACHE";
         mermaidInitialize.mockClear();
@@ -654,7 +1117,7 @@ describe("applyInlineMermaid", () => {
 
         // Edit the diagram source in place; the old SVG should be used as the
         // positional placeholder for the new (uncached) source.
-        const node = container.querySelector("div.mermaid-diagram") as HTMLElement;
+        const node = container.querySelector("div.rendered-mermaid-diagram") as HTMLElement;
         const previousSvg = node.innerHTML;
         node.textContent = "graph V2";
 
@@ -673,9 +1136,9 @@ describe("applyInlineMermaid", () => {
         await applyInlineMermaid(container);
 
         // Remove the second diagram so its cached source must be evicted.
-        container.querySelectorAll("div.mermaid-diagram")[1].remove();
+        container.querySelectorAll("div.rendered-mermaid-diagram")[1].remove();
         // First node is now a cache hit (its source is unchanged); reset to verify.
-        const remaining = container.querySelector("div.mermaid-diagram") as HTMLElement;
+        const remaining = container.querySelector("div.rendered-mermaid-diagram") as HTMLElement;
         remaining.removeAttribute("data-processed");
         remaining.innerHTML = "graph KEEP";
 
@@ -691,7 +1154,7 @@ describe("applyInlineMermaid", () => {
         };
         await applyInlineMermaid(container);
         expect(error).toHaveBeenCalled();
-        const node = container.querySelector("div.mermaid-diagram") as HTMLElement;
+        const node = container.querySelector("div.rendered-mermaid-diagram") as HTMLElement;
         // The failure is rendered into the node (not left as raw source), so it's
         // visible in the UI instead of swallowed to the console.
         expect(node.classList.contains("mermaid-error")).toBe(true);
@@ -708,7 +1171,7 @@ describe("applyInlineMermaid", () => {
             return { svg: `<svg>${source}</svg>` };
         };
         await applyInlineMermaid(container);
-        const [ ok, bad ] = container.querySelectorAll<HTMLElement>("div.mermaid-diagram");
+        const [ ok, bad ] = container.querySelectorAll<HTMLElement>("div.rendered-mermaid-diagram");
         // The good diagram still renders; only the failing one shows the error.
         expect(ok.innerHTML).toBe("<svg>graph OK</svg>");
         expect(bad.classList.contains("mermaid-error")).toBe(true);
@@ -723,7 +1186,7 @@ describe("applyInlineMermaid", () => {
 
         // Break the source: the stale render must not mask the failure — otherwise
         // the diagram looks fine until a full refresh.
-        const node = container.querySelector("div.mermaid-diagram") as HTMLElement;
+        const node = container.querySelector("div.rendered-mermaid-diagram") as HTMLElement;
         node.textContent = "graph BROKEN";
         mermaidRenderImpl = () => {
             throw new Error("still broken");
@@ -739,5 +1202,133 @@ describe("applyInlineMermaid", () => {
         expect(node.classList.contains("mermaid-error")).toBe(false);
         expect(node.innerHTML).toBe("<svg>graph FIXED</svg>");
         error.mockRestore();
+    });
+});
+
+describe("Mermaid diagrams in rendered content", () => {
+    it("draws the diagrams of the content and of each embed once", async () => {
+        const renderedSources: string[] = [];
+        mermaidRenderImpl = (_id, source) => {
+            renderedSources.push(source);
+            return { svg: `<svg><text>drawn ${source}</text></svg>` };
+        };
+        const embeddedNote = buildNote({
+            title: "Embedded diagram",
+            content: `<pre><code class="language-mermaid">graph B</code></pre>`
+        });
+        const note = buildNote({
+            title: "Host diagram",
+            content: `<pre><code class="language-mermaid">graph A</code></pre>`
+                + `<section class="include-note" data-note-id="${embeddedNote.noteId}"`
+                + ` data-box-size="medium">&nbsp;</section>`
+        });
+        const contentEl = document.createElement("div");
+        await renderText(note, $(contentEl));
+
+        const diagrams = [ ...contentEl.querySelectorAll("div.rendered-mermaid-diagram") ];
+        expect(diagrams.map((diagram) => diagram.innerHTML)).toEqual([
+            "<svg><text>drawn graph A</text></svg>",
+            "<svg><text>drawn graph B</text></svg>"
+        ]);
+        expect(renderedSources.sort()).toEqual([ "graph A", "graph B" ]);
+    });
+
+    it("keeps the styles of a diagram in a trimmed preview", async () => {
+        mermaidRenderImpl = () => ({ svg: "<svg><style>.node { fill: red; }</style></svg>" });
+        const note = buildNote({ title: "Trimmed diagram" });
+        const $renderedContent = $("<div>").append($("<div class=\"ck-content\">").html(
+            `<pre><code class="language-mermaid">graph S</code></pre><style>li { }</style>`
+        ));
+
+        await postProcessRichContent(note, $renderedContent, { trim: true });
+
+        const styles = [ ...$renderedContent[0].querySelectorAll("style") ];
+        const styleParents = styles.map((style) => style.parentElement?.tagName.toLowerCase());
+        expect(styleParents).toEqual([ "svg" ]);
+    });
+});
+
+describe("Block embeds", () => {
+    const blockEmbed = (noteId: string, block: string, boxSize = "medium", blockId?: string) =>
+        `<figure class="include-note"${blockId ? ` data-trilium-block-id="${blockId}"` : ""}`
+        + ` data-note-id="${noteId}" data-block="${block}" data-box-size="${boxSize}"></figure>`;
+
+    it("renders only the referenced blocks, or a broken reference for a missing one", async () => {
+        buildNote({
+            id: "blkSource",
+            title: "Source",
+            content: "<p>Intro</p><blockquote><p>Skipped</p>"
+                + "<p data-trilium-block-id=\"b1\">Quoted</p></blockquote>"
+                + "<p data-trilium-block-id=\"b2\">Last</p><p>Outro</p>"
+        });
+        const host = buildNote({
+            title: "Host",
+            content: blockEmbed("blkSource", "b1:b2") + blockEmbed("blkSource", "b1:gone")
+        });
+        const contentEl = document.createElement("div");
+
+        await renderText(host, $(contentEl));
+
+        const [ embed, brokenEmbed ] = contentEl.querySelectorAll(".ck-content > .include-note");
+        expect(embed.querySelector("blockquote")?.textContent).toBe("Quoted");
+        expect(embed.textContent).toContain("Last");
+        expect(embed.textContent).not.toMatch(/Intro|Skipped|Outro/);
+        expect(brokenEmbed.querySelector(".block-reference-broken")?.textContent)
+            .toBe("block_reference.broken");
+    });
+
+    it("renders a broken reference for the blocks of an empty note", async () => {
+        const note = buildNote({ title: "Empty", content: "" });
+        const contentEl = document.createElement("div");
+
+        await renderTextContent(note, "", $(contentEl), { block: "b1" });
+
+        expect(contentEl.querySelector(".block-reference-broken")).not.toBeNull();
+    });
+
+    it("embeds blocks of the note itself, and stops at a block that embeds itself", async () => {
+        const note = buildNote({
+            id: "blkSelf",
+            title: "Self",
+            content: "<p data-trilium-block-id=\"top\">Top</p>"
+                + blockEmbed("blkSelf", "top")
+                + blockEmbed("blkSelf", "loop", "medium", "loop")
+        });
+        const contentEl = document.createElement("div");
+
+        await renderText(note, $(contentEl), { expandNestedEmbeds: true });
+
+        expect(contentEl.textContent?.match(/Top/g)).toHaveLength(2);
+        expect(contentEl.querySelectorAll(".include-note[data-block='loop']")).toHaveLength(1);
+    });
+
+    it("highlights the referenced blocks of the note, not those of its embeds", async () => {
+        buildNote({
+            id: "hlSource",
+            title: "Source",
+            content: "<p data-trilium-block-id=\"b1\">Embedded</p>"
+        });
+        const note = buildNote({
+            title: "Host",
+            content: blockEmbed("hlSource", "b1")
+                + "<p data-trilium-block-id=\"b1\">Own</p><p data-trilium-block-id=\"b2\">Next</p>"
+                + "<p>Outro</p>"
+        });
+        const contentEl = document.createElement("div");
+
+        await renderText(note, $(contentEl), { highlightBlock: "b1:b2" });
+
+        expect([ ...contentEl.querySelectorAll(".block-reference-highlight") ]
+            .map((element) => element.textContent)).toEqual([ "Own", "Next" ]);
+    });
+
+    it("links to the blocks of an embed one level down", async () => {
+        const note = buildNote({ title: "Host", content: blockEmbed("blkSource", "b1:b 2") });
+        const contentEl = document.createElement("div");
+
+        await renderText(note, $(contentEl), { embedsAsReferenceLinks: true });
+
+        expect(contentEl.querySelector("a.reference-link")?.getAttribute("href"))
+            .toBe("#root/blkSource?block=b1:b%202");
     });
 });

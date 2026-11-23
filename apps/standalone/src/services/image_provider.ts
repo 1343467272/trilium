@@ -4,7 +4,8 @@
  * Images are saved as-is without resizing.
  */
 
-import type { ImageCompressionOutcome, ImageCompressionPlan, ImageFormat, ImageProvider, PreviewResizeOutcome, ProcessedImage } from "@triliumnext/core";
+import type { ImageCompressionOutcome, ImageFormat, ImageProvider, ImageShrink, ProcessedImage } from "@triliumnext/core";
+import type { ImageCompressionPlan, PreviewResizeOutcome } from "@triliumnext/core/src/services/image_provider.js";
 import { inspectImage, UNKNOWN_FORMAT } from "@triliumnext/core/src/services/image_inspect.js";
 
 /**
@@ -22,7 +23,7 @@ export const standaloneImageProvider: ImageProvider = {
         return getImageTypeFromBuffer(buffer);
     },
 
-    async processImage(buffer: Uint8Array, _originalName: string, _shrink: boolean): Promise<ProcessedImage> {
+    async processImage(buffer: Uint8Array, _originalName: string, _shrink: ImageShrink): Promise<ProcessedImage> {
         // Standalone doesn't do compression - just detect format and return original
         const format = getImageTypeFromBuffer(buffer) || { ext: "dat", mime: "application/octet-stream" };
 

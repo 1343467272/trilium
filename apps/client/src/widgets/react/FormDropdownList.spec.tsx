@@ -1,7 +1,7 @@
 import $ from "jquery";
 import { render } from "preact";
 import { act } from "preact/test-utils";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Bootstrap places the menu and its tooltips against a real layout, which happy-dom has none of; what
 // the list decides is which items exist, how the current one is marked, and what a press reports.
@@ -9,13 +9,16 @@ vi.mock("bootstrap", () => ({
     Dropdown: { getOrCreateInstance: () => ({ show() {}, hide() {}, update() {}, dispose() {} }) },
     Tooltip: class { static getInstance() { return null; } }
 }));
-vi.mock("./hooks", async (importOriginal) => ({
-    ...(await importOriginal<typeof import("./hooks")>()),
+vi.mock("./hooks/tooltip", async (importOriginal) => ({
+    ...(await importOriginal<typeof import("./hooks/tooltip")>()),
     useStaticTooltip: vi.fn(),
     useTooltip: () => ({ showTooltip: vi.fn(), hideTooltip: vi.fn() })
 }));
 
+import { preloadDropdownPopups } from "./Dropdown";
 import FormDropdownList from "./FormDropdownList";
+
+beforeAll(() => preloadDropdownPopups());
 
 // happy-dom has no ResizeObserver; the dropdown only needs observe/disconnect to exist.
 class ResizeObserverStub {
@@ -32,6 +35,7 @@ interface Entry {
     icon?: string;
     hint?: string;
     startsGroup?: boolean;
+    unavailable?: string;
 }
 
 const ENTRIES: Entry[] = [
@@ -119,6 +123,24 @@ describe("FormDropdownList", () => {
         expect(items[1].className).not.toContain("active");
         // Without a property to read it from, no item starts a group of its own.
         expect(document.querySelectorAll(".dropdown-divider")).toHaveLength(0);
+    });
+
+    it("shows an item with a reason against it as disabled, and reports no press on it", () => {
+        const onChange = vi.fn();
+        renderOpened(
+            <FormDropdownList
+                values={[ ENTRIES[0], { ...ENTRIES[1], unavailable: "Not here" } ]}
+                keyProperty="value"
+                titleProperty="title"
+                disabledProperty="unavailable"
+                currentValue="text"
+                onChange={onChange}
+            />);
+
+        const items = [ ...document.querySelectorAll<HTMLElement>(".dropdown-item") ];
+        expect(items.map((item) => item.classList.contains("disabled"))).toEqual([ false, true ]);
+        act(() => items[1].click());
+        expect(onChange).not.toHaveBeenCalled();
     });
 
     /** The menu only renders its items once Bootstrap reports it open, which nothing does here. */

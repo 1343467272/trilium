@@ -1,13 +1,15 @@
-import { app_info, cls, events, getLog, isSetupRequested, keyboard_actions as keyboardActionsService, options as optionService, sql_init, utils as coreUtils } from "@triliumnext/core";
+import { app_info, becca_loader, cls, events, getLog, isNextBasedTheme, isSetupRequested, keyboard_actions as keyboardActionsService, options as optionService, sql_init, utils as coreUtils } from "@triliumnext/core";
 import { RESOURCE_DIR } from "@triliumnext/server/src/services/resource_dir.js";
 import { supportsBackgroundMaterial } from "@triliumnext/server/src/services/utils.js";
 import { type BrowserWindow, type BrowserWindowConstructorOptions, default as electron, type Session, type WebContents } from "electron";
 import { t } from "i18next";
 import path from "path";
 
+import { armFirstPaintGate, releaseFirstPaint } from "./first_paint_gate.js";
 import { markStartupMetric } from "./startup_metrics.js";
-import { TRILIUM_APP_BASE_URL } from "./trilium_app_origin.js";
+import { isTriliumAppShellUrl, TRILIUM_APP_BASE_URL } from "./trilium_app_origin.js";
 import { setupWebContentsSecurity } from "./web_contents_security.js";
+import { createWindowStateKeeper, keepInsideWorkArea } from "./window_state.js";
 
 // Preload bundle path. Two layouts:
 //   - Dev: this file lives at apps/desktop/src/services/window.ts, and the
@@ -32,6 +34,9 @@ function getPreloadScript(): string {
     return preloadScriptCache;
 }
 
+/** How long an app window stays hidden at most while waiting for the renderer's first frame. */
+const WINDOW_REVEAL_TIMEOUT_MS = 3000;
+
 // Prevent the window being garbage collected
 let mainWindow: BrowserWindow | null;
 let setupWindow: BrowserWindow | null;
@@ -39,6 +44,10 @@ let allWindows: BrowserWindow[] = []; // Used to store all windows, sorted by th
 const loadedSpellcheckSessions = new WeakSet<Session>();
 const exportRevealSessions = new WeakSet<Session>();
 const deferredWindowStateManagers = new WeakMap<BrowserWindow, () => void>();
+/** Windows created with background effects, whose material follows the `theme` and `layoutOrientation` options. */
+const backgroundEffectWindows = new Set<BrowserWindow>();
+/** The options {@link getBackgroundMaterial} and {@link getVibrancy} derive the material from. */
+const BACKGROUND_MATERIAL_OPTIONS = new Set([ "theme", "layoutOrientation" ]);
 
 // Set to `true` once the app is genuinely quitting (via `before-quit`, which fires
 // for every real quit path: Cmd+Q, the tray "Quit" item, the app menu, OS shutdown).
@@ -75,8 +84,9 @@ async function createExtraWindow(extraWindowHash: string) {
     const { BrowserWindow } = await import("electron");
 
     const win = new BrowserWindow(getExtraWindowOptions());
-    win.loadURL(`${TRILIUM_APP_BASE_URL}?extraWindow=1${extraWindowHash}`);
+    // Before the page loads, so that its first paint is held from its first request on.
     adoptExtraWindow(win);
+    win.loadURL(`${TRILIUM_APP_BASE_URL}?extraWindow=1${extraWindowHash}`);
 }
 
 /** Constructor options shared by both ways an extra window is created. */
@@ -85,6 +95,8 @@ function getExtraWindowOptions(): BrowserWindowConstructorOptions {
         width: 1000,
         height: 800,
         title: "Trilium Notes",
+        // Shown on the renderer's first frame, which `armFirstPaintGate()` holds until the interface is rendered.
+        show: false,
         webPreferences: {
             nodeIntegration: false,
             contextIsolation: true,
@@ -103,7 +115,11 @@ function getExtraWindowOptions(): BrowserWindowConstructorOptions {
 
 /** Per-window wiring for an extra window, whichever way it was created. */
 function adoptExtraWindow(win: BrowserWindow) {
+    keepInsideWorkArea(win);
     win.setMenuBarVisibility(false);
+    armFirstPaintGate(win.webContents);
+    revealOnFirstPaint(win);
+    trackBackgroundEffects(win);
     configureWebContents(win.webContents, optionService.getOptionBool("spellCheckEnabled"));
     trackWindowFocus(win);
 }
@@ -122,9 +138,7 @@ async function createMainWindow(startHidden = false) {
         ]);
     }
 
-    const windowStateKeeper = (await import("electron-window-state")).default; // should not be statically imported
-
-    const mainWindowState = windowStateKeeper({
+    const mainWindowState = createWindowStateKeeper({
         // default window width & height, so it's usable on a 1600 * 900 display (including some extra panels etc.)
         defaultWidth: 1200,
         defaultHeight: 800
@@ -142,10 +156,8 @@ async function createMainWindow(startHidden = false) {
         minWidth: 500,
         minHeight: 400,
         title: "Trilium Notes",
-        // Start hidden (launched at login with hide-on-autostart) means the window
-        // is never shown until the user summons it from the tray. Constructing it
-        // hidden avoids a visible flash that show()-then-hide() would cause.
-        show: !startHidden,
+        // Shown on the renderer's first frame, or never when started hidden in the tray.
+        show: false,
         webPreferences: {
             nodeIntegration: false,
             contextIsolation: true,
@@ -161,27 +173,30 @@ async function createMainWindow(startHidden = false) {
         ...getWindowExtraOpts()
     });
 
+    trackBackgroundEffects(mainWindow);
     markStartupMetric("main-window-created");
     // First time the renderer has produced a frame of the page — the closest
     // main-process signal to "the window displays something".
     mainWindow.once("ready-to-show", () => markStartupMetric("main-window-first-paint"));
     mainWindow.webContents.once("did-finish-load", () => markStartupMetric("main-window-load-finished"));
 
-    if (startHidden) {
-        const hiddenWindow = mainWindow;
-        const manageWindowState = () => {
-            if (deferredWindowStateManagers.delete(hiddenWindow)) {
-                mainWindowState.manage(hiddenWindow);
-            }
-        };
-        deferredWindowStateManagers.set(hiddenWindow, manageWindowState);
-        // This event is a fallback for a reveal that does not use showWindow().
-        hiddenWindow.once("show", manageWindowState);
-    } else {
-        mainWindowState.manage(mainWindow);
+    // `manage()` maximizes, which reveals a hidden window, so it runs on the reveal.
+    const win = mainWindow;
+    const manageWindowState = () => {
+        if (deferredWindowStateManagers.delete(win)) {
+            mainWindowState.manage(win);
+        }
+    };
+    deferredWindowStateManagers.set(win, manageWindowState);
+    // This event is a fallback for a reveal that does not use showWindow().
+    win.once("show", manageWindowState);
+
+    if (!startHidden) {
+        revealOnFirstPaint(win);
     }
 
     mainWindow.setMenuBarVisibility(false);
+    armFirstPaintGate(mainWindow.webContents);
     mainWindow.loadURL(TRILIUM_APP_BASE_URL);
     // Close-to-tray: when enabled, closing the main window hides it to the tray
     // instead of quitting. Only intercepts a genuine window close (not an app
@@ -196,6 +211,22 @@ async function createMainWindow(startHidden = false) {
 
     configureWebContents(mainWindow.webContents, spellcheckEnabled);
     trackWindowFocus(mainWindow);
+}
+
+/**
+ * Shows a window created hidden on the renderer's first frame, which the first-paint gate holds
+ * until the interface is rendered, or after {@link WINDOW_REVEAL_TIMEOUT_MS} if the renderer never
+ * paints (a crash, a hung server).
+ */
+function revealOnFirstPaint(win: BrowserWindow) {
+    const reveal = () => {
+        clearTimeout(revealTimeout);
+        if (!win.isDestroyed() && !win.isVisible()) {
+            showWindow(win);
+        }
+    };
+    const revealTimeout = setTimeout(reveal, WINDOW_REVEAL_TIMEOUT_MS);
+    win.once("ready-to-show", reveal);
 }
 
 function getWindowExtraOpts() {
@@ -215,19 +246,72 @@ function getWindowExtraOpts() {
             extraOpts.frame = false;
         }
 
-        // Window effects (Mica on Windows and Vibrancy on macOS)
-        // These only work if native title bar is not enabled.
-        if (optionService.getOptionBool("backgroundEffects")) {
+        // The material is set at creation so that the first frame the window shows already has it.
+        if (hasBackgroundEffects()) {
             if (coreUtils.isMac()) {
                 extraOpts.transparent = true;
                 extraOpts.visualEffectState = "active";
-            } else if (coreUtils.isWindows() && supportsBackgroundMaterial) {
-                extraOpts.backgroundMaterial = "auto";
+                const vibrancy = getVibrancy();
+                if (vibrancy) {
+                    extraOpts.vibrancy = vibrancy;
+                }
+            } else {
+                extraOpts.backgroundMaterial = getBackgroundMaterial();
             }
         }
     }
 
     return extraOpts;
+}
+
+/**
+ * Whether windows are created with background effects (Mica on Windows, vibrancy on macOS). They
+ * need the window controls overlay, so the native title bar turns them off.
+ */
+function hasBackgroundEffects() {
+    return !optionService.getOptionBool("nativeTitleBarVisible")
+        && optionService.getOptionBool("backgroundEffects")
+        && (coreUtils.isMac() || (coreUtils.isWindows() && supportsBackgroundMaterial));
+}
+
+/**
+ * The Windows backdrop under the translucent background of the Next themes: `tabbed` behind the
+ * tab bar of the horizontal layout, `mica` otherwise. Other themes paint an opaque background and
+ * get `auto`, which draws no backdrop.
+ */
+function getBackgroundMaterial(): "auto" | "mica" | "tabbed" {
+    if (!isNextBasedTheme(optionService.getOption("theme"))) {
+        return "auto";
+    }
+    return optionService.getOption("layoutOrientation") === "horizontal" ? "tabbed" : "mica";
+}
+
+/** The macOS counterpart of {@link getBackgroundMaterial}; `null` removes the vibrancy. */
+function getVibrancy(): "under-window" | "hud" | null {
+    if (!isNextBasedTheme(optionService.getOption("theme"))) {
+        return null;
+    }
+    return optionService.getOption("layoutOrientation") === "horizontal" ? "hud" : "under-window";
+}
+
+/** Registers `win` for {@link updateBackgroundMaterials} if it was created with background effects. */
+function trackBackgroundEffects(win: BrowserWindow) {
+    if (!hasBackgroundEffects()) {
+        return;
+    }
+    backgroundEffectWindows.add(win);
+    win.once("closed", () => backgroundEffectWindows.delete(win));
+}
+
+/** Applies the material of the current theme and layout to every window created with background effects. */
+function updateBackgroundMaterials() {
+    for (const win of backgroundEffectWindows) {
+        if (coreUtils.isMac()) {
+            win.setVibrancy(getVibrancy());
+        } else {
+            win.setBackgroundMaterial(getBackgroundMaterial());
+        }
+    }
 }
 
 async function configureWebContents(webContents: WebContents, spellcheckEnabled: boolean) {
@@ -406,7 +490,11 @@ async function createSetupWindow() {
         icon: getIcon(),
         // Background effects (Mica on Windows 11 22H2+, vibrancy on macOS)
         ...(coreUtils.isWindows() && supportsBackgroundMaterial && { backgroundMaterial: "mica" as const }),
-        ...(coreUtils.isMac() && { transparent: true, visualEffectState: "active" as const, vibrancy: "under-window" as const, titleBarStyle: "hiddenInset" as const }),
+        ...(coreUtils.isMac() && { transparent: true, visualEffectState: "active" as const, vibrancy: "under-window" as const }),
+        // The window controls draw over the page, as in the main window with its default
+        // `nativeTitleBarVisible`; the page reserves `env(titlebar-area-height)` for them.
+        titleBarStyle: coreUtils.isMac() ? "hiddenInset" : "hidden",
+        titleBarOverlay: true,
         webPreferences: {
             nodeIntegration: false,
             contextIsolation: true,
@@ -472,7 +560,7 @@ async function registerGlobalShortcuts() {
 }
 
 function showWindow(window: BrowserWindow) {
-    // electron-window-state can reveal a hidden maximized window while it restores state.
+    // Restoring the maximized state of a hidden window reveals it.
     // Restore immediately before an intentional reveal so the window starts hidden.
     deferredWindowStateManagers.get(window)?.();
     window.show();
@@ -528,9 +616,12 @@ export function setupWindowing() {
         console.error(`Could not set the application menu: ${e}`);
     });
 
+    // Only app windows: reloading the hidden transcription capture page would end its capture.
     electron.ipcMain.on("reload-all-windows", () => {
         for (const win of electron.BrowserWindow.getAllWindows()) {
-            win.reload();
+            if (isTriliumAppShellUrl(win.webContents.getURL())) {
+                win.reload();
+            }
         }
     });
 
@@ -564,6 +655,10 @@ export function setupWindowing() {
             }
         }
         return "";
+    });
+
+    electron.ipcMain.on("release-first-paint", (event) => {
+        releaseFirstPaint(event.sender.id);
     });
 
     electron.ipcMain.on("show-window", (event) => {
@@ -608,16 +703,6 @@ export function setupWindowing() {
 
     electron.ipcMain.on("set-window-button-position", (event, position: { x: number; y: number }) => {
         electron.BrowserWindow.fromWebContents(event.sender)?.setWindowButtonPosition(position);
-    });
-
-    electron.ipcMain.on("set-background-material", (event, material: string) => {
-        const win = electron.BrowserWindow.fromWebContents(event.sender);
-        win?.setBackgroundMaterial(material as Parameters<typeof win.setBackgroundMaterial>[0]);
-    });
-
-    electron.ipcMain.on("set-vibrancy", (event, vibrancy: string) => {
-        const win = electron.BrowserWindow.fromWebContents(event.sender);
-        win?.setVibrancy(vibrancy as Parameters<typeof win.setVibrancy>[0]);
     });
 
     electron.ipcMain.on("clear-navigation-history", (event) => {
@@ -699,6 +784,12 @@ export function setupWindowing() {
         event.sender.navigationHistory.goToIndex(index);
     });
 
+    events.subscribe(events.ENTITY_CHANGED, ({ entityName, entity }) => {
+        if (entityName === "options" && BACKGROUND_MATERIAL_OPTIONS.has(entity.name)) {
+            updateBackgroundMaterials();
+        }
+    });
+
     // Swap the setup wizard window for the main app window once the DB
     // transitions to initialized mid-session (fresh install / sync-from-server
     // flow). Idempotent: if no setup window exists (e.g., DB was already
@@ -706,6 +797,9 @@ export function setupWindowing() {
     events.subscribe(events.DB_INITIALIZED, async () => {
         if (!setupWindow) return;
         try {
+            // `createMainWindow()` reads options that `initStartupOptions()` creates during the
+            // becca load, which a database created for sync reaches only after this event.
+            await becca_loader.beccaLoaded;
             await createMainWindow();
             closeSetupWindow();
         } catch (err) {

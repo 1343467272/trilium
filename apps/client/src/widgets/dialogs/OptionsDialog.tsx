@@ -11,8 +11,12 @@ import utils, { isElectron, isStandalone } from "../../services/utils";
 import NoteDetail from "../NoteDetail";
 import FormList, { FormListItem } from "../react/FormList";
 import HelpButton from "../react/HelpButton";
-import { useChildNotes, useContainedLinkNavigation, useNoteContext, useTriliumEvent } from "../react/hooks";
-import { DetailPane, MasterDetailHeader, MasterPane, useMobileMasterDetail } from "../react/master_detail";
+import { useTriliumEvent } from "../react/hooks/events";
+import { useChildNotes } from "../react/hooks/note";
+import { useDetachedNoteContext, useNoteContext } from "../react/hooks/note_context";
+import { useContainedLinkNavigation } from "../react/hooks/content";
+import { DetailPane, MasterPane, useMobileMasterDetail } from "../react/master_detail";
+import MasterDetailHeader from "../react/MasterDetailHeader";
 import Modal from "../react/Modal";
 import { NoteContextContext, ParentComponent } from "../react/react_utils";
 import { PageHelpSlot } from "../type_widgets/options/components/OptionsPageHeader";
@@ -35,6 +39,7 @@ export default function OptionsDialog() {
     const [ shown, setShown ] = useState(false);
     const parentComponent = useContext(ParentComponent);
     const [ noteContext, setNoteContext ] = useState(() => new NoteContext("_options-dialog"));
+    useDetachedNoteContext(noteContext);
     // Remembers the page last viewed this session so reopening the dialog lands there instead of
     // always on Appearance. Kept in component state (resets on reload), not persisted.
     const [ lastSection, setLastSection ] = useState<string | null>(null);
@@ -283,6 +288,7 @@ function MobileSettingsList({ onSelect }: { onSelect: (noteId: string) => void }
                     icon={page.getIcon()}
                     value={page.noteId}
                     active={page.noteId === activeNoteId}
+                    badges={page.hasLabel("beta") ? [ { text: t("common.beta") } ] : undefined}
                 >
                     {page.title}
                 </FormListItem>

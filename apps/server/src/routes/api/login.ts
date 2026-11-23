@@ -13,68 +13,6 @@ import sql from "../../services/sql.js";
 import sqlInit from "../../services/sql_init.js";
 import utils from "../../services/utils.js";
 
-/**
- * @swagger
- * /api/login/sync:
- *   post:
- *     tags:
- *       - auth
- *     summary: Log in using documentSecret
- *     description: The `hash` parameter is computed using a HMAC of the `documentSecret` and `timestamp`.
- *     operationId: login-sync
- *     externalDocs:
- *       description: HMAC calculation
- *       url: https://github.com/TriliumNext/Trilium/blob/v0.91.6/src/services/utils.ts#L62-L66
- *     requestBody:
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             properties:
- *               timestamp:
- *                 $ref: '#/components/schemas/UtcDateTime'
- *               hash:
- *                 type: string
- *               syncVersion:
- *                 type: integer
- *                 example: 34
- *     responses:
- *       '200':
- *         description: Successful operation
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 syncVersion:
- *                   type: integer
- *                   example: 34
- *                 options:
- *                   type: object
- *                   properties:
- *                     documentSecret:
- *                       type: string
- *       '400':
- *         description: Sync version / document secret mismatch
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 message:
- *                   type: string
- *                   example: "Non-matching sync versions, local is version ${server syncVersion}, remote is ${requested syncVersion}. It is recommended to run same version of Trilium on both sides of sync"
- *       '401':
- *         description: Timestamp mismatch
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 message:
- *                   type: string
- *                   example: "Auth request time is out of sync, please check that both client and server have correct time. The difference between clocks has to be smaller than 5 minutes"
- */
 async function loginSync(req: Request) {
     if (!sqlInit.schemaExists()) {
         return [500, { message: "DB schema does not exist, can't sync." }];
@@ -132,8 +70,9 @@ async function token(req: Request) {
     const password = req.body.password;
     const submittedTotpToken = req.body.totpToken;
 
-    if (await verifyLoginCredentials(password, submittedTotpToken)) {
-        return [401, "Incorrect credential"];
+    const failedFactor = await verifyLoginCredentials(password, submittedTotpToken);
+    if (failedFactor) {
+        return [401, { message: "Incorrect credential", factor: failedFactor }];
     }
 
     // for backwards compatibility with Sender which does not send the name

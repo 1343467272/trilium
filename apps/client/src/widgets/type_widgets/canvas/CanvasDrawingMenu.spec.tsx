@@ -12,7 +12,10 @@ const MainMenu = vi.hoisted(() => Object.assign(
             <button type="button" onClick={onSelect}>{children}</button>
         ),
         Separator: () => <hr />,
-        DefaultItems: Object.fromEntries([ "LoadScene", "SaveAsImage", "SearchMenu", "Help" ]
+        DefaultItems: Object.fromEntries([
+            "LoadScene", "SaveAsImage", "SearchMenu", "Help", "ClearCanvas",
+            "ChangeCanvasBackground", "Socials"
+        ]
             .map((name) => [ name, () => <span>{name}</span> ]))
     }
 ));
@@ -21,7 +24,7 @@ vi.mock("@excalidraw/excalidraw", () => ({
     useI18n: () => ({ t: (key: string) => `t:${key}`, langCode: "en" })
 }));
 
-const { default: CanvasDrawingMenu } = await import("./CanvasDrawingMenu");
+const { default: CanvasDrawingMenu, CanvasNoteMenu } = await import("./CanvasDrawingMenu");
 
 describe("CanvasDrawingMenu", () => {
     let container: HTMLElement;
@@ -49,15 +52,38 @@ describe("CanvasDrawingMenu", () => {
 
     it("offers opening, exporting, finding, the library and help", async () => {
         expect(await mount(true)).toEqual([
-            "LoadScene", "SaveAsImage", "|", "SearchMenu", "t:toolBar.library", "Help"
+            "LoadScene", "SaveAsImage", "|", "t:search.title", "t:toolBar.library", "Help"
         ]);
 
-        container.querySelector("button")?.click();
-        expect(toggleSidebar).toHaveBeenCalledWith({ name: "default" });
+        // Its own search entry shows no Ctrl+F, which "Search in note" takes in a drawing.
+        const [ search, library ] = container.querySelectorAll("button");
+        search?.click();
+        expect(toggleSidebar).toHaveBeenLastCalledWith({
+            name: "default", tab: "search", force: true
+        });
+        library?.click();
+        expect(toggleSidebar).toHaveBeenLastCalledWith({ name: "default" });
     });
 
     it("leaves the library out of a drawing that cannot change", async () => {
         expect(await mount(false))
-            .toEqual([ "LoadScene", "SaveAsImage", "|", "SearchMenu", "Help" ]);
+            .toEqual([ "LoadScene", "SaveAsImage", "|", "t:search.title", "Help" ]);
+    });
+});
+
+describe("CanvasNoteMenu", () => {
+    it("offers Excalidraw's default entries without its links", async () => {
+        const container = document.createElement("div");
+        await act(async () => {
+            render(<CanvasNoteMenu />, container);
+        });
+        const items = [ ...container.querySelector(".menu")?.children ?? [] ]
+            .map((item) => item.tagName === "HR" ? "|" : item.textContent);
+        render(null, container);
+
+        expect(items).toEqual([
+            "LoadScene", "SaveAsImage", "SearchMenu", "Help", "ClearCanvas",
+            "ChangeCanvasBackground"
+        ]);
     });
 });

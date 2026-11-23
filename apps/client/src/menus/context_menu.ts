@@ -1,18 +1,37 @@
 import { KeyboardActionNames } from "@triliumnext/commons";
-import { Tooltip } from "bootstrap";
+import type { Tooltip } from "bootstrap";
+import clsx from "clsx";
 import { h, JSX, render } from "preact";
 
-import note_tooltip from "../services/note_tooltip.js";
 import type { NotePresetId } from "../services/note_presets.js";
+import { onSystemBack } from "../services/system_back.js";
 import utils from "../services/utils.js";
+import { loadBootstrap } from "../widgets/react/hooks/tooltip";
 import { suspendModalFocusTraps } from "../widgets/react/modal_focustrap";
+import { registerOpenPopup } from "../widgets/react/open_popups";
 
-export interface ContextMenuOptions<T> {
-    x: number;
-    y: number;
-    orientation?: "left";
+/**
+ * Where the menu opens: beside a point, towards the right unless `orientation` says otherwise, or
+ * below an element, and above it where there is no room below. Along the element, it lines up with
+ * the element's start unless `centered` is set.
+ */
+export type ContextMenuOptions<T> = ContextMenuBaseOptions<T> & (
+    | { x: number; y: number; orientation?: "left"; anchor?: undefined; centered?: undefined }
+    | {
+        anchor: HTMLElement; centered?: boolean;
+        x?: undefined; y?: undefined; orientation?: undefined;
+    }
+);
+
+interface ContextMenuBaseOptions<T> {
     selectMenuItemHandler: MenuHandler<T>;
     items: MenuItem<T>[];
+    /** Offers an input at the top of the menu that filters its items. */
+    filterable?: boolean;
+    /** For a {@link filterable} menu: puts the focus in its input as it opens. */
+    focusFilter?: boolean;
+    /** Classes put on the menu, for a caller that sizes it. */
+    className?: string;
     /** On mobile, if set to `true` then the context menu is shown near the element. If `false` (default), then the context menu is shown at the bottom of the screen. */
     forcePositionOnMobile?: boolean;
     /** Called with the element the menu renders into, before the menu takes the focus. */
@@ -32,12 +51,29 @@ export interface MenuSeparatorItem {
 export interface MenuHeader {
     title: string;
     kind: "header";
+    /** Icon buttons at the end of the heading, for secondary actions such as help or options. */
+    actions?: MenuHeaderActions;
+}
+
+/** The actions of a {@link MenuHeader}: at most three. */
+export type MenuHeaderActions = [] | [MenuHeaderAction] | [MenuHeaderAction, MenuHeaderAction]
+    | [MenuHeaderAction, MenuHeaderAction, MenuHeaderAction];
+
+export interface MenuHeaderAction {
+    /** The classes of the icon, such as `bx bx-help-circle`. */
+    icon: string;
+    /** The name of the action, shown as the button's tooltip. */
+    caption: string;
+    /** Called after the menu closes. */
+    callback: (e: MouseEvent) => void;
 }
 
 /** A row of items side by side, each drawn as its icon over its title. */
 export interface MenuActionRow<T> {
     kind: "actions";
     items: MenuCommandItem<T>[];
+    /** Classes added to the row, for a menu that styles its own. */
+    className?: string;
 }
 
 export interface MenuItemBadge {
@@ -47,6 +83,15 @@ export interface MenuItemBadge {
 
 export interface MenuCommandItem<T> {
     title: string;
+    /**
+     * The classes of an icon right after the title, such as a protected note's lock. Unlike markup
+     * in the title, a filtered menu keeps it.
+     */
+    titleIcon?: string;
+    /** A second line below the title, in smaller text. */
+    description?: string;
+    /** Other words that a filter finds the item by, beside its title and its description. */
+    keywords?: string[];
     command?: T;
     type?: string;
     mime?: string;
@@ -62,8 +107,13 @@ export interface MenuCommandItem<T> {
      */
     uiIconBadge?: string;
     /**
-     * What a row of actions shows in the item's tooltip in place of its title, for an action whose
-     * short title needs a word of explanation.
+     * An SVG icon in place of {@link uiIcon}, for an icon that a font cannot draw, such as one of
+     * more than one color.
+     */
+    uiIconSvg?: string;
+    /**
+     * What the row shows as a tooltip on hover, in place of its title: for a short title that
+     * needs a word of explanation, whether the row is a menu row or one of a row of actions.
      */
     tooltip?: string;
     /**
@@ -78,6 +128,10 @@ export interface MenuCommandItem<T> {
     notePreset?: NotePresetId;
     enabled?: boolean;
     handler?: MenuHandler<T>;
+    /** Runs on a middle click on the item, which leaves the menu open. */
+    middleClickHandler?: (e: MouseEvent) => void;
+    /** Runs on a right-click on the item, which a menu ignores otherwise. */
+    contextMenuHandler?: (e: MouseEvent) => void;
     items?: MenuItem<T>[] | null;
     shortcut?: string;
     keyboardShortcut?: KeyboardActionNames;
@@ -87,8 +141,15 @@ export interface MenuCommandItem<T> {
      * edge when the item has a {@link uiIcon} of its own, and in place of the icon when it has none.
      */
     checked?: boolean;
+    /**
+     * Draws the item as a switch, as in the note menu, on while {@link checked} is set. Its title
+     * is text, not HTML.
+     */
+    isSwitch?: boolean;
     /** Classes put on the item itself, for a menu styling one of its entries differently. */
     className?: string;
+    /** Plain text at the trailing edge of the item, where a shortcut would go, such as a note's path. */
+    trailingText?: string;
     /** An icon shown at the trailing edge of the item, where a shortcut would go. */
     trailingIcon?: string;
     /**
@@ -96,6 +157,8 @@ export interface MenuCommandItem<T> {
      * it, at any depth, into one list, which shows what was typed.
      */
     filterable?: boolean;
+    /** For an item with {@link items}: classes put on its submenu, for a caller that sizes it. */
+    submenuClassName?: string;
 }
 
 export type MenuItem<T> = MenuCommandItem<T> | CustomMenuItem | MenuSeparatorItem | MenuHeader | MenuActionRow<T>;
@@ -121,6 +184,10 @@ class ContextMenu {
     private lastShowRequest = 0;
     /** Stops closing the menu when the layout changes; see `show()`. */
     private stopFollowingLayout?: () => void;
+    /** Stops closing the menu on the system back gesture. */
+    private stopAnsweringBack?: () => void;
+    /** Stops closing the menu for `closeOpenPopups()`. */
+    private unregisterOpenPopup?: () => void;
 
     constructor() {
         this.cover = utils.isMobile() ? document.getElementById("context-menu-cover") : null;
@@ -149,15 +216,22 @@ class ContextMenu {
     }
 
     async show<T>(options: ContextMenuOptions<T>) {
-        note_tooltip.dismissAllTooltips();
-        hideShownTooltips();
-
+        for (const listener of showListeners) {
+            listener();
+        }
         const request = ++this.lastShowRequest;
-        // Loaded here rather than imported: the core services that import this module would
-        // otherwise reach the widget tree through the rows `Menu` draws, in a cycle.
-        const { default: Menu } = await import("../widgets/react/Menu");
-        // A later `show()` made during the import replaces this one.
+        // `Menu` is loaded here rather than imported: the core services that import this module
+        // would otherwise reach the widget tree through the rows `Menu` draws, in a cycle. Bootstrap
+        // loads with the first menu, which keeps it out of the startup.
+        // `closeOpenPopups()` during the imports cancels this menu before it opens.
+        const cancelPending = registerOpenPopup(() => this.lastShowRequest++);
+        const [ { default: Menu }, { Tooltip: BootstrapTooltip } ] = await Promise.all([
+            import("../widgets/react/Menu"),
+            loadBootstrap()
+        ]).finally(cancelPending);
+        // A later `show()` made during the imports replaces this one.
         if (request !== this.lastShowRequest) return;
+        hideShownTooltips(BootstrapTooltip);
 
         if (this.isShown) {
             // Unmount first so the menu opens fresh at the new location.
@@ -175,6 +249,11 @@ class ContextMenu {
         options.onShow?.(this.host);
         this.cover?.classList.add("show");
         document.body.classList.add("context-menu-shown");
+        this.stopAnsweringBack = onSystemBack(() => {
+            void this.hide();
+            return true;
+        });
+        this.unregisterOpenPopup = registerOpenPopup(() => void this.hide());
         // A mobile menu is a sheet or placed at the press depending on the layout, decided here,
         // so it closes when a tablet turns past that width.
         if (utils.isMobile() && !options.forcePositionOnMobile) {
@@ -184,9 +263,13 @@ class ContextMenu {
         render(h(Menu<T>, {
             // The id and classes the stylesheets, themes and `floating_layers` know this menu by.
             id: "context-menu-container",
-            className: "dropdown-menu-sm dropend",
-            anchor: { x: options.x, y: options.y },
-            placement: options.orientation === "left" ? "left-start" : "right-start",
+            className: clsx("dropdown-menu-sm dropend", options.className),
+            ...(options.anchor
+                ? { anchor: options.anchor, placement: options.centered ? "bottom" : undefined }
+                : {
+                    anchor: { x: options.x, y: options.y },
+                    placement: options.orientation === "left" ? "left-start" : "right-start"
+                }),
             // Already where the screen shows it: see the host above.
             container: this.host,
             bottomSheet: utils.isMobile() && utils.isNarrowLayout()
@@ -194,6 +277,8 @@ class ContextMenu {
             // As a native menu opened from the keyboard, it starts at its first row.
             startAt: this.lastInputWasKey ? "first" : undefined,
             items: options.items,
+            filterable: options.filterable,
+            focusFilter: options.focusFilter,
             onSelect: (item, e) => {
                 // A submenu's row stays up to be opened, unless it runs something of its own.
                 if (!item.items || item.handler || item.command) void this.hide();
@@ -222,6 +307,10 @@ class ContextMenu {
         this.options = undefined;
         this.stopFollowingLayout?.();
         this.stopFollowingLayout = undefined;
+        this.stopAnsweringBack?.();
+        this.stopAnsweringBack = undefined;
+        this.unregisterOpenPopup?.();
+        this.unregisterOpenPopup = undefined;
         this.cover?.classList.remove("show");
         document.body.classList.remove("context-menu-shown");
 
@@ -248,10 +337,20 @@ const contextMenu = new ContextMenu();
 
 export default contextMenu;
 
+const showListeners = new Set<() => void>();
+
+/**
+ * Calls `listener` each time a context menu is about to open. `note_tooltip` disposes its
+ * previews through it, which keeps the preview renderer out of this module's imports.
+ */
+export function onContextMenuShow(listener: () => void) {
+    showListeners.add(listener);
+}
+
 // Bootstrap sets `aria-describedby` on a trigger while its tooltip is shown. `hide()` also clears
 // the hover and focus triggers that keep the tooltip up.
-function hideShownTooltips() {
+function hideShownTooltips(BootstrapTooltip: typeof Tooltip) {
     for (const trigger of document.querySelectorAll("[aria-describedby]")) {
-        Tooltip.getInstance(trigger)?.hide();
+        BootstrapTooltip.getInstance(trigger)?.hide();
     }
 }

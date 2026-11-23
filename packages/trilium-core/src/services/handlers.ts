@@ -11,9 +11,8 @@ import hiddenSubtreeService from "./hidden_subtree.js";
 import oneTimeTimer from "./one_time_timer.js";
 import type BNote from "../becca/entities/bnote.js";
 import type AbstractBeccaEntity from "../becca/entities/abstract_becca_entity.js";
-import { DefinitionObject } from "@triliumnext/commons";
 
-type Handler = (definition: DefinitionObject, note: BNote, targetNote: BNote) => void;
+type Handler = (inverseRelation: string, note: BNote, targetNote: BNote) => void;
 
 function runAttachedRelations(note: BNote, relationName: string, originEntity: AbstractBeccaEntity<any>) {
     if (!note || !isScriptingEnabled()) {
@@ -91,11 +90,7 @@ eventService.subscribe(eventService.ENTITY_CREATED, ({ entityName, entity }) => 
         runAttachedRelations(entity.getNote(), "runOnAttributeCreation", entity);
 
         if (entity.type === "relation" && entity.name === "template") {
-            const note = becca.getNote(entity.noteId);
-            if (!note) {
-                return;
-            }
-
+            const note = entity.getNote();
             const templateNote = becca.getNote(entity.value);
 
             if (!templateNote) {
@@ -138,6 +133,8 @@ eventService.subscribe(eventService.ENTITY_CREATED, ({ entityName, entity }) => 
         if (entity.parentNote?.hasLabel("sorted")) {
             treeService.sortNotesIfNeeded(entity.parentNoteId);
         }
+
+        sortParentsGroupingFolders(entity.parentNoteId, 1);
     } else if (entityName === "notes") {
         runAttachedRelations(entity, "runOnNoteCreation", entity);
     }
@@ -159,7 +156,7 @@ function processInverseRelations(entityName: string, entity: BAttribute, handler
                 const targetNote = entity.getTargetNote();
 
                 if (targetNote) {
-                    handler(definition, note, targetNote);
+                    handler(definition.inverseRelation, note, targetNote);
                 }
             }
         }
@@ -170,12 +167,8 @@ function handleSortedAttribute(entity: BAttribute) {
     treeService.sortNotesIfNeeded(entity.noteId);
 
     if (entity.isInheritable) {
-        const note = becca.notes[entity.noteId];
-
-        if (note) {
-            for (const noteId of note.getSubtreeNoteIds()) {
-                treeService.sortNotesIfNeeded(noteId);
-            }
+        for (const noteId of entity.getNote().getSubtreeNoteIds()) {
+            treeService.sortNotesIfNeeded(noteId);
         }
     }
 }
@@ -185,37 +178,71 @@ function handleMaybeSortingLabel(entity: BAttribute) {
     const note = becca.notes[entity.noteId];
 
     // this will not work on deleted notes, but in that case we don't really need to re-sort
-    if (note) {
-        for (const parentNote of note.getParentNotes()) {
-            const sorted = parentNote.getLabelValue("sorted");
-            if (sorted === null) {
-                // checking specifically for null since that means the label doesn't exist
-                // empty valued "sorted" is still valid
-                continue;
-            }
+    if (!note || !becca.findAttributes("label", "sorted").some(
+        (sorted) => sortsByLabel(sorted.value, entity.name)
+    )) {
+        return;
+    }
 
-            if (
-                entity.name === "top" ||
-                entity.name === "bottom" ||
-                parseSortCriteria(sorted).some((criterion) => criterion.key === entity.name)
-            ) {
-                treeService.sortNotesIfNeeded(parentNote.noteId);
-            }
+    // Covers inherited and chained templates as `invalidateSubTree()` does; for a non-inheritable
+    // label it also reaches the subtree, whose parents then keep the order they have.
+    const parentNotes = new Set<BNote>();
+
+    for (const affectedNote of note.getSubtreeNotesIncludingTemplated()) {
+        for (const parentNote of affectedNote.getParentNotes()) {
+            parentNotes.add(parentNote);
+        }
+    }
+
+    for (const parentNote of parentNotes) {
+        const sorted = parentNote.getLabelValue("sorted");
+        // checking specifically for null since that means the label doesn't exist
+        // empty valued "sorted" is still valid
+        if (sorted !== null && sortsByLabel(sorted, entity.name)) {
+            treeService.sortNotesIfNeeded(parentNote.noteId);
         }
     }
 }
 
+/**
+ * Re-sorts the parents that group folders once the note `noteId` has `childCount` children, that
+ * is, once it has just become a folder or stopped being one.
+ */
+function sortParentsGroupingFolders(noteId: string, childCount: number) {
+    const note = becca.notes[noteId];
+    if (!note || note.children.length !== childCount) {
+        return;
+    }
+
+    for (const parentNote of note.getParentNotes()) {
+        const sorted = parentNote.getLabelValue("sorted");
+        const groupsFolders = sorted !== null && (
+            parentNote.isLabelTruthy("sortFoldersFirst")
+            || parseSortCriteria(sorted).some(({ key, isLabel }) => !isLabel && key === "folders")
+        );
+        if (groupsFolders) {
+            treeService.sortNotesIfNeeded(parentNote.noteId);
+        }
+    }
+}
+
+function sortsByLabel(sorted: string, labelName: string) {
+    return labelName === "top"
+        || labelName === "bottom"
+        || parseSortCriteria(sorted).some(({ key, isLabel }) => isLabel && key === labelName);
+}
+
 eventService.subscribe(eventService.ENTITY_CHANGED, ({ entityName, entity }) => {
-    processInverseRelations(entityName, entity, (definition, note, targetNote) => {
+    processInverseRelations(entityName, entity, (inverseRelation, note, targetNote) => {
         // we need to make sure that also target's inverse attribute exists and if not, then create it
         // inverse attribute has to target our note as well
-        const hasInverseAttribute = targetNote.getRelations(definition.inverseRelation).some((attr) => attr.value === note.noteId);
+        const hasInverseAttribute = targetNote.getRelations(inverseRelation).some((attr) => attr.value === note.noteId);
 
         if (!hasInverseAttribute) {
             new BAttribute({
                 noteId: targetNote.noteId,
                 type: "relation",
-                name: definition.inverseRelation || "",
+                name: inverseRelation,
                 value: note.noteId,
                 isInheritable: entity.isInheritable
             }).save();
@@ -227,9 +254,9 @@ eventService.subscribe(eventService.ENTITY_CHANGED, ({ entityName, entity }) => 
 });
 
 eventService.subscribe(eventService.ENTITY_DELETED, ({ entityName, entity }) => {
-    processInverseRelations(entityName, entity, (definition: DefinitionObject, note: BNote, targetNote: BNote) => {
+    processInverseRelations(entityName, entity, (inverseRelation, note, targetNote) => {
         // if one inverse attribute is deleted, then the other should be deleted as well
-        const relations = targetNote.getOwnedRelations(definition.inverseRelation);
+        const relations = targetNote.getOwnedRelations(inverseRelation);
 
         for (const relation of relations) {
             if (relation.value === note.noteId) {
@@ -240,6 +267,7 @@ eventService.subscribe(eventService.ENTITY_DELETED, ({ entityName, entity }) => 
 
     if (entityName === "branches") {
         runAttachedRelations(entity.getNote(), "runOnBranchDeletion", entity);
+        sortParentsGroupingFolders(entity.parentNoteId, 0);
     }
 
     if (entityName === "notes" && entity.noteId.startsWith("_")) {

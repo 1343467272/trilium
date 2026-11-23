@@ -2,11 +2,16 @@
  * Pure helpers for assembling a tab's title from its splits. Kept free of DOM/appContext so the
  * formatting rules (separator, empty-split fallback, per-segment active flag) can be unit-tested.
  */
+import type FNote from "../entities/fnote.js";
+import { t } from "./i18n.js";
+import utils from "./utils.js";
 
 export const TAB_TITLE_SEPARATOR = " • ";
 
 export interface TabTitleSegment {
     text: string;
+    /** The segment's markup: the split's own `html`, else its escaped `text`. */
+    html: string;
     active: boolean;
 }
 
@@ -26,28 +31,28 @@ function escapeHtml(text: string): string {
  *
  * `tooltip` is plain text; `tooltipHtml` escapes every title (untrusted) and wraps the active split in
  * trusted `<strong>` so it stands out — only the surrounding markup is trusted, never the titles.
+ * A split's `html` is trusted markup that replaces its escaped title in the segment and tooltip.
  *
  * `options.pinnedPrefix`, when set, is prepended to the tooltip (e.g. "Pinned: ").
  */
 export function buildTabTitle(
-    splits: { title: string | null | undefined; active: boolean }[],
+    splits: { title: string | null | undefined; html?: string; active: boolean }[],
     emptyLabel: string,
     options: { pinnedPrefix?: string } = {}
 ): { segments: TabTitleSegment[]; tooltip: string; tooltipHtml: string } {
-    const segments = splits.map((split) => ({
-        text: split.title || emptyLabel,
-        active: split.active
-    }));
+    const segments = splits.map((split) => {
+        const text = split.title || emptyLabel;
+        return { text, html: split.html ?? escapeHtml(text), active: split.active };
+    });
 
     const prefix = options.pinnedPrefix ?? "";
     // only emphasize the active split when there's more than one — bolding a lone title is pointless
     const emphasizeActive = segments.length > 1;
     const body = segments.map((segment) => segment.text).join(TAB_TITLE_SEPARATOR);
     const bodyHtml = segments
-        .map((segment) => {
-            const escaped = escapeHtml(segment.text);
-            return segment.active && emphasizeActive ? `<strong>${escaped}</strong>` : escaped;
-        })
+        .map((segment) => (segment.active && emphasizeActive
+            ? `<strong>${segment.html}</strong>`
+            : segment.html))
         .join(TAB_TITLE_SEPARATOR);
 
     return {
@@ -55,4 +60,20 @@ export function buildTabTitle(
         tooltip: `${prefix}${body}`,
         tooltipHtml: `${escapeHtml(prefix)}${bodyHtml}`
     };
+}
+
+/** The classes of the lock beside the title of a protected note. */
+export const PROTECTED_ICON = "bx bx-lock-alt protected-icon";
+
+/** The HTML of a note's title in a tab or the breadcrumb, with the lock of a protected note. */
+export function noteTitleHtml(note: FNote) {
+    const title = noteTitleTextHtml(note);
+    return note.isProtected ? `${title}<span class="${PROTECTED_ICON} tn-icon"></span>` : title;
+}
+
+/** The HTML of the note's title, or of "Protected" while the protected session is locked. */
+export function noteTitleTextHtml(note: FNote) {
+    if (note.isContentAvailable()) return utils.escapeHtml(note.title);
+    const locked = utils.escapeHtml(t("protected_session.locked_note_title"));
+    return `<span class="protected-title">${locked}</span>`;
 }

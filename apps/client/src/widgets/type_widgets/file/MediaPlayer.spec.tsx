@@ -1,7 +1,7 @@
 import $ from "jquery";
 import { RefObject, render } from "preact";
 import { act } from "preact/test-utils";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { getNote, setLabel, removeAttributeById, logError } = vi.hoisted(() => ({
     getNote: vi.fn(async (_noteId: string) => null as unknown),
@@ -19,15 +19,22 @@ vi.mock("../../../services/ws", () => ({
     subscribeToMessages: () => {},
     unsubscribeToMessage: () => {}
 }));
+vi.mock("../../../services/i18n", async (importOriginal) => ({
+    ...(await importOriginal<object>()),
+    t: (key: string) => key
+}));
 
 import type NoteContext from "../../../components/note_context";
 import Component from "../../../components/component";
 import type FNote from "../../../entities/fnote";
 import { collectShortcutHints } from "../../../services/shortcut_hints";
+import { preloadDropdownPopups } from "../../react/Dropdown";
 import { ParentComponent } from "../../react/react_utils";
-import { claimsKeystroke, formatTime, PlaybackSpeed, PlayModeButton, PlayPauseButton, SeekBar, SkipButton, useMediaPlayerShortcutHints, useMediaPlayMode, useMediaSessionController, VolumeControl } from "./MediaPlayer";
+import { claimsKeystroke, formatTime, getHttpStatusName, PlaybackSpeed, PlayModeButton, PlayPauseButton, SeekBar, SkipButton, useMediaPlayerShortcutHints, useMediaPlayMode, useMediaSessionController, VolumeControl } from "./MediaPlayer";
 import type { MediaPlayMode } from "./media_play_mode";
 import type { MediaSource } from "./media_source";
+
+beforeAll(() => preloadDropdownPopups());
 
 let container: HTMLDivElement;
 
@@ -144,12 +151,24 @@ describe("claimsKeystroke", () => {
     });
 });
 
+describe("getHttpStatusName", () => {
+    it("names a common HTTP error, and the class of any other", () => {
+        expect([ 404, 503, 418, 599 ].map(getHttpStatusName)).toEqual([
+            "media.http-status-names.404",
+            "media.http-status-names.503",
+            "media.http-status-names.client-error",
+            "media.http-status-names.server-error"
+        ]);
+    });
+});
+
 describe("formatTime", () => {
     it("renders m:ss, zero-padding the seconds and flooring the remainder", () => {
         expect(formatTime(0)).toBe("0:00");
         expect(formatTime(9.9)).toBe("0:09");
         expect(formatTime(65)).toBe("1:05");
         expect(formatTime(3600)).toBe("60:00");
+        expect([ formatTime(NaN), formatTime(Infinity) ]).toEqual([ "--:--", "--:--" ]);
     });
 });
 
@@ -168,9 +187,11 @@ describe("SeekBar", () => {
     });
 
     it("follows the element as it plays and as its duration resolves", () => {
-        const mediaRef = fakeMedia({ duration: 0, currentTime: 0 });
+        // An element reports a NaN duration until it has loaded its metadata.
+        const mediaRef = fakeMedia({ duration: NaN, currentTime: 0 });
         act(() => render(<SeekBar mediaRef={mediaRef} />, container));
         expect(trackbar().getAttribute("max")).toBe("0");
+        expect(times()).toEqual([ "0:00", "--:--" ]);
 
         const media = mediaRef.current;
         if (!media) throw new Error("no media");
@@ -454,6 +475,7 @@ describe("useMediaSessionController", () => {
         id,
         title,
         mime: "audio/mpeg",
+        kind: "audio",
         streamUrl: `api/notes/${id}/open-partial?v=b`,
         fullUrl: `api/notes/${id}/open?v=b`
     });

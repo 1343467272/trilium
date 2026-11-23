@@ -1,7 +1,7 @@
 import "./InlineTitle.css";
 
 import { NoteType } from "@triliumnext/commons";
-import { Tooltip } from "bootstrap";
+import type { Tooltip } from "bootstrap";
 import clsx from "clsx";
 import { ComponentChild } from "preact";
 import { useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
@@ -13,22 +13,26 @@ import { ViewScope } from "../../services/link";
 import { formatDateTime } from "../../utils/formatters";
 import NoteIcon from "../note_icon";
 import NoteTitleWidget from "../note_title";
-import { useNoteContext, useNoteProperty, useStaticTooltip } from "../react/hooks";
+import { useNoteProperty } from "../react/hooks/note";
+import { useTriliumOption } from "../react/hooks/options";
+import { useNoteContext } from "../react/hooks/note_context";
+import { useStaticTooltip } from "../react/hooks/tooltip";
 import { joinElements } from "../react/react_utils";
-import { useNoteMetadata } from "../ribbon/NoteInfoTab";
+import { useNoteMetadata } from "./note_metadata";
 
 export default function InlineTitle() {
     const { note, parentComponent, viewScope } = useNoteContext();
     const type = useNoteProperty(note, "type");
     const mime = useNoteProperty(note, "mime");
+    const [ titleStyle ] = useTriliumOption("noteTitleStyle");
     const isOptions = note?.noteId?.startsWith("_options") ?? false;
-    const [ shown, setShown ] = useState(shouldShowInlineTitle(note, type, viewScope));
+    const [ shown, setShown ] = useState(shouldShowInlineTitle(note, type, viewScope, titleStyle));
     const containerRef = useRef<HTMLDivElement>(null);
     const [ titleHidden, setTitleHidden ] = useState(false);
 
     useLayoutEffect(() => {
-        setShown(shouldShowInlineTitle(note, type, viewScope));
-    }, [ note, type, mime, viewScope ]);
+        setShown(shouldShowInlineTitle(note, type, viewScope, titleStyle));
+    }, [ note, type, mime, viewScope, titleStyle ]);
 
     // Options pages render their own title (OptionsPageHeader) inside the content, so collapse the
     // note's own sticky title-row for them — `hide-title` only fades it (keeping its height), which
@@ -49,19 +53,14 @@ export default function InlineTitle() {
         if (!titleRow) return;
 
         titleRow.classList.toggle("hide-title", true);
-        const observer = new IntersectionObserver((entries) => {
-            titleRow.classList.toggle("hide-title", entries[0].isIntersecting);
-            setTitleHidden(!entries[0].isIntersecting);
-        }, {
-            threshold: 0.85
+        const stopObserving = containerRef.current && observeTitleInView(containerRef.current, (isInView) => {
+            titleRow.classList.toggle("hide-title", isInView);
+            setTitleHidden(!isInView);
         });
-        if (containerRef.current) {
-            observer.observe(containerRef.current);
-        }
 
         return () => {
             titleRow.classList.remove("hide-title");
-            observer.disconnect();
+            stopObserving?.();
         };
     }, [ shown, parentComponent ]);
 
@@ -73,7 +72,7 @@ export default function InlineTitle() {
             <div class={clsx("inline-title-row", titleHidden && "hidden")}>
                 <NoteIcon />
                 <div class="note-title-caption">
-                    <NoteTitleWidget />
+                    <NoteTitleWidget placement="inline" />
                     <NoteTitleDetails />
                 </div>
             </div>
@@ -81,8 +80,34 @@ export default function InlineTitle() {
     );
 }
 
-export function shouldShowInlineTitle(note: FNote | null | undefined, type: NoteType | undefined, viewScope: ViewScope | undefined) {
+/**
+ * Calls `onChange` as `title` comes into view in its scrolling container or leaves it. Measured
+ * against the container rather than the viewport, so a note sliding in from off-screen (the
+ * navigation stack on iPhones) keeps its title in view while it moves.
+ */
+export function observeTitleInView(title: HTMLElement, onChange: (isInView: boolean) => void) {
+    const observer = new IntersectionObserver(([ entry ]) => {
+        // A title with no box sits in a hidden tab, which shows it again as it was left.
+        const { width, height } = entry.boundingClientRect;
+        if (!entry.isIntersecting && !width && !height) return;
+        onChange(entry.isIntersecting);
+    }, {
+        root: title.closest(".scrolling-container"),
+        threshold: 0.85
+    });
+    observer.observe(title);
+    return () => observer.disconnect();
+}
+
+export function shouldShowInlineTitle(
+    note: FNote | null | undefined,
+    type: NoteType | undefined,
+    viewScope: ViewScope | undefined,
+    titleStyle?: string
+) {
     if (viewScope?.viewMode !== "default") return false;
+    // The `compact` style (`noteTitleStyle` option) keeps every note's title in the sticky title row.
+    if (titleStyle === "compact") return false;
     // Options pages provide their own title via OptionsPageHeader, so this inline title stays hidden
     // for them (and the sticky title-row is hidden too — see the effect in InlineTitle).
     if (note?.noteId?.startsWith("_options")) return false;

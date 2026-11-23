@@ -4,11 +4,14 @@ import {
     Plugin,
     Table,
     TableColumnResize,
+    TableMouse,
     TableSelection,
     TableUtils,
     TableWalker
 } from "ckeditor5";
-import type { Editor, ModelElement, ViewDocumentMouseDownEvent } from "ckeditor5";
+import type {
+    Editor, ModelElement, ViewDocumentMouseDownEvent, ViewDocumentTabEvent
+} from "ckeditor5";
 
 import { DistributeTableColumnsCommand } from "./table_distribute_columns.js";
 
@@ -17,12 +20,17 @@ import { DistributeTableColumnsCommand } from "./table_distribute_columns.js";
  *
  * Registers insert commands that honor the size of the current selection (the upstream
  * `insertTableRow*` / `insertTableColumn*` commands always insert one row or column) and
- * `triliumDistributeTableColumns`, keeps a multi-cell selection alive under a right-click, and
- * moves the selection to the cell a context menu is opened on. Merge, split and delete need no
- * counterparts here: the upstream `mergeTableCells`, `splitTableCell*` and `removeTableRow` /
- * `removeTableColumn` commands already act on the whole selection.
+ * `triliumDistributeTableColumns`, moves the caret into the row or column that these and the
+ * upstream commands insert, keeps a multi-cell selection alive under a right-click, limits
+ * mouse cell selection and column resizing to the primary button, and moves the selection to the
+ * cell a context menu is opened on. Merge, split and delete need no counterparts here: the upstream
+ * `mergeTableCells`, `splitTableCell*` and `removeTableRow` / `removeTableColumn` commands already
+ * act on the whole selection.
  */
 export default class TableContextMenu extends Plugin {
+
+    /** Whether a Tab key is being handled, which moves the caret into the row it adds itself. */
+    private isTabbing = false;
 
     static get requires() {
         return [Table, TableColumnResize, TableSelection, TableUtils] as const;
@@ -52,17 +60,43 @@ export default class TableContextMenu extends Plugin {
             new TableHeaderRowsCommand(editor, "firstRows"));
         editor.commands.add("triliumSetTableHeaderUpToRow",
             new TableHeaderRowsCommand(editor, "laterRow"));
+        for (const [ name, direction ] of INSERT_COMMANDS) {
+            this.followInsertedCells(name, direction);
+        }
 
         const view = editor.editing.view;
+        // `Tab` in the last cell adds a row, and `Widget` then moves the caret to its first cell.
+        this.listenTo<ViewDocumentTabEvent>(view.document, "tab", () => {
+            this.isTabbing = true;
+            queueMicrotask(() => {
+                this.isTabbing = false;
+            });
+        }, { context: "$capture" });
+        const tableMouse = editor.plugins.get(TableMouse);
         view.addObserver(MouseObserver);
         this.listenTo<ViewDocumentMouseDownEvent>(view.document, "mousedown", (evt, data) => {
+            const { button } = data.domEvent;
+
+            // Limits `TableMouse` drag and Shift+click cell selection to the primary button.
+            // `TableMouse` checks `isEnabled` only on mousedown.
+            if (button === PRIMARY_MOUSE_BUTTON) {
+                tableMouse.clearForceDisabled(TableContextMenu.pluginName);
+            } else {
+                tableMouse.forceDisabled(TableContextMenu.pluginName);
+            }
+
             // Stops the caret move that would collapse a multi-cell selection before the
             // `contextmenu` event fires.
-            const isRightButton = data.domEvent.button === RIGHT_MOUSE_BUTTON;
-            if (isRightButton && this.isInsideCellSelection(data.domTarget)) {
+            if (button === RIGHT_MOUSE_BUTTON && this.isInsideCellSelection(data.domTarget)) {
                 data.preventDefault();
             }
-        }, { priority: "high" });
+
+            // Keeps `TableColumnResizeEditing` from starting a resize. The default action, such as
+            // the autoscroll of the middle button, still runs.
+            if (button !== PRIMARY_MOUSE_BUTTON && data.target.hasClass(COLUMN_RESIZER_CLASS)) {
+                evt.stop();
+            }
+        }, { priority: "highest" });
     }
 
     /**
@@ -88,6 +122,43 @@ export default class TableContextMenu extends Plugin {
         return true;
     }
 
+    /**
+     * Moves the caret, once `commandName` has inserted rows or columns on the `direction` side of
+     * the selection, into the one next to the selection, in the column or the row of its first
+     * cell. A cell that spans that slot keeps the caret where it is.
+     */
+    private followInsertedCells(commandName: string, direction: TableMultiInsertDirection) {
+        const editor = this.editor;
+        const tableUtils = editor.plugins.get(TableUtils);
+        this.listenTo(editor.commands.get(commandName) as Command, "execute", () => {
+            const selection = editor.model.document.selection;
+            const cells = tableUtils.getSelectionAffectedTableCells(selection);
+            const [ cell ] = cells;
+            // The command inserts nothing when it runs with the selection outside a table.
+            if (!cell || this.isTabbing) {
+                return;
+            }
+
+            let { row, column } = tableUtils.getCellLocation(cell);
+            if (direction === "above" || direction === "below") {
+                const { first, last } = tableUtils.getRowIndexes(cells);
+                row = direction === "above" ? first - 1 : last + 1;
+            } else {
+                const { first, last } = tableUtils.getColumnIndexes(cells);
+                column = direction === "left" ? first - 1 : last + 1;
+            }
+
+            const table = cell.findAncestor("table") as ModelElement;
+            const slots = new TableWalker(table, { row, column, includeAllSlots: true });
+            const target = Array.from(slots, (slot) => slot.cell).find((found) => found !== cell);
+            if (target) {
+                editor.model.change((writer) => {
+                    writer.setSelection(writer.createPositionAt(target, 0));
+                });
+            }
+        }, { priority: "low" });
+    }
+
     /** Whether `domTarget` sits in one of the cells the selection covers from the outside. */
     private isInsideCellSelection(domTarget: Node): boolean {
         const editor = this.editor;
@@ -102,7 +173,17 @@ export default class TableContextMenu extends Plugin {
 
 }
 
+const PRIMARY_MOUSE_BUTTON = 0;
 const RIGHT_MOUSE_BUTTON = 2;
+const COLUMN_RESIZER_CLASS = "ck-table-column-resizer";
+
+/** The commands that insert rows or columns, CKEditor's own included, by where they insert. */
+const INSERT_COMMANDS: ReadonlyArray<readonly [ string, TableMultiInsertDirection ]> = [
+    [ "triliumInsertTableRowsAbove", "above" ], [ "insertTableRowAbove", "above" ],
+    [ "triliumInsertTableRowsBelow", "below" ], [ "insertTableRowBelow", "below" ],
+    [ "triliumInsertTableColumnsLeft", "left" ], [ "insertTableColumnLeft", "left" ],
+    [ "triliumInsertTableColumnsRight", "right" ], [ "insertTableColumnRight", "right" ]
+];
 
 /** Where {@link TableMultiInsertCommand} inserts, relative to the rows or columns it spans. */
 export type TableMultiInsertDirection = "above" | "below" | "left" | "right";
@@ -130,7 +211,6 @@ export class TableMultiInsertCommand extends Command {
         const selection = this.editor.model.document.selection;
         const cells = tableUtils.getSelectionAffectedTableCells(selection);
         const table = cells[0]?.findAncestor("table");
-        /* v8 ignore next 3 -- defensive: disabled whenever the selection is outside a table */
         if (!table) {
             return;
         }
@@ -167,7 +247,6 @@ export class DeleteTableCommand extends Command {
 
     execute() {
         const table = findSelectionTable(this.editor);
-        /* v8 ignore next 3 -- defensive: disabled whenever the selection is outside a table */
         if (!table) {
             return;
         }
@@ -242,7 +321,6 @@ export class SelectTableCommand extends Command {
 
     execute() {
         const table = findSelectionTable(this.editor);
-        /* v8 ignore next 3 -- defensive: disabled whenever the selection is outside a table */
         if (!table) {
             return;
         }

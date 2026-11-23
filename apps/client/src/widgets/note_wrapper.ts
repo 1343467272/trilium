@@ -1,7 +1,10 @@
+import { isFullWidthNoteType } from "@triliumnext/commons/src/lib/notes.js";
+
 import type { EventData } from "../components/app_context.js";
 import type NoteContext from "../components/note_context.js";
 import type FNote from "../entities/fnote.js";
 import attributeService from "../services/attributes.js";
+import froca from "../services/froca.js";
 import utils from "../services/utils.js";
 import { isContentRightToLeft } from "../utils/formatters.js";
 import type BasicWidget from "./basic_widget.js";
@@ -15,6 +18,20 @@ export default class NoteWrapperWidget extends FlexContainer<BasicWidget> {
         super("column");
 
         this.css("flex-grow", "1").collapsible();
+    }
+
+    doRender() {
+        super.doRender();
+        this.$widget.prepend(createCaretStop()).append(createCaretStop());
+        // Adds `note-split` before the note context arrives: `resizer.ts` selects the panes by it.
+        this.refresh();
+    }
+
+    toggleExt(show: boolean | null | "" | undefined) {
+        super.toggleExt(show);
+        if (!show) {
+            releaseFocusAndSelection(this.$widget[0]);
+        }
     }
 
     setNoteContextEvent({ noteContext }: EventData<"setNoteContext">) {
@@ -38,46 +55,117 @@ export default class NoteWrapperWidget extends FlexContainer<BasicWidget> {
     }
 
     refresh() {
-        // These are owned by SplitNoteContainer, not by the note — preserve them through the reset below.
-        const isHiddenExt = this.isHiddenExt();
-        const containerClasses = CONTAINER_OWNED_CLASSES.filter((cls) => this.$widget.hasClass(cls));
+        const classes = new Set(this.getClasses().join(" ").split(/[\t\n\f\r ]+/).filter(Boolean));
 
-        this.$widget.removeClass();
+        // Only the difference is applied: a class change on the split restyles the whole note.
+        const classList = this.$widget[0].classList;
+        for (const cls of [ ...classList ]) {
+            if (!classes.has(cls)) {
+                classList.remove(cls);
+            }
+        }
+        for (const cls of classes) {
+            if (!classList.contains(cls)) {
+                classList.add(cls);
+            }
+        }
 
-        this.toggleExt(!isHiddenExt);
-        this.$widget.addClass(containerClasses.join(" "));
+        // `bgfx` can change here without SplitNoteContainer refreshing.
+        const container = this.$widget[0].parentElement;
+        if (container) {
+            markVisibleSplits(container);
+        }
+    }
 
-        this.$widget.addClass("component note-split");
+    /** The classes of the split, each entry holding one or more class names split by whitespace. */
+    private getClasses() {
+        // These are owned by SplitNoteContainer, not by the note, so they are kept as they are.
+        const classes = CONTAINER_OWNED_CLASSES.filter((cls) => this.$widget.hasClass(cls));
+        classes.push(this.isHiddenExt() ? "hidden-ext" : "visible", "component", "note-split");
 
         const note = this.noteContext?.note;
         if (!note) {
-            this.$widget.addClass("bgfx empty-note");
-            return;
+            classes.push("bgfx", "empty-note");
+            return classes;
         }
 
-        this.$widget.toggleClass("full-content-width", isFullWidthNote(note));
-
-        this.$widget.addClass(note.getCssClass());
-
-        this.$widget.addClass(utils.getNoteTypeClass(note.type));
-        this.$widget.addClass(utils.getMimeTypeClass(note.mime));
-        this.$widget.addClass(`view-mode-${this.noteContext?.viewScope?.viewMode ?? "default"}`);
-        this.$widget.addClass(note.getColorClass());
-        this.$widget.toggleClass("options", note.isOptions());
-        this.$widget.toggleClass("bgfx", hasBackgroundEffects(note));
-        this.$widget.toggleClass("protected", note.isProtected);
-
+        classes.push(
+            note.getCssClass(),
+            utils.getNoteTypeClass(note.type),
+            utils.getMimeTypeClass(note.mime),
+            `view-mode-${this.noteContext?.viewScope?.viewMode ?? "default"}`,
+            note.getColorClass()
+        );
+        if (isFullWidthNote(note) || this.isOpenedAttachmentFullWidth()) {
+            classes.push("full-content-width");
+        }
+        if (note.isOptions()) classes.push("options");
+        if (hasBackgroundEffects(note)) classes.push("bgfx");
+        if (note.isProtected) classes.push("protected");
         // Resolved rather than read straight off the label: a note with no language of its own
         // still follows the default content language.
-        this.$widget.toggleClass("rtl", isContentRightToLeft(note?.getLabelValue("language")));
+        if (isContentRightToLeft(note.getLabelValue("language"))) classes.push("rtl");
+
+        return classes;
+    }
+
+    /**
+     * Whether the attachment shown on its own in the split takes the full width. Answers `false`
+     * until `attachment_roles.js` has loaded, then refreshes the split: only the attachment view
+     * needs that module, so it stays out of the startup path.
+     */
+    private isOpenedAttachmentFullWidth() {
+        const attachment = this.getOpenedAttachment();
+        if (!attachment) {
+            return false;
+        }
+        if (!attachmentRoles) {
+            void loadAttachmentRoles().then(() => {
+                if (this.noteContext?.viewScope?.attachmentId === attachment.attachmentId) {
+                    this.refresh();
+                }
+            });
+            return false;
+        }
+        return attachmentRoles.isFullWidthAttachment(attachment);
+    }
+
+    /** The attachment last asked of froca, so one that does not exist is not asked for again. */
+    private requestedAttachmentId?: string;
+
+    /**
+     * The attachment shown on its own in the split, if froca holds it. One it does not hold yet is
+     * loaded, and the split refreshes once it arrives.
+     */
+    private getOpenedAttachment() {
+        const viewScope = this.noteContext?.viewScope;
+        const attachmentId = viewScope?.viewMode === "attachments" ? viewScope.attachmentId : undefined;
+        if (!attachmentId) {
+            return null;
+        }
+
+        const attachment = froca.attachments[attachmentId];
+        if (!attachment && this.requestedAttachmentId !== attachmentId) {
+            this.requestedAttachmentId = attachmentId;
+            void froca.getAttachment(attachmentId, true).then((loaded) => {
+                if (loaded && this.noteContext?.viewScope?.attachmentId === attachmentId) {
+                    this.refresh();
+                }
+            });
+        }
+        return attachment ?? null;
     }
 
     async entitiesReloadedEvent({ loadResults }: EventData<"entitiesReloaded">) {
         // listening on changes of note.type and CSS class
         const LABELS_CAUSING_REFRESH = ["cssClass", "language", "viewType", "color", "fullContentWidth"];
         const noteId = this.noteContext?.noteId;
+        const viewScope = this.noteContext?.viewScope;
+        const attachmentId = viewScope?.viewMode === "attachments" ? viewScope.attachmentId : undefined;
         if (
             loadResults.isNoteReloaded(noteId) ||
+            // Uploading a new file into the open attachment can change its MIME type, and so its width.
+            (attachmentId && loadResults.getAttachmentRows().some((row) => row.attachmentId === attachmentId)) ||
             // The direction of a note carrying no `#language` comes from this option, so a change to it
             // has to repaint the `rtl` class the same way a change to the label would.
             loadResults.isOptionReloaded("defaultContentLanguage") ||
@@ -88,8 +176,68 @@ export default class NoteWrapperWidget extends FlexContainer<BasicWidget> {
     }
 }
 
+let attachmentRoles: typeof import("@triliumnext/commons/src/lib/attachment_roles.js") | undefined;
+let attachmentRolesLoad: Promise<void> | undefined;
+
+function loadAttachmentRoles() {
+    attachmentRolesLoad ??= import("@triliumnext/commons/src/lib/attachment_roles.js")
+        .then((module) => { attachmentRoles = module; });
+    return attachmentRolesLoad;
+}
+
 /** Classes set on the split by `SplitNoteContainer`, based on the split's position among its siblings. */
 const CONTAINER_OWNED_CLASSES = [ "active", "last-visible" ];
+
+/**
+ * Marks the rightmost visible split of `container` with `last-visible`, and the container with
+ * `multiple-splits` while it shows more than one. Sets `first-split-bgfx` and `last-split-bgfx` on
+ * `body` while the outer visible splits are translucent, for the peek buttons on either side of
+ * `#center-pane`. Reads the DOM order, since `SplitNoteContainer` reorders the splits in place.
+ */
+export function markVisibleSplits(container: HTMLElement) {
+    const splits = [ ...container.children ]
+        .filter((child) => child.classList.contains("note-split"));
+    const visibleSplits = splits.filter((split) => !split.classList.contains("hidden-ext"));
+    const firstVisible = visibleSplits.at(0);
+    const lastVisible = visibleSplits.at(-1);
+    for (const split of splits) {
+        split.classList.toggle("last-visible", split === lastVisible);
+    }
+
+    const bodyClasses = document.body.classList;
+    container.classList.toggle("multiple-splits", visibleSplits.length > 1);
+    bodyClasses.toggle("first-split-bgfx", !!firstVisible?.classList.contains("bgfx"));
+    bodyClasses.toggle("last-split-bgfx", !!lastVisible?.classList.contains("bgfx"));
+}
+
+/**
+ * Returns an invisible, selectable element. When an editor takes focus, Chromium searches the page
+ * for the nearest selectable position, and stops at this element instead of walking through the
+ * notes of the hidden tabs.
+ */
+export function createCaretStop() {
+    const stop = document.createElement("div");
+    stop.className = "caret-stop";
+    stop.setAttribute("aria-hidden", "true");
+    stop.textContent = "\u200B";
+    return stop;
+}
+
+/**
+ * Blurs the focused element and clears the selection inside a split that is being hidden. Chromium
+ * keeps both in a `content-visibility: hidden` split, where resolving the caret walks the note.
+ */
+function releaseFocusAndSelection(split: HTMLElement) {
+    const focused = document.activeElement;
+    if (focused instanceof HTMLElement && split.contains(focused)) {
+        focused.blur();
+    }
+
+    const selection = document.getSelection();
+    if (selection?.anchorNode && split.contains(selection.anchorNode)) {
+        selection.removeAllRanges();
+    }
+}
 
 /**
  * Whether the split should be translucent (`bgfx`), letting the window background effect show through.
@@ -140,11 +288,7 @@ export function isAlwaysFullWidthByType(note: FNote) {
         return true;
     }
 
-    if (["code", "image", "mermaid", "book", "render", "canvas", "webView", "noteMap", "mindMap", "spreadsheet"].includes(note.type)) {
-        return true;
-    }
-
-    if (note.type === "file" && (note.mime === "application/pdf" || note.mime.startsWith("video/") || note.mime.startsWith("audio/"))) {
+    if (isFullWidthNoteType(note.type, note.mime)) {
         return true;
     }
 

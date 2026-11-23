@@ -1,16 +1,20 @@
-import { BUILTIN_ATTRIBUTES } from "@triliumnext/commons";
+import BUILTIN_ATTRIBUTES from "@triliumnext/commons/src/lib/builtin_attributes.js";
 import clsx from "clsx";
 import { useEffect, useState } from "preact/hooks";
 
 import FNote from "../../entities/fnote";
 import attributes from "../../services/attributes";
 import { t } from "../../services/i18n";
-import { isElectron, openInAppHelpFromUrl } from "../../services/utils";
+import { isElectron } from "../../services/utils";
 import { BadgeWithDropdown } from "../react/Badge";
 import { FormDropdownDivider, FormListItem } from "../react/FormList";
 import FormToggle from "../react/FormToggle";
-import { useNoteContext, useNoteProperty, useTriliumEvent } from "../react/hooks";
-import { BookProperty, ViewProperty } from "../react/NotePropertyMenu";
+import { openHelpPageFor } from "../react/HelpButton";
+import { useTriliumEvent } from "../react/hooks/events";
+import { useNoteProperty } from "../react/hooks/note";
+import { useNoteContext } from "../react/hooks/note_context";
+import { WithLazyModule } from "../react/LazyComponent";
+import type { BookProperty } from "../react/NotePropertyMenu";
 
 const NON_DANGEROUS_ACTIVE_CONTENT = [ "appCss", "appTheme" ];
 const DANGEROUS_ATTRIBUTES = BUILTIN_ATTRIBUTES.filter(a => a.isDangerous || NON_DANGEROUS_ACTIVE_CONTENT.includes(a.name));
@@ -22,11 +26,13 @@ interface ActiveContentInfo {
     canToggleEnabled: boolean;
 }
 
+const loadNotePropertyMenu = () => import("../react/NotePropertyMenu");
+
 const executeOption: BookProperty = {
     type: "button",
     icon: "bx bx-play",
     label: t("active_content_badges.menu_execute_now"),
-    onClick: context => context.triggerCommand("runActiveNote")
+    onClick: context => context.triggerCommand("runActiveNote", { ntxId: context.ntxId })
 };
 
 const typeMappings: Record<ActiveContentInfo["type"], {
@@ -104,6 +110,8 @@ const typeMappings: Record<ActiveContentInfo["type"], {
         title: t("active_content_badges.type_widget"),
         icon: "bx bxs-widget",
         helpPage: "MgibgPcfeuGz",
+        apiDocsPage: "Q2z6av6JZVWm",
+        electronApiDocsPage: "GFXVHyblVN3d",
         additionalOptions: [
             {
                 type: "button",
@@ -154,18 +162,18 @@ const typeMappings: Record<ActiveContentInfo["type"], {
 };
 
 export function ActiveContentBadges() {
-    const { note } = useNoteContext();
+    const { note, ntxId } = useNoteContext();
     const info = useActiveContentInfo(note);
 
     return (note && info &&
         <>
             {info.canToggleEnabled && <ActiveContentToggle info={info} note={note} />}
-            <ActiveContentBadge info={info} note={note} />
+            <ActiveContentBadge info={info} note={note} ntxId={ntxId} />
         </>
     );
 }
 
-function ActiveContentBadge({ info, note }: { note: FNote, info: ActiveContentInfo }) {
+function ActiveContentBadge({ info, note, ntxId }: { note: FNote, info: ActiveContentInfo, ntxId: string | null | undefined }) {
     const { title, icon, helpPage, apiDocsPage, electronApiDocsPage, additionalOptions } = typeMappings[info.type];
     return (
         <BadgeWithDropdown
@@ -176,26 +184,28 @@ function ActiveContentBadge({ info, note }: { note: FNote, info: ActiveContentIn
         >
             {additionalOptions?.length && (
                 <>
-                    {additionalOptions?.map((property, i) => (
-                        <ViewProperty key={i} note={note} property={property} />
-                    ))}
+                    <WithLazyModule load={loadNotePropertyMenu}>
+                        {({ ViewProperty }) => additionalOptions.map((property, i) => (
+                            <ViewProperty key={i} note={note} property={property} />
+                        ))}
+                    </WithLazyModule>
                     <FormDropdownDivider />
                 </>
             )}
 
             <FormListItem
                 icon="bx bx-help-circle"
-                onClick={() => openInAppHelpFromUrl(helpPage)}
+                onClick={() => openHelpPageFor(helpPage, ntxId)}
             >{t("active_content_badges.menu_docs")}</FormListItem>
 
             {apiDocsPage && <FormListItem
                 icon="bx bx-book-content"
-                onClick={() => openInAppHelpFromUrl(apiDocsPage)}
+                onClick={() => openHelpPageFor(apiDocsPage, ntxId)}
             >{t("code_buttons.trilium_api_docs_button_title")}</FormListItem>}
 
             {electronApiDocsPage && isElectron() && <FormListItem
                 icon="bx bx-window-alt"
-                onClick={() => openInAppHelpFromUrl(electronApiDocsPage)}
+                onClick={() => openHelpPageFor(electronApiDocsPage, ntxId)}
             >{t("code_buttons.electron_api_docs_button_title")}</FormListItem>}
         </BadgeWithDropdown>
     );

@@ -8,12 +8,16 @@ export default class LogService {
         console.info(message);
     }
 
+    warn(message: string | Error | unknown) {
+        console.warn("WARNING: ", message);
+    }
+
     error(message: string | Error | unknown) {
         console.error("ERROR: ", message);
     }
 
     banner(message: string | undefined) {
-        if (!message) return;
+        if (!message?.trim()) return;
         const termWidth = (typeof process !== "undefined" && process.stdout?.columns) || 80;
         const maxContent = termWidth - 4; // border + padding
         const words = message.split(" ");

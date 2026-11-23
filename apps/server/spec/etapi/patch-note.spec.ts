@@ -45,7 +45,7 @@ describe("etapi/patch-note", () => {
     it("patches type, mime and creation dates", async () => {
         const changes = {
             "title": "Wassup",
-            "type": "html",
+            "type": "text",
             "mime": "text/html",
             "dateCreated": "2023-08-21 23:38:51.123+0200",
             "utcDateCreated": "2023-08-21 23:38:51.123Z"
@@ -78,6 +78,28 @@ describe("etapi/patch-note", () => {
             })
             .expect(400);
         expect(response.body.code).toStrictEqual("PROPERTY_VALIDATION_ERROR");
+    });
+
+    it("refuses a type outside the note type set", async () => {
+        const response = await supertest(app)
+            .patch(`/etapi/notes/${createdNoteId}`)
+            .auth("etapi", token, { "type": "basic"})
+            .send({ type: "EVILTYPE", mime: "application/x-anything" })
+            .expect(400);
+        expect(response.body.code).toStrictEqual("PROPERTY_VALIDATION_ERROR");
+        await expectNoteToMatch({ type: "text", mime: "text/html" });
+    });
+
+    it("refuses a MIME type that is not a string, for an image note too", async () => {
+        for (const body of [ { mime: 5 }, { type: "image", mime: 5 } ]) {
+            const response = await supertest(app)
+                .patch(`/etapi/notes/${createdNoteId}`)
+                .auth("etapi", token, { "type": "basic"})
+                .send(body);
+            expect(response.status).toBe(400);
+            expect(response.body.code).toStrictEqual("PROPERTY_VALIDATION_ERROR");
+            await expectNoteToMatch({ type: "text", mime: "text/html" });
+        }
     });
 
     it("rejects turning a note into an image with a non-image MIME", async () => {

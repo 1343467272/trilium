@@ -1,6 +1,6 @@
 import { render } from "preact";
 import { act } from "preact/test-utils";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import $ from "jquery";
 
@@ -8,8 +8,11 @@ import Component from "../../../components/component";
 import type FNote from "../../../entities/fnote";
 import type { Attribute } from "../../../services/attribute_parser";
 import type { AttributeDetailOpts } from "../../attribute_widgets/attribute_detail";
+import { preloadDropdownPopups } from "../../react/Dropdown";
 import { ParentComponent } from "../../react/react_utils";
 import BoardGroupBy, { groupingOptions } from "./group_by";
+
+beforeAll(() => preloadDropdownPopups());
 
 // i18next is never initialised under test, so a translated title would come back undefined. What is
 // interpolated is carried along, for the titles these tests are about.
@@ -149,7 +152,7 @@ describe("BoardGroupBy", () => {
     });
 
     /** Renders the dropdown with its menu open, which is where its items are drawn. */
-    async function setup(current = "status") {
+    async function setup(current = "status", canCreate = true) {
         const onSelect = vi.fn();
         const mountPoint = document.createElement("div");
         container = mountPoint;
@@ -160,6 +163,7 @@ describe("BoardGroupBy", () => {
                 <ParentComponent.Provider value={new Component()}>
                     <BoardGroupBy
                         note={board()}
+                        canCreate={canCreate}
                         options={groupingOptions(board(), undefined, current)}
                         current={current}
                         onSelect={onSelect}
@@ -182,6 +186,13 @@ describe("BoardGroupBy", () => {
 
     const items = (mountPoint: HTMLElement) =>
         [ ...document.querySelectorAll(".dropdown-menu .dropdown-item") ];
+
+    it("offers no grouping to make where none can be, only the ones the board has", async () => {
+        const { mountPoint } = await setup("status", false);
+
+        expect(items(mountPoint).map(item => item.textContent?.trim())).toEqual([ "Status", "Priority" ]);
+        expect(document.querySelector(".dropdown-menu .dropdown-divider")).toBeNull();
+    });
 
     it("offers making a grouping after the ones the board has, behind a divider", async () => {
         const { mountPoint } = await setup();

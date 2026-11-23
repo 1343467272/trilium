@@ -1,85 +1,64 @@
-// ck-find-result and ck-find-result_selected are the styles ck-editor
-// uses for highlighting matches, use the same one on CodeMirror
-// for consistency
-import type Mark from "mark.js";
-import { expandAncestorDetails } from "../services/collapsible.js";
+import { revealElement } from "../services/bookmark_jump.js";
+import {
+    addHighlights, findRegExpRanges, findTermRanges, removeHighlights, scrollRangeIntoView,
+    WindowedHighlight
+} from "../services/highlight_matches.js";
 import utils from "../services/utils.js";
 import type FindWidget from "./find.js";
-import type { FindResult } from "./find.js";
+import type { CloseGuard } from "./find.js";
+import MergedFind, {
+    type FindCheck, type FindOptions, type FindTarget, getScrollingContainerTop,
+    type HighlightOptions, type HostFindTarget, toFindResult
+} from "./merged_find";
+import { watchEmbedFindTargets } from "./type_widgets/text/content_embed_tools";
 
-const FIND_RESULT_SELECTED_CSS_CLASSNAME = "ck-find-result_selected";
-const FIND_RESULT_CSS_CLASSNAME = "ck-find-result";
-// Muted highlight for the non-seed tokens of a multi-token search (jump-to-match). Styled in the
-// FindWidget's style block. Deliberately distinct from FIND_RESULT_CSS_CLASSNAME so these marks are
-// not counted as primary matches and Enter/F3 keeps cycling only the seed.
-const FIND_RESULT_SECONDARY_CSS_CLASSNAME = "find-result-secondary";
+// The content of an embed searches itself, and its title row is not searched.
+const EMBED_EXCLUSION = [ ".include-note-wrapper" ];
 
+/** "Search in note" in the rendered content of a note, such as a read-only text note. */
 export default class FindInHtml {
 
     private parent: FindWidget;
-    private currentIndex: number;
-    private $results: JQuery<HTMLElement> | null;
-    private mark?: Mark;
+    private target: HtmlNoteFindTarget | null = null;
+    private find: MergedFind | null = null;
+    private current: number | null = null;
+    private stopWatching: (() => void) | null = null;
 
     constructor(parent: FindWidget) {
         this.parent = parent;
-        this.currentIndex = 0;
-        this.$results = null;
     }
 
-    async performFind(searchTerm: string, matchCase: boolean, wholeWord: boolean) {
+    /** Searches, or returns `null` without a change once `check` fails after an await. */
+    async performFind(
+        searchTerm: string, matchCase: boolean, wholeWord: boolean, check: FindCheck = () => true
+    ) {
         const $content = await this.parent?.noteContext?.getContentElement();
-        if (!$content || !$content.length) {
-            return Promise.resolve({ totalFound: 0, currentFound: 0 });
+        if (!check()) return null;
+        const content = $content?.[0];
+        if (!content) {
+            return toFindResult(0, null);
         }
 
-        if (!this.mark) {
-            this.mark = new (await import("mark.js")).default($content[0]);
-        }
-
-        const wholeWordChar = wholeWord ? "\\b" : "";
-        const regExp = new RegExp(wholeWordChar + utils.escapeRegExp(searchTerm) + wholeWordChar, matchCase ? "g" : "gi");
-
-        return new Promise<FindResult>((res) => {
-            this.mark!.unmark({
-                done: () => {
-                    this.mark!.markRegExp(regExp, {
-                        element: "span",
-                        className: FIND_RESULT_CSS_CLASSNAME,
-                        done: async () => {
-                            this.$results = $content.find(`.${FIND_RESULT_CSS_CLASSNAME}`);
-                            const scrollingContainer = $content[0].closest('.scrolling-container');
-                            const containerTop = scrollingContainer?.getBoundingClientRect().top ?? 0;
-                            const closestIndex = this.$results.toArray().findIndex(el => el.getBoundingClientRect().top >= containerTop);
-                            this.currentIndex = closestIndex >= 0 ? closestIndex : 0;
-
-                            await this.jumpTo();
-
-                            res({
-                                totalFound: this.$results.length,
-                                currentFound: this.$results.length > 0 ? this.currentIndex + 1 : 0
-                            });
-                        }
-                    });
-                }
-            });
-        });
+        const find = this.getFind(content);
+        const totalFound = await find.find(searchTerm, { matchCase, wholeWord }, check);
+        if (!check()) return null;
+        this.current = totalFound ? find.getStartMatch(getScrollingContainerTop(content)) : null;
+        find.highlight(this.current);
+        return toFindResult(totalFound, this.current);
     }
 
-    async findNext(direction: -1 | 1, currentFound: number, nextFound: number) {
-        if (this.$results?.length) {
-            this.currentIndex += direction;
+    /** Makes match `nextFound` the current one. Returns whether it did. */
+    async findNext(
+        _direction: number, _currentFound: number, nextFound: number, options?: HighlightOptions
+    ) {
+        this.current = nextFound;
+        this.find?.highlight(nextFound, options);
+        return true;
+    }
 
-            if (this.currentIndex < 0) {
-                this.currentIndex = this.$results.length - 1;
-            }
-
-            if (this.currentIndex > this.$results.length - 1) {
-                this.currentIndex = 0;
-            }
-
-            await this.jumpTo();
-        }
+    /** The targets of the matches, for the scroll rail. */
+    getMatchTargets(options: { isStale: boolean }) {
+        return this.find?.getMatchTargets(options) ?? [];
     }
 
     /**
@@ -88,42 +67,172 @@ export default class FindInHtml {
      * only the primary (seed) matches counted by {@link performFind}.
      *
      * Only this read-only HTML handler supports the multi-token pass; the editable CKEditor and
-     * CodeMirror handlers stay seed-only, because their find engines highlight a single term. These
-     * marks reuse the mark.js instance created by {@link performFind}, so any later `unmark()`
-     * clears them too. mark.js escapes each keyword, so a regex metacharacter cannot inject.
+     * CodeMirror handlers stay seed-only, because their find engines highlight a single term.
      */
     async highlightExtraTokens(tokens: string[]) {
-        const mark = this.mark;
-        const cleaned = tokens.filter((token) => token.length > 0);
-        if (!mark || cleaned.length === 0) {
+        await this.target?.highlightExtraTokens(tokens);
+    }
+
+    /** Removes the matches and the watchers. Rendered content takes no selection and no focus. */
+    async findBoxClosed(_guard?: CloseGuard) {
+        this.stopWatching?.();
+        this.stopWatching = null;
+        this.find?.close(null);
+        this.current = null;
+    }
+
+    /** The search of `content`, which follows the embeds that it holds. */
+    private getFind(content: HTMLElement) {
+        if (!this.find || this.target?.root !== content) {
+            this.find?.close(null);
+            this.stopWatching?.();
+            this.stopWatching = null;
+            this.target = new HtmlNoteFindTarget(content);
+            this.find = new MergedFind(this.target);
+        }
+
+        this.stopWatching ??= watchEmbedFindTargets(content,
+            (reason) => this.parent.invalidateResults(reason));
+        return this.find;
+    }
+
+}
+
+/** Searches rendered content, which it cannot change, by highlighting the ranges of its matches. */
+export class HtmlFindTarget implements FindTarget {
+
+    protected matches: Range[] = [];
+    private current: Range | null = null;
+    private readonly drawnMatches: WindowedHighlight;
+    /**
+     * The extra tokens, in the muted style. They are not matches, so Enter and F3 keep cycling
+     * only {@link matches}.
+     */
+    private readonly drawnExtraTokens: WindowedHighlight;
+
+    /** Searches `root`, apart from the elements that the `exclude` selectors match. */
+    constructor(readonly root: HTMLElement, private readonly exclude: string[] = []) {
+        this.drawnMatches = new WindowedHighlight("find-result", root);
+        this.drawnExtraTokens = new WindowedHighlight("find-result-secondary", root);
+    }
+
+    async find(term: string, { matchCase, wholeWord }: FindOptions) {
+        this.unmark();
+        if (!term) {
+            return 0;
+        }
+
+        const wholeWordChar = wholeWord ? "\\b" : "";
+        const regExp = new RegExp(
+            wholeWordChar + utils.escapeRegExp(term) + wholeWordChar,
+            matchCase ? "g" : "gi"
+        );
+        this.matches = findRegExpRanges(this.root, regExp, { exclude: this.exclude });
+        this.drawnMatches.add(this.matches);
+        return this.matches.length;
+    }
+
+    highlight(index: number | null, options?: HighlightOptions) {
+        if (this.current) {
+            removeHighlights("find-result-selected", [ this.current ]);
+        }
+        this.current = index === null ? null : this.matches[index] ?? null;
+        if (!this.current) {
             return;
         }
 
-        return new Promise<void>((res) => {
-            mark.mark(cleaned, {
-                element: "span",
-                className: FIND_RESULT_SECONDARY_CSS_CLASSNAME,
-                separateWordSearch: false,
-                done: () => res()
-            });
+        // Reveal matches inside collapsed <details> and inactive tabs, like native find-in-page.
+        // Must precede scrolling so the target is laid out first (#10616).
+        const parent = this.current.startContainer.parentElement;
+        if (parent) {
+            revealElement(parent, this.root);
+        }
+        scrollRangeIntoView(this.current, options?.isInstant ? "instant" : undefined);
+        addHighlights("find-result-selected", [ this.current ]);
+    }
+
+    getFirstMatchBelow(top: number) {
+        const index = this.matches.findIndex((match) => match.getBoundingClientRect().top >= top);
+        return index >= 0 ? index : null;
+    }
+
+    /** The ranges of the matches. One whose content was written again names nothing. */
+    getMatchTargets() {
+        return [ ...this.matches ];
+    }
+
+    countMatches() {
+        return this.matches.length;
+    }
+
+    canReplace() {
+        return false;
+    }
+
+    async replace() {
+        return this.matches.length;
+    }
+
+    async replaceAll() {
+        return this.matches.length;
+    }
+
+    close() {
+        this.unmark();
+        return null;
+    }
+
+    /**
+     * Highlights `tokens` with the muted secondary style, which the primary matches keep
+     * cycling through. The tokens match literally, so a regex metacharacter cannot inject.
+     */
+    async highlightExtraTokens(tokens: string[]) {
+        this.drawnExtraTokens.add(findTermRanges(this.root, tokens, { exclude: this.exclude }));
+    }
+
+    /**
+     * Removes the ranges of this target only, not those of the other targets in its root, such as
+     * the embeds in a note.
+     */
+    private unmark() {
+        this.drawnMatches.clear();
+        this.drawnExtraTokens.clear();
+        if (this.current) {
+            removeHighlights("find-result-selected", [ this.current ]);
+        }
+        this.matches = [];
+        this.current = null;
+    }
+
+}
+
+/**
+ * Searches the rendered content of a note, or of an embed box, whose embeds search their own
+ * content.
+ */
+export class HtmlNoteFindTarget extends HtmlFindTarget implements HostFindTarget {
+
+    constructor(root: HTMLElement) {
+        super(root, EMBED_EXCLUSION);
+    }
+
+    /** The embeds in the content that no other embed in it holds. */
+    getEmbeds() {
+        return [ ...this.root.querySelectorAll<HTMLElement>(".include-note") ].filter((embed) => {
+            const outer = embed.parentElement?.closest(".include-note");
+            return !outer || !this.root.contains(outer);
         });
     }
 
-    async findBoxClosed(totalFound: number, currentFound: number) {
-        // A single unmark() clears both the primary (seed) marks and any secondary marks from
-        // highlightExtraTokens, since they share this mark.js instance.
-        this.mark?.unmark();
+    countMatchesBefore(embed: HTMLElement) {
+        return this.matches.filter(
+            (match) => embed.compareDocumentPosition(match.startContainer) & Node.DOCUMENT_POSITION_PRECEDING
+        ).length;
     }
 
-    async jumpTo() {
-        if (this.$results?.length) {
-            const $current = this.$results.eq(this.currentIndex);
-            this.$results.removeClass(FIND_RESULT_SELECTED_CSS_CLASSNAME);
-            // Reveal matches inside collapsed <details>, like native find-in-page.
-            // Must precede scrollIntoView so the target is laid out first (#10616).
-            expandAncestorDetails($current[0]);
-            $current[0].scrollIntoView({ block: 'center', inline: 'center'});
-            $current.addClass(FIND_RESULT_SELECTED_CSS_CLASSNAME);
+    revealEmbed(embed: HTMLElement | null) {
+        if (embed) {
+            revealElement(embed, this.root);
         }
     }
 }

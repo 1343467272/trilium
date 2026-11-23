@@ -4,6 +4,7 @@ import appContext from "../components/app_context.js";
 import FNote from "../entities/fnote.js";
 import { buildNote } from "../test/easy-froca";
 import froca from "./froca";
+import noteAttributeCache from "./note_attribute_cache.js";
 import server from "./server.js";
 
 // `logError` / `logInfo` are window globals referenced by froca; ensure they exist.
@@ -53,6 +54,71 @@ describe("loadInitialTree", () => {
         expect(server.get).toHaveBeenCalledWith("tree");
         expect(froca.notes[noteId]).toBeInstanceOf(FNote);
         (globalThis as any).glob.dbInitialized = false;
+    });
+});
+
+describe("getNotes", () => {
+    it("waits for the initial tree before loading what froca does not hold", async () => {
+        const realInitialized = froca.initializedPromise;
+        let finishInitialTree = () => {};
+        froca.initializedPromise = new Promise<void>((resolve) => {
+            finishInitialTree = resolve;
+        });
+        const reloadNotes = vi.spyOn(froca, "reloadNotes").mockResolvedValue();
+
+        try {
+            const pending = froca.getNote("startup-launcher", true);
+            buildNote({ id: "startup-launcher", title: "From the initial tree" });
+            finishInitialTree();
+
+            expect((await pending)?.title).toBe("From the initial tree");
+            expect(reloadNotes).not.toHaveBeenCalled();
+        } finally {
+            froca.initializedPromise = realInitialized;
+        }
+    });
+
+    it("still loads a note once the initial tree failed", async () => {
+        const realInitialized = froca.initializedPromise;
+        froca.initializedPromise = Promise.reject(new Error("tree failed"));
+        const reloadNotes = vi.spyOn(froca, "reloadNotes").mockResolvedValue();
+
+        try {
+            await froca.getNote("not-in-the-tree", true);
+            expect(reloadNotes).toHaveBeenCalledWith([ "not-in-the-tree" ]);
+        } finally {
+            froca.initializedPromise = realInitialized;
+        }
+    });
+});
+
+describe("reloadAll", () => {
+    it("reloads the initial tree, then every note froca held outside it", async () => {
+        const held = buildNote({ title: "Held outside the tree" });
+        const calls: string[] = [];
+        vi.spyOn(froca, "loadInitialTree").mockImplementation(async () => {
+            calls.push("loadInitialTree");
+        });
+        vi.spyOn(froca, "reloadNotes").mockImplementation(async (noteIds) => {
+            calls.push("reloadNotes");
+            expect(noteIds).toContain(held.noteId);
+        });
+
+        await froca.reloadAll();
+
+        expect(calls).toEqual([ "loadInitialTree", "reloadNotes" ]);
+    });
+
+    it("drops the attribute lists cached from the previous objects", async () => {
+        const note = buildNote({ title: "Cached", "#color": "red" });
+        expect(note.getAttributes()).toHaveLength(1);
+        expect(noteAttributeCache.attributes[note.noteId]).toHaveLength(1);
+        vi.spyOn(froca, "loadInitialTree").mockResolvedValue(undefined);
+        vi.spyOn(froca, "reloadNotes").mockResolvedValue(undefined);
+
+        await froca.reloadAll();
+
+        expect(note.noteId in noteAttributeCache.attributes).toBe(false);
     });
 });
 
@@ -382,6 +448,43 @@ describe("getNotes / getNote / noteExists / getNoteFromCache", () => {
         expect(trace).toHaveBeenCalled();
     });
 
+
+    it("loads the notes asked for at the same time in one request, and a note asked for twice once", async () => {
+        const row = (noteId: string) => ({ noteId, title: noteId, type: "text", mime: "text/html", isProtected: false, blobId: "" });
+        server.post = vi.fn(async (_url: string, { noteIds }: { noteIds: string[] }) => ({
+            notes: noteIds.map(row), branches: [], attributes: []
+        })) as unknown as typeof server.post;
+
+        const notes = await Promise.all([
+            froca.getNote("batched-a"),
+            froca.getNote("batched-b"),
+            froca.getNote("batched-a"),
+            froca.getNotes([ "batched-b", "batched-c" ])
+        ]);
+
+        expect(server.post).toHaveBeenCalledTimes(1);
+        expect(server.post).toHaveBeenCalledWith("tree/load", { noteIds: [ "batched-a", "batched-b", "batched-c" ] });
+        expect(notes.flat().map((note) => note?.noteId)).toEqual([ "batched-a", "batched-b", "batched-a", "batched-b", "batched-c" ]);
+    });
+
+    it("lets a note asked for while its load is under way wait for that load", async () => {
+        const pending: (() => void)[] = [];
+        server.post = vi.fn(() => new Promise((resolve) => {
+            pending.push(() => resolve({ notes: [ { noteId: "in-flight", title: "In flight", type: "text", mime: "text/html", isProtected: false, blobId: "" } ], branches: [], attributes: [] }));
+        })) as unknown as typeof server.post;
+
+        const first = froca.getNote("in-flight");
+        await vi.waitFor(() => expect(server.post).toHaveBeenCalledTimes(1));
+        const second = froca.getNote("in-flight");
+        // Long enough for the second call to send a request of its own, if it were to.
+        await new Promise((resolve) => setTimeout(resolve));
+        for (const finish of pending) finish();
+
+        expect((await first)?.title).toBe("In flight");
+        expect((await second)?.title).toBe("In flight");
+        expect(server.post).toHaveBeenCalledTimes(1);
+    });
+
     it("getNotes silently drops unknowns when silentNotFoundError is set", async () => {
         server.post = vi.fn(async () => ({ notes: [], branches: [], attributes: [] })) as typeof server.post;
         const trace = vi.spyOn(console, "trace").mockImplementation(() => {});
@@ -405,6 +508,9 @@ describe("getNotes / getNote / noteExists / getNoteFromCache", () => {
 
         const note = buildNote({ id: "gn-real", title: "Real" });
         await expect(froca.getNote(note.noteId)).resolves.toBe(note);
+
+        server.post = vi.fn(async () => ({ notes: [], branches: [], attributes: [] })) as typeof server.post;
+        await expect(froca.getNote("gn-missing", true)).resolves.toBeNull();
     });
 
     it("getNoteFromCache throws on empty id and returns the cached note otherwise", () => {

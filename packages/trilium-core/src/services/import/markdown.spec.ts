@@ -1,4 +1,7 @@
-import { trimIndentation } from "@triliumnext/commons";
+import {
+    getMarkdownNameFromCKEditorLanguage, MIME_TYPES_DICT, normalizeMimeTypeForCKEditor,
+    trimIndentation
+} from "@triliumnext/commons";
 import { describe, expect, it } from "vitest";
 
 import markdownExportService from "../export/markdown.js";
@@ -25,6 +28,33 @@ describe("markdown", () => {
             expect(result).toBe(trimIndentation`\
                 <pre><code class="${output}">Hi</code></pre>`);
         }
+    });
+
+    it("round-trips the language of every named code block through the Markdown exporter", () => {
+        const languages = MIME_TYPES_DICT
+            .map((mimeType) => normalizeMimeTypeForCKEditor(mimeType.mime))
+            .filter((language) => getMarkdownNameFromCKEditorLanguage(language) !== undefined);
+        expect(languages).toEqual(expect.arrayContaining([
+            "text-plain", "text-x-csrc", "text-x-c-src", "text-typescript-jsx", "text-x-scala",
+            "text-jinja2", "text-x-mysql", "text-x-spreadsheet"
+        ]));
+
+        for (const language of languages) {
+            const original = `<pre><code class="language-${language}">Hi</code></pre>`;
+            const markdown = markdownExportService.toMarkdown(original);
+            expect(markdownService.renderToHtml(markdown, "Title"), language)
+                .toStrictEqual(original);
+        }
+    });
+
+    it("keeps a code block that ends in a blank line the same through repeated round trips", () => {
+        const markdown = "```\nfoo\n\n```";
+        const html = markdownService.renderToHtml(markdown, "Title");
+        expect(html).toBe(`<pre><code class="language-text-x-trilium-auto">foo\n</code></pre>`);
+
+        const exported = markdownExportService.toMarkdown(html);
+        expect(exported).toBe(markdown);
+        expect(markdownService.renderToHtml(exported, "Title")).toBe(html);
     });
 
     it("rewrites language of unknown language tags", () => {
@@ -593,6 +623,20 @@ $$`;
                 .toStrictEqual(`<details class="trilium-collapsible">Just some <em>text</em> here</details>`);
         });
 
+        it("round-trips a code block with blank lines inside a collapsible block or a table kept as HTML", () => {
+            const code = `<pre><code class="language-text-x-trilium-auto">a {\n}\n\n  \n:root {\n    --x: 1;\n}</code></pre>`;
+
+            for (const html of [
+                `<details class="trilium-collapsible"><summary>S</summary>${code}<p>After</p></details><p>Outside</p>`,
+                `<figure class="table"><table><tbody><tr><td>${code}</td><td>B</td></tr></tbody></table></figure><p>Outside</p>`
+            ]) {
+                const markdown = markdownExportService.toMarkdown(html);
+
+                expect(markdown).toContain("<pre>");
+                expect(markdownService.renderToHtml(markdown, "Title")).toStrictEqual(html);
+            }
+        });
+
         it("leaves a <details> shown inside a fenced code block as escaped sample text", () => {
             const input = trimIndentation`\
                 \`\`\`html
@@ -663,6 +707,139 @@ $$`;
                 expect(markdownService.renderToHtml(markdown, "Title")).toStrictEqual(original);
                 expect(markdownExportService.toMarkdown(markdownService.renderToHtml(markdown, "Title"))).toStrictEqual(markdown);
             }
+        });
+    });
+
+    describe("tabs blocks", () => {
+        const tab = (title: string, panel: string) =>
+            `<section class="trilium-tab"><p class="trilium-tab-title">${title}</p><div class="trilium-tab-panel">${panel}</div></section>`;
+        const tabs = (...items: string[]) => `<div class="trilium-tabs">${items.join("")}</div>`;
+
+        it("renders MkDocs tabbed sections as a tabs block, starting a new block at ===!", () => {
+            const input = trimIndentation`\
+                === "Windows"
+
+                    Run the **installer**.
+
+                === "**Linux** <span class="tn-icon bx bxl-tux"></span>"
+                    - One
+                    - Two
+
+                ===! "Other"
+
+                    x
+
+                After.`;
+            expect(markdownService.renderToHtml(input, "Title")).toStrictEqual(
+                tabs(
+                    tab("Windows", "<p>Run the <strong>installer</strong>.</p>"),
+                    tab(`<strong>Linux</strong> <span class="tn-icon bx bxl-tux"></span>`, "<ul><li>One</li><li>Two</li></ul>")
+                ) +
+                tabs(tab("Other", "<p>x</p>")) +
+                "<p>After.</p>"
+            );
+        });
+
+        it("round-trips tabs blocks through the Markdown exporter", () => {
+            const original =
+                tabs(
+                    tab("Windows", "<p>Run the <strong>installer</strong>.</p><ul><li>One</li><li>Two</li></ul>"),
+                    tab("&nbsp;", "<p>&nbsp;</p>"),
+                    tab(`<span class="tn-icon bx bxl-chrome"></span>&nbsp;Chrome`, "<p>c</p>"),
+                    tab("<strong>Bold</strong>, <em>italic</em> and <code>code</code>", "<p>f</p>"),
+                    tab("a &lt;b&gt; *c* \"d\"", "<p>t</p>"),
+                    tab("Nested", tabs(tab("A", "<p>a</p>"), tab("B", "<blockquote><p>b</p></blockquote>")))
+                ) +
+                tabs(tab("Next", "<p>y</p>"));
+            expect(markdownService.renderToHtml(markdownExportService.toMarkdown(original), "Title"))
+                .toStrictEqual(original);
+        });
+    });
+
+    describe("multicolumn layouts", () => {
+        const column = (content: string) =>
+            `<div class="trilium-multicolumn-column">${content}</div>`;
+        const layout = (ratios: string, ...columns: string[]) =>
+            `<div class="trilium-multicolumn-layout" data-trilium-column-ratios="${ratios}">` +
+            `${columns.map(column).join("")}</div>`;
+        const roundTrip = (html: string) =>
+            markdownService.renderToHtml(markdownExportService.toMarkdown(html), "Title");
+
+        it("round-trips layouts through the Markdown exporter unchanged", () => {
+            const table = "<figure class=\"table\"><table><tbody>" +
+                "<tr><td>a</td><td>b</td></tr>" +
+                "</tbody></table></figure>";
+            const collapsible = "<details class=\"trilium-collapsible\">" +
+                "<summary>S</summary><p>Hidden</p>" +
+                "</details>";
+            const code = "<pre><code class=\"language-text-x-yaml\">a:\n\n  b: 1</code></pre>";
+            const original =
+                "<p>Before</p>" +
+                layout("1-3",
+                    "<p>First <strong>column</strong></p><ul><li>One</li><li>Two</li></ul>",
+                    `<h2>Second</h2>${code}`
+                ) +
+                layout("1-1",
+                    layout("1-2-1", "<p>Inner</p>", "<p>&nbsp;</p>", table),
+                    collapsible
+                ) +
+                layout("3-1", "<p>&nbsp;</p>", "<p>&nbsp;</p>") +
+                "<p>After</p>";
+            const markdown = markdownExportService.toMarkdown(original);
+
+            expect(roundTrip(original)).toStrictEqual(original);
+            expect(markdownExportService.toMarkdown(roundTrip(original))).toStrictEqual(markdown);
+        });
+
+        it("leaves the class name in plain text and stray text inside a layout alone", () => {
+            expect(markdownService.renderToHtml("The trilium-multicolumn-layout class.", "Title"))
+                .toBe("<p>The trilium-multicolumn-layout class.</p>");
+
+            const stray = `<div class="trilium-multicolumn-layout" data-trilium-column-ratios="1-1">` +
+                `stray${column("<p>A</p>")}${column("<p>B</p>")}</div>`;
+            const result = markdownService.renderToHtml(stray, "Title");
+            expect(result).toContain("stray");
+            expect(result).toContain(column("<p>A</p>"));
+        });
+
+        it("round-trips a layout inside a tab panel", () => {
+            const twoColumns = layout("1-1", "<p>A</p>", "<p>B</p>");
+            const panel = `<div class="trilium-tab-panel">${twoColumns}</div>`;
+            const original =
+                "<div class=\"trilium-tabs\"><section class=\"trilium-tab\">" +
+                `<p class="trilium-tab-title">T</p>${panel}` +
+                "</section></div>";
+            expect(roundTrip(original)).toStrictEqual(original);
+        });
+
+        it("round-trips asides, empty ones and those in a column, unchanged", () => {
+            const original =
+                "<p>Before</p>" +
+                "<aside data-position=\"wrap-right\"><p>Side <strong>note</strong></p>" +
+                "<ul><li>One</li><li>Two</li></ul></aside>" +
+                "<aside style=\"--tn-background:#555555;background-color:#555555;\" " +
+                "data-position=\"wrap-right\"><p>As inserted</p></aside>" +
+                "<aside style=\"--tn-background:#e64d4d;background-color:#e64d4d;\">" +
+                "<p>Red</p></aside>" +
+                "<p>Beside</p>" +
+                "<aside><p>&nbsp;</p></aside>" +
+                layout("1-1",
+                    "<aside data-position=\"left\"><h2>In a column</h2></aside>", "<p>B</p>");
+            const markdown = markdownExportService.toMarkdown(original);
+
+            expect(roundTrip(original)).toStrictEqual(original);
+            expect(markdownExportService.toMarkdown(roundTrip(original))).toStrictEqual(markdown);
+
+            const resized = "<aside style=\"--aside-width:18em;\"><p>A</p></aside>";
+            expect(roundTrip(resized)).toStrictEqual(resized);
+        });
+
+        it("reads a bare aside as a new one, and one of raw text in the flow", () => {
+            expect(markdownService.renderToHtml("<aside>\n\nA *side* note\n\n</aside>", "Title"))
+                .toBe("<aside style=\"--tn-background:#555555;background-color:#555555;\" " +
+                    "data-position=\"wrap-right\"><p>A <em>side</em> note</p></aside>");
+            expect(markdownService.renderToHtml("<aside>\nA callout\n\n</aside>", "Title"))
+                .toBe("<aside>\nA callout</aside>");
         });
     });
 });

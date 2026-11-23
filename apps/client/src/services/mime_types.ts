@@ -1,23 +1,28 @@
-import { normalizeMimeTypeForCKEditor, type MimeType, MIME_TYPE_AUTO, MIME_TYPE_TRILIUM_LOG, MIME_TYPES_DICT } from "@triliumnext/commons";
+import type { MimeType } from "@triliumnext/commons";
+import {
+    MIME_TYPE_AUTO, MIME_TYPE_TRILIUM_LOG, MIME_TYPE_TRILIUM_SEARCH, normalizeMimeTypeForCKEditor,
+    resolveEnabledMimeTypes
+} from "@triliumnext/commons/src/lib/mime_type.js";
+
 import { t } from "./i18n.js";
 import options from "./options.js";
+
+/** The MIME type of plain text, which is always enabled. */
+export const PLAIN_TEXT_MIME = "text/plain";
 
 // Titles that are descriptive names rather than language identifiers, so they get localized here
 // (the shared MIME dict in commons has no access to the client's i18n).
 const TRANSLATED_TITLES: Record<string, string> = {
-    [MIME_TYPE_TRILIUM_LOG]: "code_mime_types.trilium_log"
+    [MIME_TYPE_TRILIUM_LOG]: "code_mime_types.trilium_log",
+    [MIME_TYPE_TRILIUM_SEARCH]: "code_mime_types.trilium_search_query"
 };
 
 let mimeTypes: MimeType[] | null = null;
 
 function loadMimeTypes() {
-    mimeTypes = JSON.parse(JSON.stringify(MIME_TYPES_DICT)) as MimeType[]; // clone
-
-    const enabledMimeTypes = options.getJson("codeNotesMimeTypes") || MIME_TYPES_DICT.filter((mt) => mt.default).map((mt) => mt.mime);
+    mimeTypes = resolveEnabledMimeTypes(options.getJson("codeNotesMimeTypes"));
 
     for (const mt of mimeTypes) {
-        mt.enabled = enabledMimeTypes.includes(mt.mime) || mt.mime === "text/plain"; // text/plain is always enabled
-
         const titleKey = TRANSLATED_TITLES[mt.mime];
         if (titleKey) {
             mt.title = t(titleKey);
@@ -31,6 +36,56 @@ function getMimeTypes(): MimeType[] {
     }
 
     return mimeTypes as MimeType[];
+}
+
+/** The enabled MIME types, in the order the code language lists show them. */
+function getEnabledMimeTypes(): MimeType[] {
+    return orderEnabledMimeTypes(
+        getMimeTypes(),
+        options.getJson("codeNotesMimeTypes"),
+        options.is("codeNotesMimeTypesSortAlphabetically")
+    );
+}
+
+/**
+ * The enabled MIME types that a code block of a text note offers, in display order. The
+ * `env=frontend` and `env=backend` JavaScript variants are Trilium script environments, which mean
+ * nothing in a code block: `text/javascript` highlights the same.
+ */
+function getCodeBlockMimeTypes(): MimeType[] {
+    return getEnabledMimeTypes()
+        .filter((mimeType) => !mimeType.mime.startsWith("application/javascript;env="));
+}
+
+/**
+ * Returns the enabled entries of `mimeTypes` in display order. Plain text comes first, except in a
+ * stored order that places it elsewhere.
+ *
+ * @param order the `codeNotesMimeTypes` option. Without it, the entries are sorted.
+ * @param isSortedAlphabetically sorts the entries by title instead of following `order`.
+ */
+export function orderEnabledMimeTypes(
+    mimeTypes: readonly MimeType[],
+    order: readonly (string | null)[] | null | undefined,
+    isSortedAlphabetically: boolean
+): MimeType[] {
+    const enabled = mimeTypes.filter((mimeType) => mimeType.enabled);
+    const plainText = enabled.find((mimeType) => mimeType.mime === PLAIN_TEXT_MIME);
+
+    let ordered: MimeType[];
+    if (isSortedAlphabetically || !order) {
+        ordered = enabled
+            .filter((mimeType) => mimeType !== plainText)
+            .sort((a, b) => a.title.localeCompare(b.title));
+    } else {
+        const byMime = new Map(enabled.map((mimeType) => [ mimeType.mime, mimeType ]));
+        ordered = [ ...new Set(order) ].flatMap((mime) => (mime && byMime.get(mime)) || []);
+    }
+
+    if (plainText && !ordered.includes(plainText)) {
+        ordered.unshift(plainText);
+    }
+    return ordered;
 }
 
 let mimeToHighlightJsMapping: Record<string, string> | null = null;
@@ -62,6 +117,8 @@ export function getHighlightJsNameForMime(mimeType: string) {
 export default {
     MIME_TYPE_AUTO,
     getMimeTypes,
+    getEnabledMimeTypes,
+    getCodeBlockMimeTypes,
     loadMimeTypes,
     getHighlightJsNameForMime
 };

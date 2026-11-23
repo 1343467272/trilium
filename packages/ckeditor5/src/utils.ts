@@ -1,4 +1,38 @@
-import type { DifferItemAttribute, Editor, ModelDocumentFragment, ModelElement, ModelNode } from "ckeditor5";
+import {
+    type DifferItemAttribute, DomEventObserver, type Editor, type ModelDocument,
+    type ModelDocumentFragment, type ModelElement, type ModelNode, type ViewDocumentDomEventData
+} from "ckeditor5";
+
+/**
+ * Fires `contextmenu` on the view document for a right-click in the editable. The plugins that
+ * listen to it share this class, as each observer class fires the event once.
+ */
+export class ContextMenuObserver extends DomEventObserver<"contextmenu"> {
+    get domEventType() {
+        return "contextmenu" as const;
+    }
+
+    onDomEvent(domEvent: MouseEvent) {
+        this.fire("contextmenu", domEvent);
+    }
+}
+
+/** The `contextmenu` event of {@link ContextMenuObserver}. */
+export type ViewDocumentContextMenuEvent = {
+    name: "contextmenu";
+    args: [data: ViewDocumentDomEventData<MouseEvent>];
+};
+
+/**
+ * Whether the change that `document` reports holds only elements drawn again, as
+ * `editor.editing.reconvertItem()` draws them, and no change of the model. Call it from a
+ * `change:data` listener, before the differ resets.
+ */
+export function isRedrawOnly(document: ModelDocument): boolean {
+    const changes = document.differ.getChanges();
+    return changes.length > 0
+        && changes.every((change) => change.type !== "attribute" && change.action === "refresh");
+}
 
 export function escapeHtml(str: string): string {
     return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");

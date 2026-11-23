@@ -1,6 +1,9 @@
-import type { EmojiSuggestion, MentionHostedListState, SlashCommandConfig, SlashCommandDefinition } from "@triliumnext/ckeditor5";
+import type {
+    EmojiSuggestion, MentionHostedList, MentionHostedListState, SlashCommandConfig,
+    SlashCommandDefinition
+} from "@triliumnext/ckeditor5";
 import { act } from "preact/test-utils";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 
 const { getNoteSuggestions, createNoteFromSuggestion } = vi.hoisted(() => ({
     getNoteSuggestions: vi.fn(async () => [ { notePath: "root/a", noteTitle: "Alpha", highlightedNotePathTitle: "Alpha" } ]),
@@ -13,7 +16,20 @@ vi.mock("../../../services/note_autocomplete", async (importOriginal) => ({
     createNoteFromSuggestion
 }));
 
-import { createAutocompleteMentionList, createEmojiList, createNoteMentionList, createSlashCommandList } from "./mention_list_view";
+const { createChildNote, openChildNote } = vi.hoisted(() => ({
+    createChildNote: vi.fn<(parent: object, title?: string) => Promise<string | undefined>>(),
+    openChildNote: vi.fn()
+}));
+
+vi.mock("./child_note", () => ({ createChildNote, openChildNote }));
+
+import contextMenu, { type MenuCommandItem } from "../../../menus/context_menu";
+import { createAnchorTargets, type LinkTarget } from "../../../services/link_targets";
+import options from "../../../services/options";
+import {
+    createAutocompleteMentionList, createEmojiList, createNoteMentionList, createSlashCommandList,
+    openSlashCommandMenu
+} from "./mention_list_view";
 
 describe("createNoteMentionList", () => {
     beforeEach(() => {
@@ -28,7 +44,7 @@ describe("createNoteMentionList", () => {
         const list = createNoteMentionList({ allowCreatingNotes: true });
         const commit = vi.fn<MentionHostedListState["commit"]>();
         const setActiveDescendant = vi.fn<MentionHostedListState["setActiveDescendant"]>();
-        await act(async () => list.show({ query: "al", caretRect: () => new DOMRect(10, 10, 1, 16), editable: null, commit, setActiveDescendant }));
+        await act(async () => list.show(createState("al", { commit, setActiveDescendant })));
         await act(async () => { await vi.advanceTimersByTimeAsync(300); });
         return { list, commit, setActiveDescendant };
     }
@@ -50,6 +66,83 @@ describe("createNoteMentionList", () => {
         expect(setActiveDescendant).toHaveBeenLastCalledWith(null);
         expect(list.handleKeyDown(new KeyboardEvent("keydown", { key: "Enter", cancelable: true }))).toBe(false);
         list.destroy?.();
+    });
+
+    it("links the note picked, then points its link at a heading, in a text editor", async () => {
+        options.set("textNoteCompletionLinkTargetsEnabled", "true");
+        onTestFinished(() => options.set("textNoteCompletionLinkTargetsEnabled", "false"));
+        const createLinkPath = vi.fn(() => "root/a?block=Intro");
+        const getOwnLinkTargets = vi.fn((): LinkTarget[] => [
+            { kind: "heading", title: "Intro", level: 2, createLinkPath },
+            ...createAnchorTargets([ "top" ], "root/a")
+        ]);
+        const linked = { id: "@root/a", notePath: "root/a" };
+        /** Picks the note from a new list, as the editor does before it shows the list again. */
+        const linkNote = async () => {
+            const list = createNoteMentionList({ getOwnLinkTargets });
+            const state = createState("al");
+            const settle = () => act(async () => { await vi.advanceTimersByTimeAsync(300); });
+            const show = async (shown: Partial<MentionHostedListState>) => {
+                await act(async () => list.show({ ...state, ...shown }));
+                await settle();
+            };
+            const press = async (key: string) => {
+                let isTaken = false;
+                await act(async () => {
+                    const event = new KeyboardEvent("keydown", { key, cancelable: true });
+                    isTaken = list.handleKeyDown(event);
+                });
+                await settle();
+                return isTaken;
+            };
+            await show({});
+            const popup = list.element;
+            expect(await press("Enter")).toBe(true);
+            expect(list.element).toBe(popup);
+            return { list, state, show, press };
+        };
+        const rows = (list: MentionHostedList) =>
+            [ ...list.element?.querySelectorAll(".link-mention-destinations [role=option]") ?? [] ];
+
+        // The note is linked at once, and the list stays open on the places in the note.
+        const first = await linkNote();
+        expect(first.state.commitAndFollowUp).toHaveBeenCalledExactlyOnceWith(linked);
+        expect(first.state.commit).not.toHaveBeenCalled();
+        expect(getOwnLinkTargets).toHaveBeenCalledExactlyOnceWith("root/a");
+        expect(rows(first.list)).toHaveLength(3);
+        // A heading waits for the editor to have the link in its text.
+        await first.press("ArrowDown");
+        expect(await first.press("Enter")).toBe(true);
+        expect(first.state.commit).not.toHaveBeenCalled();
+
+        // The text typed after the link filters those places, and Enter takes the first.
+        await first.show({ query: "", followUpOf: linked });
+        const [ , intro ] = rows(first.list);
+        expect(intro.getAttribute("aria-selected")).toBe("true");
+        expect(first.state.setActiveDescendant).toHaveBeenLastCalledWith(intro.id);
+        await first.show({ query: "int", followUpOf: linked });
+        expect(rows(first.list)).toHaveLength(1);
+        expect(await first.press("Enter")).toBe(true);
+        expect(first.state.commit).toHaveBeenCalledExactlyOnceWith({
+            id: "@root/a?block=Intro", notePath: "root/a?block=Intro"
+        });
+        expect(first.state.dismiss).not.toHaveBeenCalled();
+        first.list.destroy?.();
+
+        // The whole note keeps the link as it is, and closes the list, at any time.
+        const second = await linkNote();
+        expect(await second.press("Enter")).toBe(true);
+        expect(second.state.dismiss).toHaveBeenCalledOnce();
+        expect(second.state.commit).not.toHaveBeenCalled();
+
+        // A list follows the option as it changes: turned off, it mentions the note picked.
+        options.set("textNoteCompletionLinkTargetsEnabled", "false");
+        const state = createState("al");
+        await second.show(state);
+        expect(await second.press("Enter")).toBe(true);
+        expect(state.commit).toHaveBeenCalledExactlyOnceWith(linked);
+        expect(state.commitAndFollowUp).not.toHaveBeenCalled();
+        second.list.destroy?.();
     });
 
     it("mentions a note it creates once it is created, and nothing where the creation is canceled", async () => {
@@ -76,12 +169,54 @@ describe("createNoteMentionList", () => {
         const commit = vi.fn<MentionHostedListState["commit"]>();
         // The editor is reused for the next note, so the parent is read as the list is shown.
         editedNotePath = "root/second";
-        await act(async () => list.show({ query: "al", caretRect: () => new DOMRect(10, 10, 1, 16), editable: null, commit, setActiveDescendant: vi.fn() }));
+        await act(async () => list.show(createState("al", { commit })));
         await act(async () => { await vi.advanceTimersByTimeAsync(300); });
 
         list.handleKeyDown(new KeyboardEvent("keydown", { key: "Enter", cancelable: true }));
         expect(createNoteFromSuggestion).toHaveBeenLastCalledWith(childRow, "root/second");
         list.destroy?.();
+    });
+
+    it("creates a child note without asking its type, and opens it once linked", async () => {
+        const childRow = {
+            action: "create-child-note", noteTitle: "al", highlightedNotePathTitle: "Create child"
+        };
+        getNoteSuggestions.mockResolvedValue([ childRow ] as never);
+        createNoteFromSuggestion.mockClear();
+        createChildNote.mockResolvedValueOnce("root/edited/al").mockResolvedValueOnce(undefined);
+        const parent = { notePath: "root/edited", isProtected: false, ntxId: "ntx" };
+        const order: string[] = [];
+        openChildNote.mockImplementation(() => order.push("open"));
+        const pick = async () => {
+            const list = createNoteMentionList({
+                allowCreatingNotes: true, getChildNoteParent: () => parent
+            });
+            // As the editor does, which inserts the link once the promised mention settles.
+            const commit = vi.fn<MentionHostedListState["commit"]>((item) => {
+                void Promise.resolve(item).then((mention) => order.push(mention ? "link" : "none"));
+            });
+            await act(async () => list.show(createState("al", { commit })));
+            await act(async () => { await vi.advanceTimersByTimeAsync(300); });
+            list.handleKeyDown(new KeyboardEvent("keydown", { key: "Enter", cancelable: true }));
+            await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+            list.destroy?.();
+            return commit;
+        };
+
+        const commit = await pick();
+        expect(createChildNote).toHaveBeenLastCalledWith(parent, "al");
+        expect(createNoteFromSuggestion).not.toHaveBeenCalled();
+        expect(await commit.mock.calls[0]?.[0])
+            .toEqual({ id: "@root/edited/al", notePath: "root/edited/al" });
+        expect(openChildNote)
+            .toHaveBeenCalledExactlyOnceWith("root/edited/al", "ntx", { selectTitle: false });
+        expect(order).toEqual([ "link", "open" ]);
+
+        // Nothing is linked or opened where the note is not created.
+        order.length = 0;
+        await pick();
+        expect(order).toEqual([ "none" ]);
+        expect(openChildNote).toHaveBeenCalledOnce();
     });
 });
 
@@ -104,7 +239,7 @@ describe("createAutocompleteMentionList", () => {
         const commit = vi.fn<MentionHostedListState["commit"]>();
         const key = (k: string) => list.handleKeyDown(new KeyboardEvent("keydown", { key: k, cancelable: true }));
 
-        await act(async () => list.show({ query: "ab", caretRect: () => new DOMRect(10, 10, 1, 16), editable: null, commit, setActiveDescendant: vi.fn() }));
+        await act(async () => list.show(createState("ab", { commit })));
         await act(async () => { await vi.advanceTimersByTimeAsync(300); });
 
         expect(source).toHaveBeenLastCalledWith("ab");
@@ -139,7 +274,7 @@ describe("createSlashCommandList", () => {
         const commit = vi.fn<MentionHostedListState["commit"]>();
         const key = (k: string) => list.handleKeyDown(new KeyboardEvent("keydown", { key: k, cancelable: true }));
 
-        await act(async () => list.show({ query: "q", caretRect: () => new DOMRect(10, 10, 1, 16), editable: null, commit, setActiveDescendant: vi.fn() }));
+        await act(async () => list.show(createState("q", { commit })));
         // The list opens, then looks its entries up at once, with no debounce to wait out.
         await act(async () => {});
 
@@ -165,7 +300,7 @@ describe("createSlashCommandList", () => {
         const editor = { plugins: { get: () => ({ search }) } } as unknown as Parameters<NonNullable<SlashCommandConfig["list"]>>[0];
         const list = createSlashCommandList(editor);
         const commit = vi.fn<MentionHostedListState["commit"]>();
-        const show = (query: string) => list.show({ query, caretRect: () => new DOMRect(10, 10, 1, 16), editable: null, commit, setActiveDescendant: vi.fn() });
+        const show = (query: string) => list.show(createState(query, { commit }));
 
         await act(async () => show(""));
         await act(async () => {});
@@ -177,6 +312,69 @@ describe("createSlashCommandList", () => {
         await act(() => new Promise((resolve) => setTimeout(resolve, 100)));
         expect(commit).toHaveBeenCalledExactlyOnceWith({ id: "snippet-0", definition: definitions[1] });
         list.destroy?.();
+    });
+});
+
+describe("openSlashCommandMenu", () => {
+    it("lists the entries that insert or wrap below the handle, and runs the one picked", () => {
+        onTestFinished(() => {
+            vi.restoreAllMocks();
+        });
+        const definitions: SlashCommandDefinition[] = [
+            {
+                id: "table", title: "Table", description: "Insert a table.", aliases: [ "grid" ],
+                icon: "<svg></svg>", willInsert: true
+            },
+            { id: "heading2", title: "Heading 2", icon: "<svg></svg>", willWrap: true },
+            { id: "align-left", title: "Align left", icon: "<svg></svg>", willTransform: true },
+            { id: "custom", title: "Custom", icon: "<svg></svg>" },
+            {
+                id: "snippet-0", title: "<b>Hi</b>", iconClass: "tn-icon bx bx-note",
+                iconColorClass: "use-note-color", willInsert: true
+            }
+        ];
+        const palette = { search: vi.fn(() => definitions), run: vi.fn() };
+        const focusTracker = { add: vi.fn(), remove: vi.fn() };
+        const editor = {
+            plugins: { get: () => palette }, ui: { focusTracker }
+        } as unknown as Parameters<NonNullable<SlashCommandConfig["list"]>>[0];
+        const show = vi.spyOn(contextMenu, "show").mockResolvedValue();
+        const handle = document.createElement("button");
+        const onClose = vi.fn();
+
+        openSlashCommandMenu(editor, handle, onClose);
+
+        expect(palette.search).toHaveBeenCalledExactlyOnceWith("");
+        const options = show.mock.calls[0][0];
+        expect(options).toMatchObject({
+            anchor: handle, filterable: true, focusFilter: true, className: "slash-command-menu"
+        });
+        expect(options.items).toEqual([ {
+            title: "Table", description: "Insert a table.", keywords: [ "grid" ],
+            uiIcon: "bx bx-empty", uiIconSvg: "<svg></svg>", handler: expect.any(Function)
+        }, {
+            title: "Heading 2", uiIcon: "bx bx-empty", uiIconSvg: "<svg></svg>",
+            handler: expect.any(Function)
+        }, {
+            title: "&lt;b&gt;Hi&lt;&#x2F;b&gt;", uiIcon: "tn-icon bx bx-note",
+            iconColorClass: "use-note-color", handler: expect.any(Function)
+        } ]);
+        const greeting = options.items[2] as MenuCommandItem<never>;
+        greeting.handler?.(greeting, new MouseEvent("click"));
+        expect(palette.run).toHaveBeenCalledExactlyOnceWith(definitions[4]);
+
+        const container = document.createElement("div");
+        options.onShow?.(container);
+        expect(focusTracker.add).toHaveBeenCalledWith(container);
+        options.onHide?.();
+        expect(focusTracker.remove).toHaveBeenCalledWith(container);
+        expect(onClose).toHaveBeenCalledOnce();
+
+        // A click on the handle of the open menu only closes the menu.
+        vi.spyOn(contextMenu, "dismissedByLastPress", "get").mockReturnValue(true);
+        openSlashCommandMenu(editor, handle, onClose);
+        expect(show).toHaveBeenCalledOnce();
+        expect(onClose).toHaveBeenCalledTimes(2);
     });
 });
 
@@ -193,7 +391,7 @@ describe("createEmojiList", () => {
         const commit = vi.fn<MentionHostedListState["commit"]>();
         const key = (k: string) => list.handleKeyDown(new KeyboardEvent("keydown", { key: k, cancelable: true }));
 
-        await act(async () => list.show({ query: "grin", caretRect: () => new DOMRect(10, 10, 1, 16), editable: null, commit, setActiveDescendant: vi.fn() }));
+        await act(async () => list.show(createState("grin", { commit })));
         await act(async () => {});
 
         expect(search).toHaveBeenLastCalledWith("grin");
@@ -213,3 +411,20 @@ describe("createEmojiList", () => {
         list.destroy?.();
     });
 });
+
+/** What the editor shows a list for the `query` typed after a marker, with mocked functions. */
+function createState(
+    query: string, overrides: Partial<MentionHostedListState> = {}
+): MentionHostedListState {
+    return {
+        query,
+        followUpOf: null,
+        caretRect: () => new DOMRect(10, 10, 1, 16),
+        editable: null,
+        commit: vi.fn(),
+        commitAndFollowUp: vi.fn(),
+        dismiss: vi.fn(),
+        setActiveDescendant: vi.fn(),
+        ...overrides
+    };
+}

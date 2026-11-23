@@ -1,6 +1,6 @@
 import type { HighlightedTokenInfo, SearchResultDetails } from "@triliumnext/commons";
 import { extractLlmChatText } from "@triliumnext/commons/src/lib/llm/extract_chat_text.js";
-import striptags from "striptags";
+import { t } from "i18next";
 
 import becca from "../../../becca/becca.js";
 import becca_service from "../../../becca/becca_service.js";
@@ -11,8 +11,11 @@ import optionService from "../../options.js";
 import { getLog } from "../../log.js";
 import scriptService from "../../script.js";
 import { isScriptingEnabled } from "../../scripting_guard.js";
-import { escapeHtml, escapeRegExp, normalizePreservingLength, unescapeHtml } from "../../utils/index.js";
+import {
+    escapeHtml, escapeRegExp, normalizePreservingLength, stripTags, unescapeHtml
+} from "../../utils/index.js";
 import type Expression from "../expressions/expression.js";
+import NoteSet from "../note_set.js";
 import {
     ICON_TAG_RE, readIconClasses, readIconName
 } from "../expressions/note_content_fulltext_preprocessor.js";
@@ -274,6 +277,7 @@ function loadNeededInfoFromDatabase() {
 
         if (isNoteRevision) {
             const note = becca.notes[noteId];
+            /* v8 ignore next -- the content-length loop above set revisionCount to 0 for every note in noteBlobs */
             note.revisionCount = (note.revisionCount ?? 0) + 1;
         }
     }
@@ -331,7 +335,9 @@ function findResultsWithExpression(expression: Expression, searchContext: Search
 const RANK_SHORTLIST = 200;
 
 function performSearch(expression: Expression, searchContext: SearchContext, enableFuzzyMatching: boolean): SearchResult[] {
-    const allNoteSet = becca.getAllNoteSet();
+    const allNoteSet = searchContext.noteFilter
+        ? new NoteSet(searchContext.readable(becca.getAllNoteSet().notes))
+        : becca.getAllNoteSet();
 
     const noteIdToNotePath: Record<string, string[]> = {};
     const executionContext = {
@@ -392,21 +398,7 @@ function performSearch(expression: Expression, searchContext: SearchContext, ena
     searchContext.enableFuzzyMatching = originalFuzzyMatching;
 
     if (!noteSet.sorted) {
-        ranked.sort((a, b) => {
-            if (a.score > b.score) {
-                return -1;
-            } else if (a.score < b.score) {
-                return 1;
-            }
-
-            // if score does not decide then sort results by depth of the note.
-            // This is based on the assumption that more important results are closer to the note root.
-            if (a.notePathArray.length === b.notePathArray.length) {
-                return a.notePathTitle < b.notePathTitle ? -1 : 1;
-            }
-
-            return a.notePathArray.length < b.notePathArray.length ? -1 : 1;
-        });
+        ranked.sort(compareByScoreThenDepth);
     }
 
     return ranked;
@@ -420,36 +412,10 @@ function mergeExactAndFuzzyResults(exactResults: SearchResult[], fuzzyResults: S
     const additionalFuzzyResults = fuzzyResults.filter(result => !exactNoteIds.has(result.noteId));
 
     // Sort exact results by score (best exact matches first)
-    exactResults.sort((a, b) => {
-        if (a.score > b.score) {
-            return -1;
-        } else if (a.score < b.score) {
-            return 1;
-        }
-
-        // if score does not decide then sort results by depth of the note.
-        if (a.notePathArray.length === b.notePathArray.length) {
-            return a.notePathTitle < b.notePathTitle ? -1 : 1;
-        }
-
-        return a.notePathArray.length < b.notePathArray.length ? -1 : 1;
-    });
+    exactResults.sort(compareByScoreThenDepth);
 
     // Sort fuzzy results by score (best fuzzy matches first)
-    additionalFuzzyResults.sort((a, b) => {
-        if (a.score > b.score) {
-            return -1;
-        } else if (a.score < b.score) {
-            return 1;
-        }
-
-        // if score does not decide then sort results by depth of the note.
-        if (a.notePathArray.length === b.notePathArray.length) {
-            return a.notePathTitle < b.notePathTitle ? -1 : 1;
-        }
-
-        return a.notePathArray.length < b.notePathArray.length ? -1 : 1;
-    });
+    additionalFuzzyResults.sort(compareByScoreThenDepth);
 
     // CRITICAL: Always put exact matches before fuzzy matches, regardless of scores
     return [...exactResults, ...additionalFuzzyResults];
@@ -458,6 +424,11 @@ function mergeExactAndFuzzyResults(exactResults: SearchResult[], fuzzyResults: S
 function parseQueryToExpression(query: string, searchContext: SearchContext) {
     const { fulltextQuery, fulltextTokens, expressionTokens, leadingOperator } = lex(query);
     searchContext.fulltextQuery = fulltextQuery;
+
+    if (!searchContext.allowRegex && expressionTokens.some(({ token }) => token === "%=")) {
+        searchContext.addError(t("search.error.regex-not-allowed"));
+        return null;
+    }
 
     let structuredExpressionTokens: TokenStructure;
 
@@ -504,11 +475,12 @@ function validateSearchQuery(query: string): string | null {
 
     try {
         parseQueryToExpression(query || "", searchContext);
+    /* v8 ignore start -- parse() records what getExpression() throws, and nothing else in it throws on any query */
     } catch (e: unknown) {
-        // The parser reads past the end of a query cut short after `note.labels` and the like, so a
-        // validator that let the throw out would fail on the very text it exists to describe.
+        // A validator that let a throw out would fail on the very text it exists to describe.
         return e instanceof Error ? e.message : String(e);
     }
+    /* v8 ignore stop */
 
     return searchContext.getError();
 }
@@ -575,7 +547,7 @@ function getTextRepresentationForNote(note: BNote): string | null {
 /** Closing tags of the block elements the text editor writes, each of which ends a line. */
 const BLOCK_END_TAG_RE = /<\/(?:p|h[1-6]|li|blockquote|pre|tr|figcaption|div)>/gi;
 
-function extractContentSnippet(noteId: string, searchTokens: HighlightedTokenInfo[] | string[], maxLength: number = 200): string {
+function extractContentSnippet(noteId: string, searchTokens: HighlightedTokenInfo[] | string[], maxLength: number = 200, onTruncated?: (truncated: boolean) => void): string {
     const note = becca.notes[noteId];
     if (!note) {
         return "";
@@ -605,7 +577,7 @@ function extractContentSnippet(noteId: string, searchTokens: HighlightedTokenInf
 
         // Strip HTML tags for text notes
         if (note.type === "text") {
-            // A collapsible's summary and body must not run into surrounding text: striptags
+            // A collapsible's summary and body must not run into surrounding text: `stripTags()`
             // drops tags with no separator, so break the line after the summary and after the
             // whole block. The newlines become paragraph breaks in the snippet (rendered as <br>).
             content = content
@@ -615,14 +587,14 @@ function extractContentSnippet(noteId: string, searchTokens: HighlightedTokenInf
                 .replace(/<br\s*\/?>/gi, "$&\n")
                 .replace(BLOCK_END_TAG_RE, "$&\n");
             // Link previews (link-embed / link-mention) keep their url/title/description in data
-            // attributes that striptags would drop; surface them as separate lines instead.
+            // attributes that `stripTags()` would drop; surface them as separate lines instead.
             content = content.replace(/<(section|span)\b[^>]*\bclass="[^"]*\blink-(?:embed|mention)\b[^"]*"[^>]*>[\s\S]*?<\/\1>/gi, (element) => {
                 const url = element.match(/\bdata-url="([^"]*)"/i)?.[1] ?? "";
                 const title = element.match(/\bdata-title="([^"]*)"/i)?.[1] ?? "";
                 const description = element.match(/\bdata-description="([^"]*)"/i)?.[1] ?? "";
                 return `\n${[url, title, description].filter(Boolean).join("\n")}\n`;
             });
-            // An icon is an empty element, so striptags leaves no trace of it and a note found by
+            // An icon is an empty element, so `stripTags()` leaves no trace of it and a note found by
             // the icon's name had nothing in its snippet to centre on or to mark. Name it instead;
             // the snippet is escaped before it is shown, so the icon itself cannot be drawn there.
             content = content.replace(ICON_TAG_RE, (tag) => {
@@ -630,7 +602,7 @@ function extractContentSnippet(noteId: string, searchTokens: HighlightedTokenInf
 
                 return className ? ` [${readIconName(className)}] ` : "";
             });
-            content = striptags(content);
+            content = stripTags(content);
             // Decode HTML entities so the snippet shows real characters instead of escape codes
             // (e.g. "&lt;", "&amp;", "&nbsp;") — attribute-sourced text above is entity-encoded too.
             content = unescapeHtml(content).replace(/&nbsp;/g, " ");
@@ -644,13 +616,26 @@ function extractContentSnippet(noteId: string, searchTokens: HighlightedTokenInf
             }
         }
 
-        // Normalize whitespace while preserving paragraph breaks
-        // First, normalize multiple newlines to double newlines (paragraph breaks)
-        content = content.replace(/\n\s*\n/g, "\n\n");
-        // Then normalize spaces within lines
-        content = content.split('\n').map(line => line.replace(/\s+/g, " ").trim()).join('\n');
-        // Finally trim the whole content
-        content = content.trim();
+        if (note.type === "code") {
+            // Code keeps its indentation and the spacing inside a line: collapsing them would show
+            // the source as running prose rather than as the code it is.
+            content = content
+                .replace(/\r\n?/g, "\n")
+                .replace(/\t/g, "    ")
+                .split("\n")
+                .map((line) => line.trimEnd())
+                .join("\n")
+                .replace(/\n{3,}/g, "\n\n")
+                .trim();
+        } else {
+            // Normalize whitespace while preserving paragraph breaks
+            // First, normalize multiple newlines to double newlines (paragraph breaks)
+            content = content.replace(/\n\s*\n/g, "\n\n");
+            // Then normalize spaces within lines
+            content = content.split('\n').map(line => line.replace(/\s+/g, " ").trim()).join('\n');
+            // Finally trim the whole content
+            content = content.trim();
+        }
 
         if (!content) {
             return "";
@@ -675,10 +660,12 @@ function extractContentSnippet(noteId: string, searchTokens: HighlightedTokenInf
 
         // Extract snippet
         let snippet = content.substring(snippetStart, snippetStart + maxLength);
+        let truncated = snippetStart > 0 || snippetStart + maxLength < content.length;
 
         // If snippet contains linebreaks, limit to max 4 lines and override character limit
         const lines = snippet.split('\n');
         if (lines.length > 4) {
+            truncated = true;
             // Find which lines contain the search tokens to ensure they're included
             const normalizedLines = lines.map((line) => normalizePreservingLength(line));
 
@@ -726,6 +713,7 @@ function extractContentSnippet(noteId: string, searchTokens: HighlightedTokenInf
             }
         }
 
+        onTruncated?.(truncated);
         return snippet;
     } catch (e) {
         getLog().error(`Error extracting content snippet for note ${noteId}: ${e}`);
@@ -755,6 +743,9 @@ function extractAttributeSnippet(noteId: string, searchTokens: HighlightedTokenI
         }
 
         const matchingAttributes: Array<{name: string, value: string, type: string}> = [];
+        const heldAttributes = new Set(attributes
+            .filter((attr) => !attr.isDefinition())
+            .map((attr) => `${attr.type}:${attr.name}`));
 
         // Look for attributes that match the search tokens
         for (const attr of attributes) {
@@ -762,9 +753,13 @@ function extractAttributeSnippet(noteId: string, searchTokens: HighlightedTokenI
                 continue;
             }
 
-            const attrName = attr.name?.toLowerCase() || "";
-            const attrValue = attr.value?.toLowerCase() || "";
-            const attrType = attr.type || "";
+            // The attribute's own line already shows what its definition sets up.
+            if (attr.isDefinition() && heldAttributes.has(attr.name)) {
+                continue;
+            }
+
+            const attrName = attr.name.toLowerCase();
+            const attrValue = attr.value.toLowerCase();
 
             // Check if any search token matches the attribute name or value
             const normalizedName = normalizePreservingLength(attrName);
@@ -774,10 +769,10 @@ function extractAttributeSnippet(noteId: string, searchTokens: HighlightedTokenI
 
             if (hasMatch) {
                 matchingAttributes.push({
-                    name: attr.name || "",
+                    name: attr.name,
                     // One line per attribute: the lines are joined with newlines, which become `<br>`.
-                    value: (attr.value || "").replace(/\s*[\r\n]+\s*/g, " "),
-                    type: attrType
+                    value: attr.value.replace(/\s*[\r\n]+\s*/g, " "),
+                    type: attr.type
                 });
             }
         }
@@ -789,18 +784,11 @@ function extractAttributeSnippet(noteId: string, searchTokens: HighlightedTokenI
         // Limit to 4 lines maximum, similar to content snippet logic
         const lines: string[] = [];
         for (const attr of matchingAttributes.slice(0, 4)) {
-            let line = "";
             if (attr.type === "label") {
-                line = attr.value ? `#${attr.name}="${attr.value}"` : `#${attr.name}`;
-            } else if (attr.type === "relation") {
+                lines.push(attr.value ? `#${attr.name}="${attr.value}"` : `#${attr.name}`);
+            } else {
                 // For relations, show the target note title if possible
-                const targetNote = attr.value ? becca.notes[attr.value] : null;
-                const targetTitle = targetNote ? targetNote.title : attr.value;
-                line = `~${attr.name}="${targetTitle}"`;
-            }
-
-            if (line) {
-                lines.push(line);
+                lines.push(`~${attr.name}="${becca.notes[attr.value]?.title ?? attr.value}"`);
             }
         }
 
@@ -834,24 +822,50 @@ function extractAttributeSnippet(noteId: string, searchTokens: HighlightedTokenI
 // response, so the limit follows what a dropdown shows rather than what the query matched.
 const AUTOCOMPLETE_RESULT_LIMIT = 25;
 
-/** Searches for the notes a dropdown lists, the first `limit` of them, at most {@link AUTOCOMPLETE_RESULT_LIMIT}. */
-function searchNotesForAutocomplete(query: string, fastSearch: boolean = true, limit = AUTOCOMPLETE_RESULT_LIMIT) {
+/**
+ * Searches for the notes a dropdown lists, the first `limit` of them, at most
+ * {@link AUTOCOMPLETE_RESULT_LIMIT}.
+ *
+ * @param filter a search query the notes must also match, such as `note.type = image`. It is run as
+ *               a search of its own rather than joined to `query`, so what is typed cannot change
+ *               what the filter means.
+ */
+function searchNotesForAutocomplete(
+    query: string, fastSearch: boolean = true, limit = AUTOCOMPLETE_RESULT_LIMIT, filter?: string
+) {
+    const ancestorNoteId = hoistedNoteService.isHoistedInHiddenSubtree()
+        ? "root"
+        : hoistedNoteService.getHoistedNoteId();
     const searchContext = new SearchContext({
         fastSearch,
         includeArchivedNotes: false,
         includeHiddenNotes: true,
         fuzzyAttributeSearch: true,
         ignoreInternalAttributes: true,
-        ancestorNoteId: hoistedNoteService.isHoistedInHiddenSubtree() ? "root" : hoistedNoteService.getHoistedNoteId(),
+        ancestorNoteId,
         // Typo tolerance is opt-in here: `searchEnableFuzzyMatching` covers quick search and the
         // search screen, and `searchAutocompleteFuzzy` decides it for the jump-to-note and note
         // selector dropdowns, which query on every keystroke.
         enableFuzzyMatching: optionService.getOptionBool("searchAutocompleteFuzzy"),
-        // Only the first `AUTOCOMPLETE_RESULT_LIMIT` results are ever read.
-        rankInTwoPasses: true
+        // Only the first `AUTOCOMPLETE_RESULT_LIMIT` results are ever read, unless a filter drops
+        // some of them first.
+        rankInTwoPasses: !filter
     });
 
-    const trimmed = findResultsWithQuery(query, searchContext).slice(0, Math.min(limit, AUTOCOMPLETE_RESULT_LIMIT));
+    let results = findResultsWithQuery(query, searchContext);
+    if (filter) {
+        const filterContext = new SearchContext({
+            fastSearch,
+            includeArchivedNotes: false,
+            includeHiddenNotes: true,
+            ancestorNoteId
+        });
+        const allowed = new Set(
+            findResultsWithQuery(filter, filterContext).map((result) => result.noteId));
+        results = results.filter((result) => allowed.has(result.noteId));
+    }
+
+    const trimmed = results.slice(0, Math.min(limit, AUTOCOMPLETE_RESULT_LIMIT));
 
     return buildSearchResultDetails(trimmed, searchContext);
 }
@@ -874,7 +888,11 @@ function buildSearchResultDetails(results: SearchResult[], searchContext: Search
             ? [ ...tokenInfos, ...matchedWords.map((token) => ({ token, type: "fuzzy" as const })) ]
             : tokenInfos;
 
-        result.contentSnippet = extractContentSnippet(result.noteId, noteTokenInfos);
+        let contentSnippetTruncated = false;
+        result.contentSnippet = extractContentSnippet(result.noteId, noteTokenInfos, undefined, (truncated) => {
+            contentSnippetTruncated = truncated;
+        });
+        result.contentSnippetTruncated = contentSnippetTruncated;
         result.matchedTerms = findMatchedTerms(result.contentSnippet, noteTokenInfos);
         result.attributeSnippet = extractAttributeSnippet(result.noteId, noteTokenInfos);
         highlightSearchResults([ result ], noteTokenInfos, searchContext.ignoreInternalAttributes);
@@ -892,6 +910,7 @@ function buildSearchResultDetails(results: SearchResult[], searchContext: Search
             highlightedParentPathTitle: result.highlightedParentPathTitle,
             contentSnippet: result.contentSnippet,
             highlightedContentSnippet: result.highlightedContentSnippet,
+            contentSnippetTruncated: result.contentSnippetTruncated,
             attributeSnippet: result.attributeSnippet,
             highlightedAttributeSnippet: result.highlightedAttributeSnippet,
             matchedTerms: result.matchedTerms,
@@ -980,6 +999,24 @@ export default {
     extractAttributeSnippet,
     highlightSearchResults
 };
+
+/**
+ * Orders results best score first. A tie goes to the shallower note, on the assumption that more
+ * important notes sit closer to the root, and then to the note path title.
+ */
+function compareByScoreThenDepth(a: SearchResult, b: SearchResult) {
+    if (a.score > b.score) {
+        return -1;
+    } else if (a.score < b.score) {
+        return 1;
+    }
+
+    if (a.notePathArray.length === b.notePathArray.length) {
+        return a.notePathTitle < b.notePathTitle ? -1 : 1;
+    }
+
+    return a.notePathArray.length < b.notePathArray.length ? -1 : 1;
+}
 
 /** Widens a legacy `string[]` (all plain) or a structured token-info list to token infos. */
 function toTokenInfos(tokens: HighlightedTokenInfo[] | string[]): HighlightedTokenInfo[] {

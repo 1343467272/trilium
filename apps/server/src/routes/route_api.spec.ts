@@ -1,15 +1,39 @@
-import { cls } from "@triliumnext/core";
+import { cls, getLog, NotFoundError } from "@triliumnext/core";
 import express from "express";
-import { existsSync } from "fs";
+import { existsSync, rmSync } from "fs";
+import http, { type Server } from "http";
+import type { AddressInfo } from "net";
 import request from "supertest";
-import { beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+
+const readBack = vi.hoisted(() => ({
+    error: undefined as Error | undefined,
+    removeError: undefined as Error | undefined,
+    removed: [] as string[]
+}));
+
+vi.mock("fs/promises", async (importOriginal) => {
+    const actual = await importOriginal<typeof import("fs/promises")>();
+    return {
+        ...actual,
+        readFile: (...args: Parameters<typeof actual.readFile>) =>
+            readBack.error ? Promise.reject(readBack.error) : actual.readFile(...args),
+        rm: (...args: Parameters<typeof actual.rm>) => {
+            readBack.removed.push(String(args[0]));
+            return readBack.removeError ? Promise.reject(readBack.removeError) : actual.rm(...args);
+        }
+    };
+});
 
 import {
     apiResultHandler,
     asyncRoute,
+    createShareTargetMiddleware,
     importMiddlewareWithErrorHandling,
+    multipartBoundary,
     route,
     router,
+    stripNulBeforeDelimiters,
     uploadMiddlewareWithErrorHandling
 } from "./route_api.js";
 
@@ -27,6 +51,9 @@ function buildApp() {
             // Whether the temp file is still on disk while the handler runs.
             tempPresent: file?.path ? existsSync(file.path) : null
         });
+    });
+    app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+        res.status(500).send(err.message);
     });
     return app;
 }
@@ -110,6 +137,32 @@ describe("importMiddlewareWithErrorHandling (disk storage)", () => {
         expect(res.status).toBe(400);
         expect(res.text).toContain("nested multipart field names are not allowed");
     });
+
+    it("forwards a body it cannot parse as an error instead of reaching the handler", async () => {
+        const res = await request(buildApp())
+            .post("/import")
+            .set("Content-Type", "multipart/form-data; boundary=b")
+            .send("--b\r\nContent-Disposition: form-data; name=\"upload\"; filename=\"a.enex\"\r\n\r\nhi");
+
+        expect([ res.status, res.text ]).toEqual([ 500, "Unexpected end of form" ]);
+    });
+
+    it("forwards an upload it cannot read back as an error, and removes its temp file", async () => {
+        readBack.error = new Error("EIO: i/o error, read");
+        readBack.removed = [];
+        try {
+            const res = await request(buildApp())
+                .post("/import")
+                .attach("upload", Buffer.from("<en-export/>"), "notes.enex");
+
+            expect([ res.status, res.text ]).toEqual([ 500, "EIO: i/o error, read" ]);
+        } finally {
+            readBack.error = undefined;
+        }
+        expect(readBack.removed).toHaveLength(1);
+        expect(readBack.removed[0]).toMatch(/upload-\w+\.trilium$/);
+        await vi.waitFor(() => expect(existsSync(readBack.removed[0])).toBe(false));
+    });
 });
 
 describe("uploadMiddlewareWithErrorHandling (in-memory)", () => {
@@ -138,6 +191,118 @@ describe("uploadMiddlewareWithErrorHandling (in-memory)", () => {
 
         expect(res.status).toBe(200);
         expect(res.body.hasFile).toBe(false);
+    });
+});
+
+describe("createShareTargetMiddleware", () => {
+    it("rejects a file above the size limit before the handler runs", async () => {
+        const app = express();
+        const handler = vi.fn((_req: express.Request, res: express.Response) => res.sendStatus(200));
+        app.post("/share", createShareTargetMiddleware(4), handler);
+
+        const res = await request(app).post("/share").attach("files", Buffer.from("12345"), "big.bin");
+
+        expect(res.status).toBe(400);
+        expect(res.text).toContain("Share rejected");
+        expect(handler).not.toHaveBeenCalled();
+        await request(app).post("/share").attach("files", Buffer.from("1234"), "fits.bin").expect(200);
+    });
+
+    it("forwards a body busboy cannot parse as an error instead of reaching the handler", async () => {
+        const app = express();
+        const handler = vi.fn((_req: express.Request, res: express.Response) => res.sendStatus(200));
+        app.post("/share", createShareTargetMiddleware(), handler);
+        app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+            res.status(500).send(err.message);
+        });
+
+        const unterminated = await request(app)
+            .post("/share")
+            .set("Content-Type", "multipart/form-data; boundary=b")
+            .send("--b\r\nContent-Disposition: form-data; name=\"text\"\r\n\r\nhi");
+        expect(unterminated.status).toBe(500);
+        expect(unterminated.text).toBe("Unexpected end of form");
+
+        const noBoundary = await request(app).post("/share").set("Content-Type", "multipart/form-data").send("x");
+        expect(noBoundary.status).toBe(500);
+        expect(handler).not.toHaveBeenCalled();
+    });
+
+    it("parses a body whose boundary is quoted", async () => {
+        const app = express();
+        app.post("/share", createShareTargetMiddleware(), (req, res) => res.json(req.body));
+
+        const res = await request(app)
+            .post("/share")
+            .set("Content-Type", "multipart/form-data; boundary=\"b c\"")
+            .send("--b c\r\nContent-Disposition: form-data; name=\"text\"\r\n\r\nhi\r\n\0--b c--\r\n");
+
+        expect(res.body).toEqual({ text: "hi" });
+    });
+});
+
+describe("temp file cleanup", () => {
+    it("leaves no stray rejection when an upload's temp file cannot be removed", async () => {
+        const rejections: unknown[] = [];
+        const collect = (reason: unknown) => rejections.push(reason);
+        process.on("unhandledRejection", collect);
+        readBack.removeError = Object.assign(new Error("EBUSY: resource busy or locked"), { code: "EBUSY" });
+        readBack.removed = [];
+        try {
+            const shareApp = express();
+            shareApp.post("/share", createShareTargetMiddleware(), (_req, res) => res.sendStatus(200));
+
+            await request(shareApp).post("/share").attach("files", Buffer.from("shared"), "shared.txt").expect(200);
+            await request(buildApp()).post("/import").attach("upload", Buffer.from("PK-zip-bytes"), "backup.zip").expect(200);
+            await request(buildApp()).post("/import").attach("upload", Buffer.from("<en-export/>"), "notes.enex").expect(200);
+
+            await vi.waitFor(() => expect(readBack.removed).toHaveLength(3));
+            await new Promise((resolve) => setTimeout(resolve, 10));
+            expect(rejections).toEqual([]);
+        } finally {
+            readBack.removeError = undefined;
+            process.off("unhandledRejection", collect);
+            for (const filePath of readBack.removed) {
+                rmSync(filePath, { force: true });
+            }
+        }
+    });
+});
+
+describe("multipartBoundary", () => {
+    it("reads a plain or quoted boundary parameter", () => {
+        expect(multipartBoundary("multipart/form-data; boundary=----abc")).toBe("----abc");
+        expect(multipartBoundary("multipart/form-data; charset=utf-8; BOUNDARY=\"a b\"")).toBe("a b");
+        expect(multipartBoundary("multipart/form-data")).toBeUndefined();
+        expect(multipartBoundary(undefined)).toBeUndefined();
+    });
+});
+
+describe("stripNulBeforeDelimiters", () => {
+    it("drops the NUL before every delimiter, wherever the chunks split it", async () => {
+        const input = Buffer.from("--b\r\n\r\nx\0y\r\n\0--b\r\n\r\nz\r\n\0--b--\r\n", "latin1");
+        const expected = "--b\r\n\r\nx\0y\r\n--b\r\n\r\nz\r\n--b--\r\n";
+
+        for (let split = 0; split <= input.length; split++) {
+            const filter = stripNulBeforeDelimiters("b");
+            const output: Buffer[] = [];
+            filter.on("data", (chunk: Buffer) => output.push(chunk));
+            const ended = new Promise((resolve) => filter.on("end", resolve));
+            filter.write(input.subarray(0, split));
+            filter.end(input.subarray(split));
+            await ended;
+            expect(Buffer.concat(output).toString("latin1"), `split at ${split}`).toBe(expected);
+        }
+    });
+
+    it("passes the bytes through unchanged without a boundary", async () => {
+        const filter = stripNulBeforeDelimiters(undefined);
+        const output: Buffer[] = [];
+        filter.on("data", (chunk: Buffer) => output.push(chunk));
+        const ended = new Promise((resolve) => filter.on("end", resolve));
+        filter.end(Buffer.from("x\r\n\0--b", "latin1"));
+        await ended;
+        expect(Buffer.concat(output).toString("latin1")).toBe("x\r\n\0--b");
     });
 });
 
@@ -228,5 +393,182 @@ describe("internalRoute CLS wiring", () => {
         expect(closeProbe.error).toBeUndefined();
         expect(closeProbe.componentId).toBe("comp-close");
         expect(closeProbe.wrote).toBe("written");
+    });
+});
+
+describe("internalRoute without a result handler", () => {
+    let app: express.Application;
+
+    beforeAll(() => {
+        asyncRoute("get", "/no-handler/reject", [], async () => {
+            throw new Error("boom");
+        }, null);
+
+        asyncRoute("get", "/no-handler/reject-http", [], async () => {
+            throw new NotFoundError("missing");
+        }, null);
+
+        app = express();
+        app.use(router);
+    });
+
+    it("answers a rejected async handler with a 500 instead of leaving the request open", async () => {
+        const res = await request(app).get("/no-handler/reject").timeout(2000).expect(500);
+
+        expect(res.body).toEqual({ message: "boom" });
+    });
+
+    it("keeps the status of a rejected HttpError, and logs it as one line instead of an error", async () => {
+        const info = vi.spyOn(getLog(), "info");
+        const error = vi.spyOn(getLog(), "error");
+
+        const res = await request(app).get("/no-handler/reject-http").timeout(2000).expect(404);
+
+        expect(res.body).toEqual({ message: "missing" });
+        expect(error).not.toHaveBeenCalled();
+        expect(info).toHaveBeenCalledExactlyOnceWith("get /no-handler/reject-http rejected with 404: 'missing'");
+        vi.restoreAllMocks();
+    });
+
+    it("still logs a failure that is not the client's as an error", async () => {
+        const error = vi.spyOn(getLog(), "error");
+
+        await request(app).get("/no-handler/reject").timeout(2000).expect(500);
+
+        expect(error).toHaveBeenCalledExactlyOnceWith(expect.stringMatching(/^get \/no-handler\/reject threw exception: 'boom', stack: Error: boom/));
+        vi.restoreAllMocks();
+    });
+});
+
+describe("internalRoute result handling", () => {
+    let app: express.Application;
+
+    beforeAll(() => {
+        route("get", "/result/:status", [], (req) => {
+            const status = Number(req.params.status);
+            return [ status, status === 204 ? "" : { status } ];
+        }, apiResultHandler);
+
+        route("get", "/result-handled", [], (_req, res) => {
+            res.triliumResponseHandled = true;
+            res.status(207).send("handled by the route");
+            return { ignored: true };
+        }, apiResultHandler);
+
+        asyncRoute("get", "/result-late-failure", [], async (_req, res) => {
+            res.status(202).send("partial");
+            throw new Error("late failure");
+        }, apiResultHandler);
+
+        app = express();
+        app.use(router);
+    });
+
+    afterEach(() => vi.restoreAllMocks());
+
+    it("sends a [status, body] result with that status, and logs only an unsuccessful one", async () => {
+        const info = vi.spyOn(getLog(), "info");
+
+        expect((await request(app).get("/result/201").expect(201)).body).toEqual({ status: 201 });
+        await request(app).get("/result/204").expect(204);
+        expect((await request(app).get("/result/409").expect(409)).body).toEqual({ status: 409 });
+
+        expect(info.mock.calls.flat().filter((line) => String(line).includes("returned")))
+            .toEqual([ `GET /result/409 returned 409 with response {"status":409}` ]);
+    });
+
+    it("leaves the response a route already sent alone, and logs it without a length", async () => {
+        const logRequest = vi.spyOn(getLog(), "request");
+
+        const res = await request(app).get("/result-handled").expect(207);
+
+        expect(res.text).toBe("handled by the route");
+        expect(logRequest).toHaveBeenCalledExactlyOnceWith(expect.anything(), expect.anything(), expect.any(Number), 0);
+    });
+
+    it("logs a handler that fails after answering, without answering twice", async () => {
+        const error = vi.spyOn(getLog(), "error");
+
+        const res = await request(app).get("/result-late-failure").expect(202);
+
+        expect(res.text).toBe("partial");
+        expect(error).toHaveBeenCalledExactlyOnceWith(expect.stringMatching(/^get \/result-late-failure threw exception: 'late failure'/));
+    });
+});
+
+describe("internalRoute response delivery", () => {
+    let server: Server;
+    let port: number;
+
+    beforeAll(async () => {
+        route("get", "/delivery/large", [], () => ({ payload: "x".repeat(64 * 1024 * 1024) }), apiResultHandler);
+        route("get", "/delivery/small", [], () => ({ ok: true }), apiResultHandler);
+        // Sends the head and the start of a 1024-byte body and holds back the rest, as a transfer
+        // that the client gives up on does.
+        route("get", "/delivery/stalled", [], () => ({}), (_req, res) => {
+            res.status(200).setHeader("Content-Type", "text/plain");
+            res.write("x".repeat(16));
+            return 1024;
+        });
+
+        const app = express();
+        app.use(router);
+        server = app.listen(0);
+        await new Promise((resolve) => server.once("listening", resolve));
+        port = (server.address() as AddressInfo).port;
+    });
+
+    afterAll(() => {
+        server.close();
+    });
+
+    /** Requests `path` and drops the connection as soon as the first bytes of the body arrive. */
+    function disconnectAfterFirstChunk(path: string) {
+        return new Promise<void>((resolve, reject) => {
+            const req = http.get({ port, path }, (res) => {
+                res.once("data", () => {
+                    req.destroy();
+                    resolve();
+                });
+            });
+            req.on("error", (e: NodeJS.ErrnoException) => e.code === "ECONNRESET" ? resolve() : reject(e));
+        });
+    }
+
+    it("logs a client that disconnects before the response is delivered", async () => {
+        const info = vi.spyOn(getLog(), "info");
+
+        await disconnectAfterFirstChunk("/delivery/stalled?logMarkerId=m1");
+
+        await vi.waitFor(() => expect(info).toHaveBeenCalledWith(
+            expect.stringMatching(/^Aborted 200 GET \/delivery\/stalled\?logMarkerId=m1 after \d+ms: /),
+        ));
+        expect(info.mock.calls.flat().filter((line) => String(line).startsWith("Aborted"))).toEqual([
+            expect.stringMatching(/: the client disconnected before receiving the 1024-byte response$/)
+        ]);
+        info.mockRestore();
+    });
+
+    // Windows accepts the whole 64 MiB write into the socket at once, even over loopback with a
+    // client that reads nothing, so the response counts as finished before the client disconnects.
+    it.skipIf(process.platform === "win32")("logs a client that disconnects during a large transfer", async () => {
+        const info = vi.spyOn(getLog(), "info");
+
+        await disconnectAfterFirstChunk("/delivery/large?logMarkerId=m2");
+
+        await vi.waitFor(() => expect(info).toHaveBeenCalledWith(expect.stringMatching(
+            /^Aborted 200 GET \/delivery\/large\?logMarkerId=m2 after \d+ms: the client disconnected before receiving the \d+-byte response$/
+        )));
+        info.mockRestore();
+    });
+
+    it("logs nothing extra for a response the client receives in full", async () => {
+        const info = vi.spyOn(getLog(), "info");
+
+        await request(server).get("/delivery/small").expect(200);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+
+        expect(info.mock.calls.flat().some((line) => String(line).startsWith("Aborted"))).toBe(false);
+        info.mockRestore();
     });
 });

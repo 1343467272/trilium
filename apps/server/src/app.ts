@@ -3,7 +3,6 @@ void import("@triliumnext/core");
 import { erase } from "@triliumnext/core";
 import compression from "compression";
 import cookieParser from "cookie-parser";
-import ejs from "ejs";
 import express from "express";
 import helmet from "helmet";
 import { t } from "i18next";
@@ -11,7 +10,7 @@ import path from "path";
 import favicon from "serve-favicon";
 import type serveStatic from "serve-static";
 
-import assets from "./routes/assets.js";
+import assets, { getClientDir } from "./routes/assets.js";
 import custom from "./routes/custom.js";
 import error_handlers from "./routes/error_handlers.js";
 import mcpRoutes from "./routes/mcp.js";
@@ -31,13 +30,9 @@ export default async function buildApp() {
     const app = express();
 
     const publicDir = isDev ? path.join(getResourceDir(), "../dist/public") : path.join(getResourceDir(), "public");
-    const publicAssetsDir = path.join(publicDir, "assets");
+    // The client source dir in dev, where `dist/public` is not rebuilt; the built `public` dir otherwise.
+    const publicAssetsDir = path.join(getClientDir(), "assets");
     const assetsDir = RESOURCE_DIR;
-
-    // view engine setup
-    app.set("views", path.join(assetsDir, "views"));
-    app.engine("ejs", (filePath, options, callback) => ejs.renderFile(filePath, options, callback));
-    app.set("view engine", "ejs");
 
     app.use((req, res, next) => {
         // set CORS headers
@@ -94,7 +89,7 @@ export default async function buildApp() {
 
     app.use(express.text({ limit: "500mb" }));
     app.use(express.json({ limit: "500mb" }));
-    app.use(express.raw({ limit: "500mb" }));
+    app.use(express.raw({ type: ["application/octet-stream", "application/zip"], limit: "500mb" }));
     app.use(express.urlencoded({ extended: false }));
     app.use(cookieParser());
 
@@ -115,10 +110,16 @@ export default async function buildApp() {
     app.use(`/manifest.webmanifest`, express.static(path.join(publicAssetsDir, "manifest.webmanifest"), STATIC_OPTIONS));
     app.use(`/robots.txt`, express.static(path.join(publicAssetsDir, "robots.txt"), STATIC_OPTIONS));
     app.use(`/icon.png`, express.static(path.join(publicAssetsDir, "icon.png"), STATIC_OPTIONS));
+    app.use(`/apple-touch-icon.png`, express.static(path.join(publicAssetsDir, "apple-touch-icon.png"), STATIC_OPTIONS));
 
-    const { default: sessionParser, startSessionCleanup } = await import("./routes/session_parser.js");
+    const {
+        default: sessionParser,
+        startSessionCleanup,
+        startSessionRevocationOnPasswordChange
+    } = await import("./routes/session_parser.js");
     app.use(sessionParser);
     startSessionCleanup();
+    startSessionRevocationOnPasswordChange();
     app.use(favicon(path.join(assetsDir, isDev ? "icon-dev.ico" : "icon.ico")));
 
     // Always mount the OIDC middleware, but have it activate reactively from the current `mfaMethod`

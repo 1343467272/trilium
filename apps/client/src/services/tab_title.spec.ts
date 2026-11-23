@@ -1,6 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { buildTabTitle, TAB_TITLE_SEPARATOR } from "./tab_title.js";
+import { buildNote } from "../test/easy-froca.js";
+import protectedSessionHolder from "./protected_session_holder.js";
+import { buildTabTitle, noteTitleHtml, TAB_TITLE_SEPARATOR } from "./tab_title.js";
+
+vi.mock("./i18n.js", async (importOriginal) => ({
+    ...(await importOriginal<typeof import("./i18n.js")>()),
+    t: (key: string) => key
+}));
 
 describe("buildTabTitle", () => {
     it("joins split titles with the separator and preserves each segment's active flag", () => {
@@ -13,8 +20,8 @@ describe("buildTabTitle", () => {
         );
 
         expect(segments).toEqual([
-            { text: "Inbox", active: false },
-            { text: "Tasks", active: true }
+            { text: "Inbox", html: "Inbox", active: false },
+            { text: "Tasks", html: "Tasks", active: true }
         ]);
         expect(tooltip).toBe(`Inbox${TAB_TITLE_SEPARATOR}Tasks`);
     });
@@ -79,6 +86,20 @@ describe("buildTabTitle tooltipHtml", () => {
         expect(tooltipHtml).not.toContain("<script>");
     });
 
+    it("uses a split's own markup in place of its escaped title", () => {
+        const locked = `<span class="protected-title">Protected</span>`;
+        const { segments, tooltipHtml } = buildTabTitle(
+            [
+                { title: "A & B", active: false },
+                { title: "Secret", html: locked, active: true }
+            ],
+            "New tab"
+        );
+
+        expect(segments.map((s) => s.html)).toEqual([ "A &amp; B", locked ]);
+        expect(tooltipHtml).toBe(`A &amp; B${TAB_TITLE_SEPARATOR}<strong>${locked}</strong>`);
+    });
+
     it("escapes ampersands before other entities", () => {
         const { tooltipHtml } = buildTabTitle([{ title: "A & B <c>", active: false }], "New tab");
 
@@ -109,5 +130,24 @@ describe("buildTabTitle tooltipHtml", () => {
         const { tooltipHtml } = buildTabTitle([{ title: "Inbox", active: false }], "New tab", { pinnedPrefix: "A & B: " });
 
         expect(tooltipHtml).toBe("A &amp; B: Inbox");
+    });
+});
+
+describe("noteTitleHtml", () => {
+    afterEach(() => {
+        vi.restoreAllMocks();
+    });
+
+    it("escapes the title, and reads Protected with a lock while the session is locked", () => {
+        const note = buildNote({ title: "R&D <b>" });
+        expect(noteTitleHtml(note)).toBe("R&amp;D &lt;b&gt;");
+
+        note.isProtected = true;
+        const lock = `<span class="bx bx-lock-alt protected-icon tn-icon"></span>`;
+        vi.spyOn(protectedSessionHolder, "isProtectedSessionAvailable").mockReturnValue(true);
+        expect(noteTitleHtml(note)).toBe(`R&amp;D &lt;b&gt;${lock}`);
+        vi.spyOn(protectedSessionHolder, "isProtectedSessionAvailable").mockReturnValue(false);
+        const locked = `<span class="protected-title">protected_session.locked_note_title</span>`;
+        expect(noteTitleHtml(note)).toBe(`${locked}${lock}`);
     });
 });

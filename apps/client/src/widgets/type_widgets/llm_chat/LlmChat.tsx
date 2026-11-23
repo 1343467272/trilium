@@ -3,7 +3,9 @@ import "./LlmChat.css";
 import { useCallback, useEffect, useRef } from "preact/hooks";
 
 import { t } from "../../../services/i18n.js";
-import { useEditorSpacedUpdate, useNoteLabelBoolean, useTriliumEvent } from "../../react/hooks.js";
+import { useTriliumEvent } from "../../react/hooks/events.js";
+import { useNoteLabelBoolean } from "../../react/hooks/note.js";
+import { useEditorSpacedUpdate } from "../../react/hooks/editor.js";
 import { TypeWidgetProps } from "../type_widget.js";
 import { useChatContextMenu } from "./chat_context_menu.js";
 import { useChatHighlights } from "./chat_highlights.js";
@@ -91,6 +93,7 @@ export default function LlmChat({ note, noteContext, isVisible }: TypeWidgetProp
                     onWebSearchChange={triggerSave}
                     onNoteToolsChange={triggerSave}
                     onExtendedThinkingChange={triggerSave}
+                    onPermissionsChange={triggerSave}
                     onModelChange={triggerSave}
                 />
             )}

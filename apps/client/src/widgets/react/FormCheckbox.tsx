@@ -1,9 +1,9 @@
-import { Tooltip } from "bootstrap";
 import { ComponentChildren, CSSProperties } from "preact";
 import { useCallback, useEffect, useMemo, useRef } from "preact/hooks";
 
 import { escapeQuotes } from "../../services/utils";
-import { useUniqueName } from "./hooks";
+import { useUniqueName } from "./hooks/dom";
+import { attachTooltip } from "./hooks/tooltip";
 
 interface FormCheckboxProps {
     name?: string;
@@ -19,11 +19,13 @@ interface FormCheckboxProps {
      */
     indeterminate?: boolean;
     disabled?: boolean;
+    /** `-1` keeps the box out of the tab order, for one that a pointer reaches through its row. */
+    tabIndex?: number;
     onChange(newValue: boolean): void;
     containerStyle?: CSSProperties;
 }
 
-export default function FormCheckbox({ name, disabled, label, currentValue, indeterminate, onChange, hint, containerStyle }: FormCheckboxProps) {
+export default function FormCheckbox({ name, disabled, label, currentValue, indeterminate, tabIndex, onChange, hint, containerStyle }: FormCheckboxProps) {
     const labelRef = useRef<HTMLLabelElement>(null);
     const inputRef = useRef<HTMLInputElement>(null);
     const id = useUniqueName(name);
@@ -37,12 +39,10 @@ export default function FormCheckbox({ name, disabled, label, currentValue, inde
     useEffect(() => {
         if (!hint || !labelRef.current) return;
 
-        const tooltipInstance = Tooltip.getOrCreateInstance(labelRef.current, {
+        return attachTooltip(labelRef.current, {
             html: true,
             customClass: "tooltip-top"
         });
-
-        return () => tooltipInstance?.dispose();
     }, [hint]);
 
     const labelStyle = useMemo(() =>
@@ -73,6 +73,7 @@ export default function FormCheckbox({ name, disabled, label, currentValue, inde
                     checked={currentValue || false}
                     value="1"
                     disabled={disabled}
+                    tabIndex={tabIndex}
                     onChange={handleChange} />
                 {label}
             </label>

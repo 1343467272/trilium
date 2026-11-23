@@ -91,7 +91,6 @@ export default class FileUploadEditing extends Plugin {
 			for ( const entry of changes ) {
 				if ( entry.type == 'insert' ) {
 					const item = entry.position.nodeAfter;
-					/* v8 ignore next -- defensive: an "insert" differ change always reports the inserted node as position.nodeAfter, so `item` is never null here (the falsy branch is unreachable from any model operation). */
 					if ( item ) {
 						const isInGraveyard = entry.position.root.rootName == '$graveyard';
 						for ( const file of getUploadPlaceholders( editor, item ) ) {
@@ -149,8 +148,7 @@ export default class FileUploadEditing extends Plugin {
 				// Before `attachmentId` is set: setting it makes the host render the embed.
 				const isEmbed = fileElement.is( 'element', 'contentEmbed' );
 				if ( attachmentId && isEmbed && isFocusUpload( loader ) ) {
-					glob.getComponentByEl<EditorComponent>( editor.editing.view.getDomRoot() )
-						.focusContentEmbed?.( attachmentId );
+					editor.config.get( 'contentEmbed' )?.focusAttachment?.( attachmentId );
 				}
 
 				model.enqueueChange( { isUndoable: false }, writer => {

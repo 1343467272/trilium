@@ -17,7 +17,6 @@ vi.mock("./link.js", () => ({
 import appContext from "../components/app_context.js";
 import froca from "./froca.js";
 import glob from "./glob.js";
-import { requireCss } from "./glob.js";
 import linkService from "./link.js";
 import server from "./server.js";
 import utils from "./utils.js";
@@ -80,32 +79,10 @@ describe("setupGlobs", () => {
         await expect(window.glob.getReferenceLinkTitle("#root/abc")).resolves.toBe("async:#root/abc");
         expect(getReferenceLinkTitle).toHaveBeenCalledWith("#root/abc");
 
-        expect(window.glob.getReferenceLinkTitleSync("#root/def")).toBe("sync:#root/def");
-        expect(getReferenceLinkTitleSync).toHaveBeenCalledWith("#root/def");
+        expect(window.glob.getReferenceLinkTitleSync("#root/def", "Stored")).toBe("sync:#root/def");
+        expect(getReferenceLinkTitleSync).toHaveBeenCalledWith("#root/def", "Stored");
     });
 
-    it("loads each configured app CSS note that isn't already present", () => {
-        // Pre-seed an existing link so the dedup branch (some => true) is exercised.
-        const existing = document.createElement("link");
-        existing.rel = "stylesheet";
-        existing.href = "/anything/api/notes/download/already";
-        document.head.appendChild(existing);
-
-        window.glob.appCssNoteIds = ["already", "fresh"];
-        glob.setupGlobs();
-
-        const hrefs = Array.from(document.querySelectorAll("head link")).map((l) => (l as HTMLLinkElement).getAttribute("href"));
-        // "already" was present -> not re-added; "fresh" gets appended without asset path prefix.
-        expect(hrefs.filter((h) => h?.endsWith("api/notes/download/already"))).toHaveLength(1);
-        expect(hrefs).toContain("api/notes/download/fresh");
-    });
-
-    it("handles a missing appCssNoteIds list", () => {
-        delete (window.glob as any).appCssNoteIds;
-        glob.setupGlobs();
-        // No css links added from the (absent) list.
-        expect(document.querySelectorAll("head link")).toHaveLength(0);
-    });
 
     it("opens external anchor links in a new window", () => {
         glob.setupGlobs();
@@ -120,25 +97,47 @@ describe("setupGlobs", () => {
     });
 });
 
+/** A `CKEditorError` as `ckeditor5` builds it: `context` holds an editor object, `data` the details. */
+function ckEditorError() {
+    const error = new Error("unexpected-error") as Error & Record<string, unknown>;
+    error.is = (type: string) => type === "CKEditorError";
+    error.context = { document: { roots: [ "main" ] } };
+    error.data = { originalError: "Editor crashed." };
+    return error;
+}
+
 describe("window.onerror handler", () => {
     beforeEach(() => glob.setupGlobs());
 
-    it("logs full details for a normal error and serializes the error object", () => {
-        const result = window.onerror!("Some failure", "http://x/app.js", 12, 34, new Error("boom"));
+    it("logs the message, then the stack without its header line", () => {
+        const error = new Error("boom");
+        error.stack = "Error: boom\n    at run (app.js:1:2)";
+        const result = window.onerror!("Some failure", "http://x/app.js", 12, 34, error);
 
         expect(result).toBe(false);
-        expect((ws as any).logError).toHaveBeenCalledTimes(1);
-        const msg = (ws as any).logError.mock.calls[0][0] as string;
-        expect(msg).toContain("Message: Some failure");
-        expect(msg).toContain("URL: http://x/app.js");
-        expect(msg).toContain("Line: 12");
-        expect(msg).toContain("Column: 34");
+        expect((ws as any).logError).toHaveBeenCalledExactlyOnceWith(
+            "Uncaught error: Some failure\n    at run (app.js:1:2)");
+    });
+
+    it("logs where the error happened when it has no stack", () => {
+        window.onerror!("Some failure", "http://x/app.js", 12, 34, undefined);
+        expect((ws as any).logError).toHaveBeenCalledExactlyOnceWith(
+            "Uncaught error: Some failure\nat http://x/app.js:12:34");
     });
 
     it("reports no details for a generic 'Script error'", () => {
         window.onerror!("Script error.", undefined, undefined, undefined, undefined);
         const msg = (ws as any).logError.mock.calls[0][0] as string;
         expect(msg).toContain("No details available");
+    });
+
+    it("ignores the benign ResizeObserver loop notifications", () => {
+        window.onerror!("ResizeObserver loop completed with undelivered notifications.", "u", 0, 0, undefined);
+        window.onerror!("ResizeObserver loop limit exceeded", "u", 0, 0, undefined);
+        expect((ws as any).logError).not.toHaveBeenCalled();
+
+        window.onerror!("Some failure", "u", 1, 2, undefined);
+        expect((ws as any).logError).toHaveBeenCalledOnce();
     });
 
     it("falls back to toString when the error object cannot be JSON-stringified", () => {
@@ -152,7 +151,18 @@ describe("window.onerror handler", () => {
         window.onerror!("circular failure", "u", 1, 2, err);
         const msg = (ws as any).logError.mock.calls[0][0] as string;
         // The catch branch stringified the thrown serialization error via toString().
-        expect(msg).toContain("Error object: Error: nope");
+        expect(msg).toContain("Details: Error: nope");
+    });
+
+    it("logs the details of a CKEditor error without its editor object", () => {
+        const error = ckEditorError();
+        error.stack = "    at change (ckeditor5.js:1:2)";
+        window.onerror!("unexpected-error", "u", 1, 2, error);
+        expect((ws as any).logError).toHaveBeenCalledExactlyOnceWith([
+            "Uncaught error: unexpected-error",
+            "Details: {\"data\":{\"originalError\":\"Editor crashed.\"}}",
+            "    at change (ckeditor5.js:1:2)"
+        ].join("\n"));
     });
 });
 
@@ -167,10 +177,11 @@ describe("unhandledrejection handler", () => {
 
     it("logs full details for a normal rejection", () => {
         dispatchRejection({ message: "rejected", lineNumber: 5, columnNumber: 6, stack: "stack" });
-        const msg = (ws as any).logError.mock.calls[0][0] as string;
-        expect(msg).toContain("Message: rejected");
-        expect(msg).toContain("Line: 5");
-        expect(msg).toContain("Column: 6");
+        expect((ws as any).logError.mock.calls[0][0]).toBe([
+            "Uncaught error: rejected",
+            "Details: {\"lineNumber\":5,\"columnNumber\":6}",
+            "stack"
+        ].join("\n"));
     });
 
     it("reports no details for a script error rejection", () => {
@@ -188,30 +199,18 @@ describe("unhandledrejection handler", () => {
         // no .message -> string is undefined -> falls into the details branch
         dispatchRejection(circular);
         const msg = (ws as any).logError.mock.calls[0][0] as string;
-        expect(msg).toContain("Error object: Error: bad");
-    });
-});
-
-describe("requireCss", () => {
-    beforeEach(() => {
-        (window as any).glob = { assetPath: "/myassets" };
-        resetDom();
+        expect(msg).toContain("Details: Error: bad");
     });
 
-    it("prepends the asset path by default and appends a stylesheet link", async () => {
-        await requireCss("css/theme.css");
-        const link = document.querySelector("head link") as HTMLLinkElement;
-        expect(link.getAttribute("href")).toBe("/myassets/css/theme.css");
+    it("logs a rejection with a value that is not an error", () => {
+        dispatchRejection("plain reason");
+        expect((ws as any).logError.mock.calls[0][0]).toBe("Uncaught error: plain reason");
     });
 
-    it("does not append a duplicate when a matching stylesheet already exists", async () => {
-        const existing = document.createElement("link");
-        existing.rel = "stylesheet";
-        existing.href = "http://host/some/path.css";
-        document.head.appendChild(existing);
-
-        await requireCss("some/path.css", true);
-        // Still just the one link; nothing appended because the existing href ends with the url.
-        expect(document.querySelectorAll("head link")).toHaveLength(1);
+    it("leaves the editor object out of a CKEditor error", () => {
+        dispatchRejection(ckEditorError());
+        const msg = (ws as any).logError.mock.calls[0][0] as string;
+        expect(msg).toContain("Editor crashed.");
+        expect(msg).not.toContain("roots");
     });
 });

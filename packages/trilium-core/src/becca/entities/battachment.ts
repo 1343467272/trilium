@@ -2,6 +2,7 @@
 
 import { type AttachmentRow, isImageAttachmentRole } from "@triliumnext/commons";
 
+import { ValidationError } from "../../errors.js";
 import dateUtils from "../../services/utils/date";
 import { getLog } from "../../services/log.js";
 import noteService from "../../services/notes.js";
@@ -171,7 +172,7 @@ class BAttachment extends AbstractBeccaEntity<BAttachment> {
             title: this.title,
             type: (attachmentRoleToNoteTypeMapping as any)[this.role],
             mime: this.mime,
-            content: this.getContent(),
+            content: noteService.getPortableContent(this),
             isProtected: this.isProtected
         });
 
@@ -204,6 +205,7 @@ class BAttachment extends AbstractBeccaEntity<BAttachment> {
             // resolving to "[missing attachment]" once the attachment is gone. These links are stored
             // as `<a href="#root/{ownerId}?viewMode=attachments&attachmentId={attachmentId}">` (the `&`
             // may be HTML-encoded as `&amp;`), which we collapse to a plain note link `#root/{noteId}`.
+            /* v8 ignore next -- an attachment that can be converted was loaded from the database, so it has an ID */
             if (attachmentId) {
                 fixedContent = fixedContent.replace(
                     new RegExp(`href="[^"]*attachmentId=${escapeRegExp(attachmentId)}[^"]*"`, "g"),
@@ -237,6 +239,10 @@ class BAttachment extends AbstractBeccaEntity<BAttachment> {
     }
 
     override beforeSaving() {
+        if (this.becca.notes[this.ownerId]?.isVirtual) {
+            throw new ValidationError(`Cannot save an attachment of note '${this.ownerId}': virtual notes have no attachments.`);
+        }
+
         super.beforeSaving();
 
         if (this.position === undefined || this.position === null) {

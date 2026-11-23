@@ -1,4 +1,4 @@
-import { _setModelData as setModelData, _getViewData as getViewData, ClassicEditor, CodeBlock, Essentials, GeneralHtmlSupport, HorizontalLine, Paragraph, type EditorConfig } from "ckeditor5";
+import { _setModelData as setModelData, _getViewData as getViewData, ClassicEditor, CodeBlock, Essentials, FindAndReplaceEditing, GeneralHtmlSupport, HorizontalLine, Paragraph, type EditorConfig } from "ckeditor5";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createTestEditor } from "../../../test/editor-kit.js";
@@ -73,6 +73,41 @@ describe("SyntaxHighlighting", () => {
         expect(getViewData(editor.editing.view)).not.toContain("hljs-keyword");
     });
 
+    it("loads highlight.js once a code block shows, for the language of each block", async () => {
+        const loadHighlightJs = vi.fn(async (_mimeType: string) => fakeHljs);
+        editor = await createEditor(makeConfig({ loadHighlightJs }));
+
+        setModelData(editor.model, "<paragraph>text[]</paragraph>");
+        await flushPostFixers(editor);
+        expect(loadHighlightJs).not.toHaveBeenCalled();
+
+        setModelData(editor.model, '<codeBlock language="javascript">a</codeBlock>'
+            + '<codeBlock language="python">b</codeBlock><codeBlock language="javascript">c[]</codeBlock>');
+        await flushPostFixers(editor);
+        expect(loadHighlightJs.mock.calls).toEqual([ [ "javascript" ], [ "python" ] ]);
+        expect(fakeHljs.highlight.mock.calls).toEqual([
+            [ "a", { language: "javascript" } ],
+            [ "c", { language: "javascript" } ],
+            [ "b", { language: "python" } ]
+        ]);
+        expect(getViewData(editor.editing.view).match(/hljs-keyword/g)).toHaveLength(3);
+    });
+
+    it("leaves an editor destroyed while its language loads", async () => {
+        let resolveLoad: (hljs: FakeHljs) => void = () => undefined;
+        const loadHighlightJs = vi.fn(() => new Promise<FakeHljs>((resolve) => {
+            resolveLoad = resolve;
+        }));
+        editor = await createEditor(makeConfig({ loadHighlightJs }));
+        setModelData(editor.model, '<codeBlock language="javascript">a[]</codeBlock>');
+        expect(loadHighlightJs).toHaveBeenCalledTimes(1);
+
+        await editor.destroy();
+        resolveLoad(fakeHljs);
+        await new Promise((resolve) => setTimeout(resolve));
+        expect(fakeHljs.highlight).not.toHaveBeenCalled();
+    });
+
     it("highlights a code block, downcasting markers to spans", async () => {
         editor = await createEditor(makeConfig());
 
@@ -127,6 +162,48 @@ describe("SyntaxHighlighting", () => {
 
         expect(fakeHljs.highlight).toHaveBeenLastCalledWith("const abc", { language: "javascript" });
         expect(getViewData(editor.editing.view)).toContain("hljs-keyword");
+    });
+
+    it("keeps the find results of a code block when replacing one of them re-highlights it", async () => {
+        editor = await createEditor(makeConfig(), [ FindAndReplaceEditing ]);
+
+        setModelData(editor.model, '<codeBlock language="javascript">foo bar foo[]</codeBlock>');
+        await flushPostFixers(editor);
+
+        const { results } = editor.execute("find", "foo");
+        expect(results.length).toBe(2);
+        const [ replaced, remaining ] = [ ...results ];
+
+        editor.execute("replace", "baz", replaced);
+
+        expect(remaining.marker?.getRange().isFlat).toBe(true);
+        expect(remaining.marker && editor.model.markers.has(remaining.marker)).toBe(true);
+        expect(fakeHljs.highlight).toHaveBeenLastCalledWith("baz bar foo", { language: "javascript" });
+        expect(getViewData(editor.editing.view)).toContain("hljs-keyword");
+    });
+
+    it("keeps the find results of a code block when typing into it during a search", async () => {
+        editor = await createEditor(makeConfig(), [ FindAndReplaceEditing ]);
+
+        setModelData(editor.model, '<codeBlock language="javascript">foo bar foo[]</codeBlock>');
+        await flushPostFixers(editor);
+
+        const results = editor.plugins.get(FindAndReplaceEditing).find("foo");
+        expect(results.length).toBe(2);
+
+        editor.model.change((writer) => {
+            const codeBlock = editor?.model.document.getRoot()?.getChild(0);
+            if (codeBlock && codeBlock.is("element")) {
+                writer.insertText(" foo", writer.createPositionAt(codeBlock, "end"));
+            }
+        });
+
+        expect(fakeHljs.highlight).toHaveBeenLastCalledWith("foo bar foo foo", { language: "javascript" });
+        const markerNames = [ ...results ].map((result) => result.marker?.name);
+        expect(markerNames).toHaveLength(3);
+        for (const name of markerNames) {
+            expect(name && editor.model.markers.has(name)).toBe(true);
+        }
     });
 
     it("handles softBreaks (newlines) in code blocks", async () => {
@@ -267,7 +344,7 @@ describe("SyntaxHighlighting", () => {
         expect(fakeHljs.highlight).toHaveBeenCalledWith("", { language: "javascript" });
     });
 
-    it("clears markers when a code block is removed", async () => {
+    it("does not re-highlight when a code block is removed", async () => {
         editor = await createEditor(makeConfig());
 
         setModelData(editor.model,
@@ -297,9 +374,11 @@ function escapeHtml(text: string): string {
         .replace(/'/g, "&#x27;");
 }
 
-// The postfixer runs synchronously inside model.change, but markers are
-// downcast on the next render; yield to flush any pending view updates.
+/**
+ * Waits for the languages that the postfixer asked `loadHighlightJs()` for, and the highlighting
+ * that follows, then renders the markers.
+ */
 async function flushPostFixers(editor: ClassicEditor): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve));
     editor.editing.view.forceRender();
-    await Promise.resolve();
 }

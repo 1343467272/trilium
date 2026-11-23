@@ -1,0 +1,75 @@
+import { act } from "preact/test-utils";
+import { describe, expect, it, vi } from "vitest";
+
+import Component from "../../components/component";
+import NoteContext from "../../components/note_context";
+import options from "../../services/options";
+import { buildNote } from "../../test/easy-froca";
+import { renderInto } from "../../test/render";
+import { NoteContextContext, ParentComponent } from "../react/react_utils";
+import NoteTitleActions from "./NoteTitleActions";
+
+// The attribute grid has a spec of its own; here one cell is enough for the section to show.
+vi.mock("../promoted_attribute_cells", () => ({
+    usePromotedAttributeData: () => [ [ { uniqueId: "cell" } ], () => {} ]
+}));
+vi.mock("../PromotedAttributes", () => ({
+    PromotedAttributesContent: () => <div className="promoted-attributes-stub" />
+}));
+vi.mock("../NoteDetail", () => ({
+    getExtendedWidgetType: async () => "text",
+    checkFullHeight: () => true
+}));
+vi.mock("./NoteTypeSwitcher", () => ({ default: () => <div className="note-type-switcher-stub" /> }));
+vi.mock("./PinnedAttachments", () => ({ default: () => null }));
+
+describe("NoteTitleActions", () => {
+    it("toggles the promoted attributes on their shortcut only for its own note context", async () => {
+        const note = buildNote({ title: "Text", type: "text" });
+        const noteContext = new NoteContext("ntx-split-2");
+        noteContext.noteId = note.noteId;
+        noteContext.viewScope = { viewMode: "default" };
+        const parent = new Component();
+        let container: HTMLElement | undefined;
+        await act(async () => {
+            container = renderInto(
+                <ParentComponent.Provider value={parent}>
+                    <NoteContextContext.Provider value={noteContext}>
+                        <NoteTitleActions />
+                    </NoteContextContext.Provider>
+                </ParentComponent.Provider>
+            );
+        });
+        const expanded = () => container?.querySelector("[aria-expanded]")?.getAttribute("aria-expanded");
+        expect(expanded()).toBe("false");
+
+        await act(async () => { await parent.handleEvent("toggleRibbonTabPromotedAttributes", { ntxId: "ntx-split-1" }); });
+        expect(expanded()).toBe("false");
+
+        await act(async () => { await parent.handleEvent("toggleRibbonTabPromotedAttributes", { ntxId: "ntx-split-2" }); });
+        expect(expanded()).toBe("true");
+    });
+
+    it("carries the note type switcher of a text note with the large title only, the compact one has it in a bar", async () => {
+        const note = buildNote({ title: "Text", type: "text" });
+        const noteContext = new NoteContext("ntx-compact");
+        noteContext.noteId = note.noteId;
+        noteContext.viewScope = { viewMode: "default" };
+        const render = () => renderInto(
+            <ParentComponent.Provider value={new Component()}>
+                <NoteContextContext.Provider value={noteContext}>
+                    <NoteTitleActions />
+                </NoteContextContext.Provider>
+            </ParentComponent.Provider>
+        ).querySelector(".title-actions .note-type-switcher-stub");
+
+        options.set("noteTitleStyle", "large");
+        // The switcher loads with the first text note; after that it shows from the first render.
+        render();
+        await vi.waitFor(() => expect(document.querySelector(".title-actions .note-type-switcher-stub")).not.toBeNull());
+        expect(render()).not.toBeNull();
+
+        options.set("noteTitleStyle", "compact");
+        expect(render()).toBeNull();
+    });
+});

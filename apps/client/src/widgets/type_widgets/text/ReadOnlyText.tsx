@@ -1,34 +1,47 @@
 import "./ReadOnlyText.css";
-// we load CKEditor also for read only notes because they contain content styles required for correct rendering of even read only notes
-// we could load just ckeditor-content.css but that causes CSS conflicts when both build CSS and this content CSS is loaded at the same time
-// (see https://github.com/zadam/trilium/issues/1590 for example of such conflict)
-import "@triliumnext/ckeditor5";
+// The editor's own stylesheets rather than the separately built ckeditor-content.css, which
+// conflicts with them when both load (https://github.com/zadam/trilium/issues/1590).
+import "@triliumnext/ckeditor5/src/styles.js";
 
+import {
+    applyCollapsedHeadings
+} from "@triliumnext/ckeditor5/src/plugins/collapsible_headings/collapsible_headings_read_only.js";
+import {
+    applyListItemAlignment
+} from "@triliumnext/ckeditor5/src/plugins/list_item_alignment_read_only.js";
+import { applyTableScroll } from "@triliumnext/ckeditor5/src/plugins/table_scroll_read_only.js";
+import {
+    applyStickyTableHeaders
+} from "@triliumnext/ckeditor5/src/plugins/table_sticky_header_read_only.js";
+import { CLASSES as TAB_CLASSES } from "@triliumnext/ckeditor5/src/plugins/tabs/constants.js";
+import { applyTabs } from "@triliumnext/ckeditor5/src/plugins/tabs/tabs_read_only.js";
 import clsx from "clsx";
 import { Ref } from "preact";
 import { useEffect, useLayoutEffect, useMemo, useRef as usePreactRef } from "preact/hooks";
 
 import appContext from "../../../components/app_context";
 import FNote from "../../../entities/fnote";
+import { consumeBlockReference } from "../../../services/block_reference";
 import { consumeBookmark } from "../../../services/bookmark_jump";
-import { applyInlineMermaid, rewriteMermaidDiagramsInContainer } from "../../../services/content_renderer_text";
+import { t } from "../../../services/i18n";
+import { applyNoteImageVersions } from "../../../services/image_urls";
 import { applyLinkEmbeds } from "../../../services/link_embed";
-import { renderMathInElement } from "../../../services/math";
 import { trackPendingRender } from "../../../services/pending_renders";
 import { consumeSearchTerms } from "../../../services/search_jump";
 import { formatCodeBlocks } from "../../../services/syntax_highlight";
 import { isContentRightToLeft } from "../../../utils/formatters";
-import { useNoteBlob, useNoteLabel, useSearchTermsConsumer, useSyncedRef, useTriliumEvent, useTriliumOption, useTriliumOptionBool } from "../../react/hooks";
+import { useTriliumEvent } from "../../react/hooks/events";
+import { useSyncedRef } from "../../react/hooks/dom";
+import { useNoteBlob, useNoteLabel } from "../../react/hooks/note";
+import { useTriliumOption, useTriliumOptionBool } from "../../react/hooks/options";
+import { useLinkTargetLanding, useSearchTermsConsumer } from "../../react/hooks/note_context";
 import { RawHtmlBlock } from "../../react/RawHtml";
+import { mountScrollableLabel } from "../../react/ScrollableLabel";
+import { useScrollRailHighlights } from "../../scroll_rail_markers";
 import { TypeWidgetProps } from "../type_widget";
+import { hasSourceEmbedBoxes, prepareEmbedBoxes } from "./embed_boxes";
 import { applyReferenceLinks } from "./read_only_helper";
-import {
-    loadEmbeddedAttachment,
-    loadEmbeddedNote,
-    refreshEmbeddedNote,
-    setupImageOpening,
-    watchContentEmbeds
-} from "./utils";
+import { refreshEmbeddedNote, setupImageOpening, watchContentEmbeds } from "./utils";
 
 export default function ReadOnlyText({ note, noteContext, ntxId, parentComponent, isVisible }: TypeWidgetProps) {
     // The componentId matters: the WS echo of a save made by the editable-text editor in the same
@@ -36,19 +49,25 @@ export default function ReadOnlyText({ note, noteContext, ntxId, parentComponent
     // hidden while the user temporarily edits an auto-read-only note — would refetch the whole blob
     // after every save and flash the loading overlay over the editor (#10575). Skipped own-component
     // changes are caught up on via refreshOnShow when this view is displayed again.
+    const readOnlyContentRef = usePreactRef<HTMLDivElement>(null);
     const blob = useNoteBlob(note, parentComponent?.componentId, {
         reportLoadStateTo: noteContext,
         isVisible,
-        refreshOnShow: true
+        refreshOnShow: true,
+        shownRef: readOnlyContentRef
     });
     const { isRtl } = useNoteLanguage(note);
-    const readOnlyContentRef = usePreactRef<HTMLDivElement>(null);
+    const renderedNoteIdRef = usePreactRef<string | undefined>(undefined);
 
-    // Scroll to bookmark anchor if navigated with ?bookmark=... The blob gate skips the mount run,
-    // which fires against an empty container while the content is still loading.
+    // The blob of the previous note stays until the blob of the next one loads.
     useEffect(() => {
-        if (!blob) return;
+        if (blob) renderedNoteIdRef.current = note.noteId;
+    }, [blob]);
+    // Scroll to the bookmark or the blocks a link points at, once the content of the note renders.
+    useLinkTargetLanding({ note, ntxId, isVisible }, () => {
+        if (!blob || renderedNoteIdRef.current !== note.noteId) return;
         consumeBookmark(readOnlyContentRef.current, noteContext?.viewScope);
+        consumeBlockReference(readOnlyContentRef.current, noteContext?.viewScope);
     }, [blob]);
 
     // Jump to the first search match when navigated from search results.
@@ -56,14 +75,19 @@ export default function ReadOnlyText({ note, noteContext, ntxId, parentComponent
         if (blob) consumeSearchTerms(noteContext, ntxId);
     }, [blob]);
     useSearchTermsConsumer(note, noteContext, ntxId);
+    useScrollRailHighlights(noteContext, note.noteId, !!isVisible,
+        () => readOnlyContentRef.current);
 
     return (
         <>
             <ReadOnlyTextContent
                 html={blob?.content ?? ""}
+                blobId={blob?.blobId}
+                noteId={note.noteId}
                 ntxId={ntxId}
                 dir={isRtl ? "rtl" : "ltr"}
                 contentRef={readOnlyContentRef}
+                canCollapseHeadings
             />
         </>
     );
@@ -72,6 +96,10 @@ export default function ReadOnlyText({ note, noteContext, ntxId, parentComponent
 interface ReadOnlyTextContentProps {
     /** CKEditor-compatible HTML to render. */
     html: string;
+    /** The blob that `html` is the content of, which the outline links headings of. */
+    blobId?: string;
+    /** The note `html` belongs to. Reference links to its own blocks show only their text. */
+    noteId?: string;
     /** Note context id — enables `contentElRefreshed` / `executeWithContentElement` integrations when provided. */
     ntxId?: string | null;
     dir?: "ltr" | "rtl";
@@ -79,15 +107,29 @@ interface ReadOnlyTextContentProps {
     className?: string;
     /** Optional external ref to the rendered content div (e.g. to drive scroll sync). */
     contentRef?: Ref<HTMLDivElement>;
+    /**
+     * Whether `html` changes as it is typed or streamed. Mermaid diagrams then draw in place,
+     * keeping the last drawing while the next renders, instead of in an embed box each.
+     */
+    isChanging?: boolean;
+    /**
+     * Whether the headings can be collapsed, starting from their saved state. A toggle is not
+     * saved and lasts until `html` renders again.
+     */
+    canCollapseHeadings?: boolean;
 }
 
 /**
  * Renders arbitrary CKEditor-style HTML with the same pipeline as {@link ReadOnlyText}:
  * mermaid rewriting, inline mermaid, embed expansion, KaTeX math, reference-link
- * titles, code-block syntax highlighting, and image click handling. Transforms re-run
+ * titles, tabs, code-block syntax highlighting, and image click handling. Transforms re-run
  * whenever `html` changes.
  */
-export function ReadOnlyTextContent({ html, ntxId, dir, className, contentRef: externalContentRef }: ReadOnlyTextContentProps) {
+export function ReadOnlyTextContent({
+    html, blobId, noteId, ntxId, dir, className, contentRef: externalContentRef,
+    isChanging = false, canCollapseHeadings = false
+}: ReadOnlyTextContentProps) {
+    const hasEmbedBoxes = hasSourceEmbedBoxes(isChanging);
     const contentRef = useSyncedRef(externalContentRef);
     const [ codeBlockWordWrap ] = useTriliumOptionBool("codeBlockWordWrap");
     const [ codeBlockTabWidth ] = useTriliumOption("codeBlockTabWidth");
@@ -112,28 +154,62 @@ export function ReadOnlyTextContent({ html, ntxId, dir, className, contentRef: e
         // which render a whole note of their own — finish after this effect returns. On screen they
         // simply paint when ready; a caller that snapshots the DOM instead (printing) has to wait for
         // them, so the work is registered rather than dropped on the floor.
+        const loadEmbedBoxes = prepareEmbedBoxes(container, {
+            seenNoteIds: new Set(), hostNoteId: noteId, isChanging
+        });
         trackPendingRender(container, Promise.all([
-            rewriteMermaidDiagramsInContainer(container),
-            applyInlineMermaid(container),
-            applyContentEmbeds(container),
             applyLinkEmbeds(container),
-            applyReferenceLinks(container),
-            formatCodeBlocks($(container))
+            applyReferenceLinks(container, noteId),
+            formatCodeBlocks($(container)),
+            applyMath(container),
+            // Last, so that no pass above reaches into the content of the boxes.
+            loadEmbedBoxes()
         ]));
 
-        applyMath(container);
+        applyNoteImageVersions(container);
+        applyListItemAlignment(container);
+        const disposeTableScroll = applyTableScroll(container);
+        const disposeStickyTableHeaders = applyStickyTableHeaders(container);
+        const disposeTabs = applyTabs(container, {
+            placeholder: t("text-editor.ck.tab-title"),
+            scrollLabels: {
+                start: t("text-editor.ck.scroll-to-the-previous-tabs"),
+                end: t("text-editor.ck.scroll-to-the-next-tabs")
+            }
+        });
+        const tabTitles = container.querySelectorAll<HTMLElement>(`.${TAB_CLASSES.tabTitle}`);
+        const disposeTabTitles = [ ...tabTitles ]
+            .filter((title) => title.hasChildNodes())
+            .map((title) => mountScrollableLabel(title));
+        const disposeHeadings = canCollapseHeadings ? applyCollapsedHeadings(container) : undefined;
         setupImageOpening(container, true);
-    }, [ html, ntxId, contentRef ]);
+
+        return () => {
+            disposeTableScroll();
+            disposeStickyTableHeaders();
+            disposeTabs();
+            disposeHeadings?.();
+            for (const dispose of disposeTabTitles) {
+                dispose();
+            }
+        };
+    }, [ html, noteId, ntxId, contentRef, isChanging, canCollapseHeadings ]);
 
     useEffect(() => {
         if (!contentRef.current) return;
         return watchContentEmbeds(contentRef.current);
-    }, [ contentRef ]);
+    }, [ contentRef, hasEmbedBoxes ]);
+
+    useTriliumEvent("entitiesReloaded", () => {
+        if (contentRef.current) applyNoteImageVersions(contentRef.current);
+    });
 
     // React to embedded note changes.
-    useTriliumEvent("refreshEmbeddedNote", ({ noteId }) => {
+    useTriliumEvent("refreshEmbeddedNote", ({ noteId: embeddedNoteId }) => {
         if (!contentRef.current) return;
-        refreshEmbeddedNote(contentRef.current, noteId);
+        refreshEmbeddedNote(contentRef.current, embeddedNoteId, {
+            seenNoteIds: new Set(noteId ? [ noteId ] : [])
+        });
     });
 
     // Search integration.
@@ -144,11 +220,14 @@ export function ReadOnlyTextContent({ html, ntxId, dir, className, contentRef: e
 
     return (
         <RawHtmlBlock
+            // The drawings in place replace the code blocks, which the embed boxes need again.
+            key={hasEmbedBoxes ? "embeds" : "drawings"}
             containerRef={contentRef}
             className={clsx("note-detail-readonly-text-content ck-content use-tn-links selectable-text", codeBlockWordWrap && "word-wrap", className)}
             tabindex={100}
             dir={dir}
             html={html}
+            blobId={blobId}
         />
     );
 }
@@ -164,22 +243,14 @@ function useNoteLanguage(note: FNote) {
     return { isRtl };
 }
 
-function applyContentEmbeds(container: HTMLDivElement) {
-    const loaded: Promise<unknown>[] = [];
-    const embeddedNotes = container.querySelectorAll<HTMLElement>(".include-note");
-    for (const embeddedNote of embeddedNotes) {
-        const { attachmentId, noteId } = embeddedNote.dataset;
-        if (attachmentId) {
-            loaded.push(loadEmbeddedAttachment(attachmentId, $(embeddedNote)));
-        } else if (noteId) {
-            loaded.push(loadEmbeddedNote(noteId, $(embeddedNote)));
-        }
-    }
-    return Promise.all(loaded);
-}
-
-function applyMath(container: HTMLDivElement) {
+async function applyMath(container: HTMLDivElement) {
     const equations = container.querySelectorAll<HTMLElement>("span.math-tex");
+    if (equations.length === 0) {
+        return;
+    }
+
+    // KaTeX is heavy, so the math service only loads for content with formulas.
+    const { renderMathInElement } = await import("../../../services/math");
     for (const equation of equations) {
         // throwOnError: false renders invalid formulas as an inline red error (with the
         // parse message as a tooltip) instead of throwing and logging to the console.

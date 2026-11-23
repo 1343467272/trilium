@@ -10,13 +10,14 @@ import { isStandalone } from "../../../../services/utils";
 import { Badge } from "../../../react/Badge";
 import { Card, CardSection } from "../../../react/Card";
 import FormTextBox from "../../../react/FormTextBox";
-import MaskedIcon from "../../../react/MaskedIcon";
+import Icon from "../../../react/Icon";
 import SelectableCard, { SelectableCardGrid } from "../../../react/SelectableCard";
 import WizardModal, { type WizardStep } from "../../../react/WizardModal";
 import OptionsRow from "../components/OptionsRow";
 import { useAntigravityDownload } from "./antigravity_download";
 import ModelSelection from "./ModelSelection";
 import { PROVIDER_ICONS } from "./provider_icons.js";
+import SearchProviderCheck from "./SearchProviderCheck";
 
 export interface LlmProviderConfig {
     id: string;
@@ -42,8 +43,8 @@ export interface ProviderType {
      * that an unedited field stores no endpoint override.
      */
     prefillBaseUrl?: boolean;
-    /** URL of the provider's logo (an imported `*.svg?url`), rendered monochrome via a CSS mask. */
-    iconUrl: string;
+    /** The icon class of the provider's mark, from {@link PROVIDER_ICONS}. */
+    icon: string;
     /**
      * Short blurb under the provider name, only where the name doesn't already say
      * what the card is or what it needs — a prerequisite (Claude Code), or a card
@@ -114,7 +115,7 @@ const PROVIDER_GROUPS = [
     { id: "subscription", columns: 2, headingKey: "llm.provider_group_subscription", descriptionKey: "llm.provider_group_subscription_description" },
     { id: "local", columns: 2, headingKey: "llm.provider_group_local", descriptionKey: "llm.provider_group_local_description" },
     // Kept apart from the local runtimes: the same card reaches a hosted
-    // OpenAI-compatible service (OpenRouter, Groq, …), so neither "no usage cost"
+    // OpenAI-compatible service (Groq, Together, …), so neither "no usage cost"
     // nor "stays on your machine" can be claimed for it.
     { id: "custom", columns: 1, headingKey: "llm.provider_group_custom", descriptionKey: "llm.provider_group_custom_description" }
 ] as const;
@@ -127,57 +128,60 @@ const SEARCH_PROVIDER_GROUPS = [
 type ProviderGroupId = (typeof PROVIDER_GROUPS)[number]["id"] | (typeof SEARCH_PROVIDER_GROUPS)[number]["id"];
 
 export const PROVIDER_TYPES: ProviderType[] = [
-    { id: "anthropic", name: "Anthropic", group: "cloud", defaultBaseUrl: "https://api.anthropic.com/v1", iconUrl: PROVIDER_ICONS.anthropic },
-    { id: "openai", name: "OpenAI", group: "cloud", defaultBaseUrl: "https://api.openai.com/v1", iconUrl: PROVIDER_ICONS.openai },
-    { id: "google", name: "Google Gemini", group: "cloud", defaultBaseUrl: "https://generativelanguage.googleapis.com/v1beta", iconUrl: PROVIDER_ICONS.google },
+    { id: "anthropic", name: "Anthropic", group: "cloud", defaultBaseUrl: "https://api.anthropic.com/v1", icon: PROVIDER_ICONS.anthropic },
+    { id: "openai", name: "OpenAI", group: "cloud", defaultBaseUrl: "https://api.openai.com/v1", icon: PROVIDER_ICONS.openai },
+    { id: "google", name: "Google Gemini", group: "cloud", defaultBaseUrl: "https://generativelanguage.googleapis.com/v1beta", icon: PROVIDER_ICONS.google },
     // Reachable through the custom endpoint card too — it speaks the OpenAI API —
     // but carded here so its models resolve against the committed price table,
     // which a nameless endpoint never can.
-    { id: "deepseek", name: "DeepSeek", group: "cloud", defaultBaseUrl: "https://api.deepseek.com/v1", iconUrl: PROVIDER_ICONS.deepseek },
+    { id: "deepseek", name: "DeepSeek", group: "cloud", defaultBaseUrl: "https://api.deepseek.com/v1", icon: PROVIDER_ICONS.deepseek },
+    // Also reachable through the custom endpoint card, but carded so its models are priced and
+    // described from OpenRouter's own listing.
+    { id: "openrouter", name: "OpenRouter", group: "cloud", defaultBaseUrl: "https://openrouter.ai/api/v1", icon: PROVIDER_ICONS.openrouter },
     // Uses the Claude Agent SDK on the server; auth belongs to Claude Code (`claude /login`),
     // and usage is covered by the subscription rather than charged per token.
-    { id: "claude-agent", name: "Claude Code", group: "subscription", defaultBaseUrl: "", iconUrl: PROVIDER_ICONS["claude-agent"], connectionDescription: t("llm.claude_agent_description"), apiKey: "none", baseUrl: "none", needsHostProcess: true },
+    { id: "claude-agent", name: "Claude Code", group: "subscription", defaultBaseUrl: "", icon: PROVIDER_ICONS["claude-agent"], connectionDescription: t("llm.claude_agent_description"), apiKey: "none", baseUrl: "none", needsHostProcess: true },
     // The same arrangement over the GitHub Copilot CLI, driven in its ACP mode;
     // auth belongs to the CLI (`copilot login`).
-    { id: "copilot-agent", name: "GitHub Copilot", group: "subscription", defaultBaseUrl: "", iconUrl: PROVIDER_ICONS["copilot-agent"], connectionDescription: t("llm.copilot_agent_description"), beta: true, apiKey: "none", baseUrl: "none", needsHostProcess: true },
+    { id: "copilot-agent", name: "GitHub Copilot", group: "subscription", defaultBaseUrl: "", icon: PROVIDER_ICONS["copilot-agent"], connectionDescription: t("llm.copilot_agent_description"), beta: true, apiKey: "none", baseUrl: "none", needsHostProcess: true },
     // Gemini on a Google account through Google's Antigravity ACP server; the server
     // signs in itself, opening the Google sign-in page the first time models are listed.
     // That sign-in runs inside the model-list request, so the request outlasts the
     // server's own 5-minute wait for it (`SIGN_IN_TIMEOUT_MS`).
-    { id: "antigravity-agent", name: "Google Antigravity", group: "subscription", defaultBaseUrl: "", iconUrl: PROVIDER_ICONS["antigravity-agent"], connectionDescription: t("llm.antigravity_agent_description"), beta: true, apiKey: "none", baseUrl: "none", needsHostProcess: true, modelListTimeoutMs: 6 * 60_000 },
+    { id: "antigravity-agent", name: "Google Antigravity", group: "subscription", defaultBaseUrl: "", icon: PROVIDER_ICONS["antigravity-agent"], connectionDescription: t("llm.antigravity_agent_description"), beta: true, apiKey: "none", baseUrl: "none", needsHostProcess: true, modelListTimeoutMs: 6 * 60_000 },
     // A ChatGPT plan through the Codex ACP adapter, which signs in the same way.
-    { id: "codex-agent", name: "OpenAI Codex", group: "subscription", defaultBaseUrl: "", iconUrl: PROVIDER_ICONS["codex-agent"], connectionDescription: t("llm.codex_agent_description"), beta: true, apiKey: "none", baseUrl: "none", needsHostProcess: true, modelListTimeoutMs: 6 * 60_000 },
+    { id: "codex-agent", name: "OpenAI Codex", group: "subscription", defaultBaseUrl: "", icon: PROVIDER_ICONS["codex-agent"], connectionDescription: t("llm.codex_agent_description"), beta: true, apiKey: "none", baseUrl: "none", needsHostProcess: true, modelListTimeoutMs: 6 * 60_000 },
     // The three self-hosted cards share one server-side provider; they differ only in
     // the endpoint they prefill and the setup hint they show.
     // No blurbs: the group heading already says local/self-hosted, and how to start
     // each server belongs on the connection step, where the setup hints live.
     {
         id: "ollama", name: "Ollama", group: "local", defaultBaseUrl: "http://localhost:11434", prefillBaseUrl: true,
-        iconUrl: PROVIDER_ICONS.ollama,
+        icon: PROVIDER_ICONS.ollama,
         setupHintKey: "llm.setup_hint_ollama", apiKey: "none", baseUrl: "required"
     },
     {
         id: "lmstudio", name: "LM Studio", group: "local", defaultBaseUrl: "http://localhost:1234/v1", prefillBaseUrl: true,
-        iconUrl: PROVIDER_ICONS.lmstudio,
+        icon: PROVIDER_ICONS.lmstudio,
         setupHintKey: "llm.setup_hint_lmstudio", apiKey: "none", baseUrl: "required"
     },
     {
         id: "openai-compatible", name: t("llm.provider_openai_compatible"), group: "custom", defaultBaseUrl: "http://localhost:8080/v1",
-        iconUrl: PROVIDER_ICONS["openai-compatible"], description: t("llm.provider_desc_openai_compatible"),
+        icon: PROVIDER_ICONS["openai-compatible"], description: t("llm.provider_desc_openai_compatible"),
         setupHintKey: "llm.setup_hint_openai_compatible", apiKey: "optional", baseUrl: "required"
     }
 ];
 
 /** Web search services, configured in the same `llmProviders` option with `kind: "search"`. */
 export const SEARCH_PROVIDER_TYPES: ProviderType[] = [
-    { id: "brave", name: "Brave Search", group: "search-cloud", defaultBaseUrl: "https://api.search.brave.com/res/v1", iconUrl: PROVIDER_ICONS.brave, refusesBrowserRequests: true },
-    { id: "tavily", name: "Tavily", group: "search-cloud", defaultBaseUrl: "https://api.tavily.com", iconUrl: PROVIDER_ICONS.tavily },
-    { id: "exa", name: "Exa", group: "search-cloud", defaultBaseUrl: "https://api.exa.ai", iconUrl: PROVIDER_ICONS.exa, refusesBrowserRequests: true },
-    { id: "serper", name: "Serper", group: "search-cloud", defaultBaseUrl: "https://google.serper.dev", iconUrl: PROVIDER_ICONS.serper },
-    { id: "perplexity", name: "Perplexity", group: "search-cloud", defaultBaseUrl: "https://api.perplexity.ai", iconUrl: PROVIDER_ICONS.perplexity, refusesBrowserRequests: true },
+    { id: "brave", name: "Brave Search", group: "search-cloud", defaultBaseUrl: "https://api.search.brave.com/res/v1", icon: PROVIDER_ICONS.brave, refusesBrowserRequests: true },
+    { id: "tavily", name: "Tavily", group: "search-cloud", defaultBaseUrl: "https://api.tavily.com", icon: PROVIDER_ICONS.tavily },
+    { id: "exa", name: "Exa", group: "search-cloud", defaultBaseUrl: "https://api.exa.ai", icon: PROVIDER_ICONS.exa, refusesBrowserRequests: true },
+    { id: "serper", name: "Serper", group: "search-cloud", defaultBaseUrl: "https://google.serper.dev", icon: PROVIDER_ICONS.serper },
+    { id: "perplexity", name: "Perplexity", group: "search-cloud", defaultBaseUrl: "https://api.perplexity.ai", icon: PROVIDER_ICONS.perplexity, refusesBrowserRequests: true },
     {
         id: "searxng", name: "SearXNG", group: "search-local", defaultBaseUrl: "http://localhost:8888", prefillBaseUrl: true,
-        iconUrl: PROVIDER_ICONS.searxng,
+        icon: PROVIDER_ICONS.searxng,
         setupHintKey: "llm.setup_hint_searxng", apiKey: "optional", baseUrl: "required"
     }
 ];
@@ -227,11 +231,12 @@ export function isConnectionValid(providerType: ProviderType | undefined, apiKey
 }
 
 /**
- * Pick a provider, enter its credentials, choose its models. Named rather than
- * numbered because editing skips the first one — the provider type of a saved
- * config can't change, so its id and name would no longer match.
+ * Pick a provider, enter its credentials, then choose its models (a model provider) or check it
+ * with a test search (a search provider). Named rather than numbered because editing skips the
+ * first one — the provider type of a saved config can't change, so its id and name would no
+ * longer match.
  */
-export type ProviderStep = "provider" | "connection" | "models";
+export type ProviderStep = "provider" | "connection" | "models" | "check";
 
 interface AddProviderModalProps {
     show: boolean;
@@ -262,6 +267,7 @@ export default function AddProviderModal({ show, onHidden, onSave, existingProvi
     const [apiKey, setApiKey] = useState(existingProvider?.apiKey ?? "");
     const [baseUrl, setBaseUrl] = useState(existingProvider?.baseURL ?? prefilledBaseUrl(existingProvider?.provider ?? providerTypes[0].id));
     const [selectedModels, setSelectedModels] = useState<LlmModelInfo[]>(existingProvider?.selectedModels ?? []);
+    const [searchCheckFailed, setSearchCheckFailed] = useState(false);
 
     const providerType = useMemo(() => findProviderType(selectedProvider), [selectedProvider]);
     const apiKeyMode = providerType?.apiKey ?? "required";
@@ -331,6 +337,7 @@ export default function AddProviderModal({ show, onHidden, onSave, existingProvi
         setApiKey(existingProvider?.apiKey ?? "");
         setBaseUrl(existingProvider?.baseURL ?? prefilledBaseUrl(initialProvider));
         setSelectedModels(existingProvider?.selectedModels ?? []);
+        setSearchCheckFailed(false);
     }
 
     function handleCancel() {
@@ -434,8 +441,8 @@ export default function AddProviderModal({ show, onHidden, onSave, existingProvi
             // models, same as a pre-selection migration), and allowing it avoids a
             // dead-end when the live model fetch fails.
             content: (
-                <Card heading={t("llm.select_models")}>
-                    <CardSection>
+                <Card heading={t("llm.select_models")} className="add-provider-models">
+                    <CardSection noPadding>
                         <ModelSelection
                             query={modelQuery}
                             timeoutMs={providerType?.modelListTimeoutMs}
@@ -447,10 +454,30 @@ export default function AddProviderModal({ show, onHidden, onSave, existingProvi
                     </CardSection>
                 </Card>
             )
+        },
+        {
+            id: "check",
+            title: namedTitle,
+            // A failed test search does not block saving: the service might be down for the
+            // moment, or not set up yet.
+            nextLabel: searchCheckFailed ? (isEdit ? t("llm.save_anyway") : t("llm.add_provider_anyway")) : undefined,
+            content: (
+                <Card heading={t("llm.search_check_heading")}>
+                    <CardSection>
+                        <SearchProviderCheck query={modelQuery} onFailedChange={setSearchCheckFailed} />
+                    </CardSection>
+                </Card>
+            )
         }
     ];
-    // Search providers have no models to choose, so their wizard ends at the connection step.
-    const steps = isSearch ? allSteps.filter(s => s.id !== "models") : allSteps;
+    // An edit that leaves the connection as saved has nothing new to test, so it saves from the
+    // connection step.
+    const connectionUnchanged = isEdit
+        && trimmedApiKey === (existingProvider?.apiKey ?? "")
+        && trimmedBaseUrl === (existingProvider?.baseURL ?? "");
+    const steps = allSteps.filter(s => isSearch
+        ? s.id !== "models" && !(s.id === "check" && connectionUnchanged)
+        : s.id !== "check");
 
     return createPortal(
         <WizardModal
@@ -483,7 +510,7 @@ export default function AddProviderModal({ show, onHidden, onSave, existingProvi
 function ProviderIllustration({ providerType }: { providerType: ProviderType }) {
     return (
         <div className="add-provider-illustration">
-            <MaskedIcon url={providerType.iconUrl} />
+            <Icon icon={providerType.icon} />
         </div>
     );
 }
@@ -522,7 +549,7 @@ function ProviderGroup({ heading, description, columns, providers, selectedProvi
                         return (
                             <SelectableCard
                                 key={provider.id}
-                                iconUrl={provider.iconUrl}
+                                icon={provider.icon}
                                 title={provider.beta
                                     ? <span className="add-provider-card-heading">{provider.name}<Badge text={t("llm.beta")} className="add-provider-beta-badge" outline /></span>
                                     : provider.name}

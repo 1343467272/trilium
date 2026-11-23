@@ -7,7 +7,7 @@ import { t } from "../../../services/i18n.js";
 import tree from "../../../services/tree.js";
 import Button from "../../react/Button.js";
 import { Card, CardSection } from "../../react/Card.js";
-import { useTriliumEvent } from "../../react/hooks.js";
+import { useTriliumEvent } from "../../react/hooks/events.js";
 import Modal from "../../react/Modal.js";
 import SelectableCard, { SelectableCardGrid } from "../../react/SelectableCard.js";
 import { importProviders } from "./index.js";
@@ -66,14 +66,14 @@ export default function ImportDialog() {
                 <CardSection>
                     <SelectableCardGrid>
                         {serviceProviders.map((p) => (
-                            <SelectableCard key={p.id} iconUrl={p.iconUrl} icon={p.icon} title={p.name} description={p.description} selected={p.id === providerId} onSelect={() => setProviderId(p.id)} />
+                            <SelectableCard key={p.id} icon={p.icon} title={p.name} description={p.description} selected={p.id === providerId} onSelect={() => setProviderId(p.id)} />
                         ))}
                     </SelectableCardGrid>
 
                     {localProviders.length > 0 && (
                         <div className="import-provider-local">
                             {localProviders.map((p) => (
-                                <SelectableCard key={p.id} iconUrl={p.iconUrl} icon={p.icon} title={p.name} description={p.description} selected={p.id === providerId} onSelect={() => setProviderId(p.id)} />
+                                <SelectableCard key={p.id} icon={p.icon} title={p.name} description={p.description} selected={p.id === providerId} onSelect={() => setProviderId(p.id)} />
                             ))}
                         </div>
                     )}

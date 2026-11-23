@@ -1,7 +1,9 @@
 import { dayjs, type NoteMimeCount, type SearchResultDetailsResponse, type SearchWithTokensResponse, type TemplatesResponse } from "@triliumnext/commons";
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 
 import becca from "../../becca/becca.js";
+import config from "../../services/config.js";
+import scriptService from "../../services/script.js";
 import { createTextNote } from "../../test/api_fixtures";
 import { CoreApiTester } from "../../test/api_tester";
 import { isNewTemplate } from "./search";
@@ -44,6 +46,17 @@ describe("Search API (core)", () => {
         expect(res.body).toContain(createdNoteId);
     });
 
+    it("describes a full search on one line for the request log", async () => {
+        const token = "ZzLoggedSearchQwerty";
+        await createTextNote(api, { title: `${token} one` });
+        await createTextNote(api, { title: `${token} two` });
+
+        const res = await api.get("/api/search", {
+            query: { searchString: `  note.title *=*\n   ${token} ` }
+        });
+        expect(res.locals?.logSummary).toBe(`Search: note.title *=* ${token}  (returned 2 items)`);
+    });
+
     it("restricts a full search to the given ancestor's subtree", async () => {
         const token = "ZzScopedSearchQwerty";
         const board = await createTextNote(api, { title: "Board" });
@@ -60,6 +73,26 @@ describe("Search API (core)", () => {
         const unscoped = await api.get<string[]>("/api/search", { query: { searchString: token } });
         expect(unscoped.body).toContain(inside.noteId);
         expect(unscoped.body).toContain(outside.noteId);
+    });
+
+    it("leaves archived notes out of a full search only when asked to", async () => {
+        const token = "ZzArchivedSearchQwerty";
+        const board = await createTextNote(api, { title: "Board" });
+        const live = await createTextNote(api, { parentNoteId: board.noteId, title: `${token} live` });
+        const archived = await createTextNote(api, { parentNoteId: board.noteId, title: `${token} archived` });
+        await api.post(`/api/notes/${archived.noteId}/attributes`, {
+            body: { type: "label", name: "archived", value: "" }
+        });
+
+        const search = (includeArchivedNotes?: string) => api.get<string[]>("/api/search", {
+            query: { searchString: token, ancestorNoteId: board.noteId, includeArchivedNotes }
+        });
+
+        expect((await search()).body).toEqual(expect.arrayContaining([ live.noteId, archived.noteId ]));
+        expect((await search("true")).body).toEqual(expect.arrayContaining([ live.noteId, archived.noteId ]));
+        const withoutArchived = await search("false");
+        expect(withoutArchived.body).toContain(live.noteId);
+        expect(withoutArchived.body).not.toContain(archived.noteId);
     });
 
     it("returns note ids with token infos and the error when includeTokens is set", async () => {
@@ -182,6 +215,29 @@ describe("Search API (core)", () => {
         expect(Array.isArray(res.body.newTemplateNoteIds)).toBe(true);
     });
 
+    it("lists workspace templates when hoisted, and copes without the built-in templates", async () => {
+        const { noteId: workspace } = await createTextNote(api, { title: "Template workspace" });
+        const { noteId: workspaceTemplate } = await createTextNote(api, { parentNoteId: workspace, title: "A workspace template" });
+        await api.post(`/api/notes/${workspaceTemplate}/attributes`, {
+            body: { type: "label", name: "workspaceTemplate", value: "" }
+        });
+        const getNote = becca.getNote.bind(becca);
+        vi.spyOn(becca, "getNote").mockImplementation((noteId) => (noteId === "_templates" ? null : getNote(noteId)));
+
+        try {
+            const hoisted = await api.get<TemplatesResponse>("/api/search-templates", {
+                headers: { "trilium-hoisted-note-id": workspace }
+            });
+            const unhoisted = await api.get<TemplatesResponse>("/api/search-templates");
+
+            expect(hoisted.body.templateNoteIds).toContain(workspaceTemplate);
+            expect(unhoisted.body.templateNoteIds).not.toContain(workspaceTemplate);
+            expect(unhoisted.body.newTemplateNoteIds.some((id) => id.startsWith("_template"))).toBe(false);
+        } finally {
+            vi.restoreAllMocks();
+        }
+    });
+
     it("400s when searching from a note that is not a search note", async () => {
         const res = await api.get("/api/search-note/root");
         expect(res.status).toBe(400);
@@ -300,6 +356,41 @@ describe("Search API (core)", () => {
         it("400s on a note that is not a search note", async () => {
             const res = await api.post("/api/search-note/root/result-details", { body: { noteIds: [] } });
             expect(res.status).toBe(400);
+        });
+
+        it("400s when the body is missing", async () => {
+            const searchNoteId = await createSearchNote("anything");
+
+            expect((await api.post(`/api/search-note/${searchNoteId}/result-details`)).status).toBe(400);
+        });
+
+        it("returns titles and icons alone for a script-based search", async () => {
+            const originalScriptingEnabled = config.Security.backendScriptingEnabled;
+            config.Security.backendScriptingEnabled = true;
+            try {
+                const script = await api.post<{ note: { noteId: string } }>("/api/notes/root/children?target=into", {
+                    body: { title: "Search script", type: "code", mime: "application/javascript;env=backend", content: "" }
+                });
+                const searchNoteId = await createSearchNote("");
+                await api.post(`/api/notes/${searchNoteId}/attributes`, {
+                    body: { type: "relation", name: "searchScript", value: script.body.note.noteId }
+                });
+                vi.spyOn(scriptService, "executeNote").mockReturnValue([ createdNoteId, "missingNote" ]);
+
+                const res = await api.post<SearchResultDetailsResponse>(`/api/search-note/${searchNoteId}/result-details`, {
+                    body: { noteIds: [ "missingNote", createdNoteId ] }
+                });
+
+                expect(res.body.highlightedTokenInfos).toEqual([]);
+                expect(res.body.error).toBeNull();
+                expect(res.body.results.map((result) => [ result.noteId, result.icon, result.contentSnippet ])).toEqual([
+                    [ "missingNote", "bx bx-note", undefined ],
+                    [ createdNoteId, "tn-icon bx bx-note", undefined ]
+                ]);
+            } finally {
+                config.Security.backendScriptingEnabled = originalScriptingEnabled;
+                vi.restoreAllMocks();
+            }
         });
 
         it("400s when more than 100 noteIds are requested", async () => {

@@ -6,10 +6,28 @@
  * crash and restarted the editor, which reverted the note to its last saved content — the images
  * being uploaded flickered and vanished instead of a "cannot upload" toast appearing.
  */
-import type { CKTextEditor, FileUploadData } from "@triliumnext/ckeditor5";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import type {
+    CKEditorError, CKTextEditor, DocumentHeading, FileUploadData, LinkAtSelection, ModelElement
+} from "@triliumnext/ckeditor5";
+import { type ComponentProps, h, render } from "preact";
+import { act } from "preact/test-utils";
+import { beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 
+import type NoteContext from "../../../components/note_context";
+import type FAttachment from "../../../entities/fattachment";
+import type FNote from "../../../entities/fnote";
+import type { AttachmentEditor } from "../../../services/content_renderer";
+import froca from "../../../services/froca";
+import type { ViewScope } from "../../../services/link";
 import type LoadResults from "../../../services/load_results";
+import options from "../../../services/options";
+import { renderInto } from "../../../test/render";
+import type { ContentEmbedBalloon } from "../../dialogs/content_embed";
+import type { EditLinkBalloon } from "../../dialogs/edit_link";
+import type { useEditorSpacedUpdate } from "../../react/hooks/editor";
+import type CKEditor from "./CKEditor";
+
+type SpacedUpdateOptions = Parameters<typeof useEditorSpacedUpdate>[0];
 
 const showError = vi.hoisted(() => vi.fn());
 const showErrorTitleAndMessage = vi.hoisted(() => vi.fn());
@@ -24,16 +42,167 @@ vi.mock("../../../services/i18n", async (importOriginal) => ({
     t: (key: string) => key
 }));
 
+const showInfoDialog = vi.hoisted(() => vi.fn());
+vi.mock("../../../services/dialog", () => ({ default: { info: showInfoDialog } }));
+
 // Imported by EditableText for editor types and content styles; irrelevant (and heavy) here.
 vi.mock("@triliumnext/ckeditor5", () => ({}));
 
+const showsAttachmentSave =
+    vi.hoisted(() => vi.fn((_root: HTMLElement, _attachment: object) => false));
+vi.mock("./utils", async (importOriginal) => ({
+    ...await importOriginal<typeof import("./utils")>(),
+    showsAttachmentSave
+}));
+
+// Stand-ins for what `EditableText` renders, which keep the props they receive.
+const rendered = vi.hoisted(() => ({
+    editor: undefined as ComponentProps<typeof CKEditor> | undefined,
+    balloon: undefined as ComponentProps<typeof EditLinkBalloon> | undefined,
+    includeBalloon: undefined as ComponentProps<typeof ContentEmbedBalloon> | undefined
+}));
+vi.mock("./CKEditor", () => ({
+    default: (props: ComponentProps<typeof CKEditor>) => {
+        rendered.editor = props;
+        return null;
+    }
+}));
+vi.mock("../../dialogs/edit_link", () => ({
+    EditLinkBalloon: (props: ComponentProps<typeof EditLinkBalloon>) => {
+        rendered.balloon = props;
+        return "edit link balloon";
+    }
+}));
+vi.mock("../../dialogs/content_embed", () => ({
+    ContentEmbedBalloon: (props: ComponentProps<typeof ContentEmbedBalloon>) => {
+        rendered.includeBalloon = props;
+        return "include note balloon";
+    }
+}));
+vi.mock("./snippets.js", () => ({ default: async () => [], updateTemplateCache: vi.fn() }));
+vi.mock("../../react/hooks/events", async (importOriginal) => ({
+    ...(await importOriginal<typeof import("../../react/hooks/events")>()),
+    useTriliumEvent: () => {}
+}));
+vi.mock("../../react/hooks/note", async (importOriginal) => ({
+    ...(await importOriginal<typeof import("../../react/hooks/note")>()),
+    useNoteLabel: () => [ null ]
+}));
+vi.mock("../../react/hooks/options", async (importOriginal) => ({
+    ...(await importOriginal<typeof import("../../react/hooks/options")>()),
+    useTriliumOption: () => [ "" ],
+    useTriliumOptionBool: () => [ false ]
+}));
+// The options that `EditableText` passes to `useEditorSpacedUpdate()`.
+const spacedUpdate = vi.hoisted(() => ({ options: undefined as SpacedUpdateOptions | undefined }));
+vi.mock("../../react/hooks/editor", async (importOriginal) => ({
+    ...(await importOriginal<typeof import("../../react/hooks/editor")>()),
+    useEditorSpacedUpdate: (options: SpacedUpdateOptions) => {
+        spacedUpdate.options = options;
+        return { scheduleUpdate: () => {}, resetUpdateTimer: () => {} };
+    }
+}));
+vi.mock("../../react/hooks/legacy", async (importOriginal) => ({
+    ...(await importOriginal<typeof import("../../react/hooks/legacy")>()),
+    useLegacyImperativeHandlers: () => {}
+}));
+vi.mock("../../react/hooks/note_context", async (importOriginal) => ({
+    ...(await importOriginal<typeof import("../../react/hooks/note_context")>()),
+    useSearchTermsConsumer: () => {}
+}));
+// The attachment editor that `EditableText` passes to the embeds of its content.
+const embeds = vi.hoisted(() => ({ attachmentEditor: undefined as AttachmentEditor | undefined }));
+vi.mock("./editable_embed", async (importOriginal) => ({
+    ...(await importOriginal<typeof import("./editable_embed")>()),
+    useEmbedEditors: <T extends { attachmentEditor?: AttachmentEditor }>(editors: T) => {
+        embeds.attachmentEditor = editors.attachmentEditor;
+        return editors;
+    }
+}));
+
+const { default: appContext } = await import("../../../components/app_context");
 const {
+    default: EditableText,
     applyPendingAttachmentChanges,
+    followLink,
+    getEditLinkOpts,
+    getBlockData,
+    getNoteData,
+    isCaretInFocus,
     notifyAttachmentChanges,
     onNotificationInfo,
+    parseLinkHref,
     onNotificationWarning,
-    showFileUploadProgress
+    reportEditorError,
+    revealLinkTargetWhenReady,
+    showFileUploadProgress,
+    watchEditorBlocks
 } = await import("./EditableText");
+
+describe("reportEditorError", () => {
+    it("shows a toast that reloads the editor or opens the details, leaving the log to the global handler", () => {
+        vi.clearAllMocks();
+        const logError = vi.fn();
+        vi.stubGlobal("logError", logError);
+        const error = new Error("unexpected-error Original error: TypeError: boom") as CKEditorError;
+        const reloadEditor = vi.fn();
+
+        reportEditorError(error, reloadEditor);
+
+        expect(logError).not.toHaveBeenCalled();
+        expect(showPersistent).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+            id: "editor-error",
+            title: "editable_text.editor_error_title",
+            message: "editable_text.editor_error_content"
+        }));
+
+        const [ { buttons, timeout } ] = showPersistent.mock.calls[0];
+        expect(timeout).toBeUndefined();
+        expect(buttons.map((button: { text: string }) => button.text)).toEqual([
+            "editable_text.editor_error_reload_button",
+            "editable_text.editor_crashed_details_button"
+        ]);
+
+        const dismissReload = vi.fn();
+        buttons[0].onClick({ dismissToast: dismissReload });
+        expect(dismissReload).toHaveBeenCalledOnce();
+        expect(reloadEditor).toHaveBeenCalledOnce();
+        expect(showInfoDialog).not.toHaveBeenCalled();
+
+        const dismissToast = vi.fn();
+        buttons[1].onClick({ dismissToast });
+        expect(dismissToast).toHaveBeenCalledOnce();
+        expect(showInfoDialog).toHaveBeenCalledExactlyOnceWith(
+            expect.anything(),
+            expect.objectContaining({ title: "editable_text.editor_error_title", copyToClipboardButton: true })
+        );
+        expect(JSON.stringify(showInfoDialog.mock.calls[0][0])).toContain("TypeError: boom");
+        vi.unstubAllGlobals();
+    });
+
+    it("shows the toast again once the details dialog closes, so the editor can still be reloaded", async () => {
+        vi.clearAllMocks();
+        let closeDialog = () => {};
+        showInfoDialog.mockImplementationOnce(() => new Promise<void>((resolve) => {
+            closeDialog = resolve;
+        }));
+        const reloadEditor = vi.fn();
+
+        reportEditorError(new Error("unexpected-error") as CKEditorError, reloadEditor);
+        const [ { buttons } ] = showPersistent.mock.calls[0];
+        buttons[1].onClick({ dismissToast: vi.fn() });
+
+        await Promise.resolve();
+        expect(showPersistent).toHaveBeenCalledOnce();
+
+        closeDialog();
+        await vi.waitFor(() => expect(showPersistent).toHaveBeenCalledTimes(2));
+        const [ { id, buttons: buttonsAgain } ] = showPersistent.mock.calls[1];
+        expect(id).toBe("editor-error");
+        buttonsAgain[0].onClick({ dismissToast: vi.fn() });
+        expect(reloadEditor).toHaveBeenCalledOnce();
+    });
+});
 
 describe("onNotificationWarning", () => {
     /** The payload `Notification#_showNotification` builds, with the `EventInfo` before it. */
@@ -134,8 +303,10 @@ describe("notifyAttachmentChanges", () => {
     type Row = { attachmentId?: string; isDeleted?: boolean };
 
     const updateAttachmentLinks = vi.fn();
+    const root = document.createElement("div");
     const editor = {
-        plugins: { get: () => ({ updateAttachmentLinks }) }
+        plugins: { get: () => ({ updateAttachmentLinks }) },
+        editing: { view: { getDomRoot: () => root } }
     } as unknown as CKTextEditor;
 
     function loadResultsOf(rows: Row[], isContentReloaded = false) {
@@ -170,6 +341,29 @@ describe("notifyAttachmentChanges", () => {
             { attachmentId: "renamed", isDeleted: false },
             { attachmentId: "deleted", isDeleted: true }
         ]);
+    });
+
+    it("leaves out the saves that every embed of the attachment shows by itself", () => {
+        const drawing = { attachmentId: "drawing" } as FAttachment;
+        const renamed = { attachmentId: "renamed" } as FAttachment;
+        froca.attachments.drawing = drawing;
+        froca.attachments.renamed = renamed;
+        showsAttachmentSave.mockImplementation((_root, attachment) => attachment === drawing);
+
+        notify(loadResultsOf([
+            { attachmentId: "drawing" },
+            { attachmentId: "renamed" },
+            { attachmentId: "drawing", isDeleted: true }
+        ]), { current: undefined });
+
+        expect(showsAttachmentSave).toHaveBeenCalledWith(root, drawing);
+        expect(updateAttachmentLinks).toHaveBeenCalledExactlyOnceWith([
+            { attachmentId: "renamed", isDeleted: false },
+            { attachmentId: "drawing", isDeleted: true }
+        ]);
+        showsAttachmentSave.mockReset().mockReturnValue(false);
+        delete froca.attachments.drawing;
+        delete froca.attachments.renamed;
     });
 
     it("leaves the links alone when no attachment changed", () => {
@@ -208,3 +402,535 @@ describe("notifyAttachmentChanges", () => {
         expect(updateAttachmentLinks).not.toHaveBeenCalled();
     });
 });
+
+describe("followLink", () => {
+    it("opens the note of a reference or a link in the active tab, and a web link in a window",
+        async () => {
+        const setNote = vi.fn();
+        const tabManager = appContext.tabManager;
+        appContext.tabManager = {
+            getActiveContext: () => ({ setNote })
+        } as unknown as typeof tabManager;
+        const open = vi.spyOn(window, "open").mockReturnValue(null);
+        try {
+            await followLink({ href: "#root/abcd?viewMode=attachments", isReference: true });
+            await followLink({ href: "#root/efgh", isReference: false });
+            await followLink({ href: "https://example.com/", isReference: false });
+            await followLink({ href: "https://example.com/", isReference: true });
+            await followLink({ href: undefined, isReference: true });
+            await followLink(null);
+            expect(setNote.mock.calls).toEqual([ [ "root/abcd" ], [ "root/efgh" ] ]);
+            expect(open.mock.calls).toEqual([ [ "https://example.com/", "_blank" ] ]);
+        } finally {
+            appContext.tabManager = tabManager;
+            open.mockRestore();
+        }
+    });
+});
+
+describe("getBlockData", () => {
+    it("reads all of the content, with the blocks at its edges", () => {
+        const getRange = vi.fn()
+            .mockReturnValueOnce({ startId: "a", endId: "n" })
+            .mockReturnValueOnce(null);
+        const getData = vi.fn(() => "<p data-trilium-block-id=\"a\">&nbsp;</p>");
+        const editor = {
+            getData,
+            plugins: { get: () => ({ getRange }) }
+        } as unknown as CKTextEditor;
+
+        expect(getBlockData(editor, "a:b")).toEqual({
+            content: "<p data-trilium-block-id=\"a\">&nbsp;</p>",
+            block: "a:n"
+        });
+        expect(getData).toHaveBeenCalledWith({ trim: "none" });
+        expect(getRange).toHaveBeenCalledWith({ startId: "a", endId: "b" });
+        expect(getBlockData(editor, "a").block).toBeUndefined();
+    });
+});
+
+describe("getNoteData", () => {
+    it("keeps a note of one empty block with an id, and saves an empty note as nothing", () => {
+        const editor = (data: string) => ({ getData: vi.fn(() => data) }) as unknown as CKTextEditor;
+        const referenced = editor(`<p data-trilium-block-id="p">&nbsp;</p>`);
+
+        expect(getNoteData(referenced)).toBe(`<p data-trilium-block-id="p">&nbsp;</p>`);
+        expect(referenced.getData).toHaveBeenCalledWith({ trim: "none" });
+        const rule = `<hr data-trilium-block-id="r">`;
+        expect(getNoteData(editor(rule))).toBe(rule);
+        expect(getNoteData(editor("<p>&nbsp;</p>"))).toBe("");
+    });
+});
+
+describe("watchEditorBlocks", () => {
+    it("reports the blocks of the editor each time they change", () => {
+        const getRange = vi.fn();
+        const editor = { plugins: { get: () => ({ getRange }) } } as unknown as CKTextEditor;
+        const onBlockChange = vi.fn();
+        const report = watchEditorBlocks("a:b", onBlockChange);
+
+        for (const range of [
+            { startId: "a", endId: "b" },
+            { startId: "a", endId: "n" },
+            { startId: "a", endId: "n" },
+            null,
+            { startId: "a", endId: "b" }
+        ]) {
+            getRange.mockReturnValueOnce(range);
+            report(editor);
+        }
+
+        expect(onBlockChange.mock.calls).toEqual([ [ "a:n" ], [ "a:b" ] ]);
+        expect(getRange).toHaveBeenCalledWith({ startId: "a", endId: "b" });
+    });
+});
+
+describe("revealLinkTargetWhenReady", () => {
+    it("reveals a bookmark or blocks once the editor is ready, as in a new tab", async () => {
+        vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+            callback(0);
+            return 0;
+        });
+        const reveal = vi.fn();
+        let markReady = () => {};
+        const ready = new Promise<void>((resolve) => {
+            markReady = resolve;
+        });
+
+        revealLinkTargetWhenReady({ block: "a:b" }, ready, reveal);
+        revealLinkTargetWhenReady({ bookmark: "intro" }, ready, reveal);
+        revealLinkTargetWhenReady({ viewMode: "default" }, ready, reveal);
+        await Promise.resolve();
+        expect(reveal).not.toHaveBeenCalled();
+
+        markReady();
+        await ready;
+        await Promise.resolve();
+        expect(reveal).toHaveBeenCalledTimes(2);
+    });
+});
+
+describe("isCaretInFocus", () => {
+    it("holds while focus stays in the editable element with the selection, not once a menu takes it", () => {
+        const editable = document.createElement("div");
+        editable.contentEditable = "true";
+        editable.innerHTML = "<p>First paragraph</p>";
+        const menu = document.createElement("div");
+        menu.tabIndex = -1;
+        document.body.append(editable, menu);
+        const paragraph = editable.querySelector("p");
+        expect(paragraph).toBeTruthy();
+
+        editable.focus();
+        window.getSelection()?.collapse(paragraph, 0);
+        expect(isCaretInFocus(document.activeElement, window.getSelection())).toBe(true);
+
+        // The selection stays in the editor while the menu holds focus.
+        menu.focus();
+        expect(window.getSelection()?.focusNode).toBe(paragraph);
+        expect(isCaretInFocus(document.activeElement, window.getSelection())).toBe(false);
+
+        editable.remove();
+        menu.remove();
+    });
+
+    it("does not hold for the fake selection of a selected widget, which sits at the top of the viewport", () => {
+        const editable = document.createElement("div");
+        editable.contentEditable = "true";
+        editable.innerHTML = "<figure class=\"image ck-widget ck-widget_selected\"></figure>"
+            + "<div class=\"ck-fake-selection-container\" style=\"position: fixed; top: 0\"> </div>";
+        document.body.append(editable);
+        const container = editable.querySelector(".ck-fake-selection-container");
+        expect(container?.firstChild).toBeTruthy();
+
+        editable.focus();
+        window.getSelection()?.selectAllChildren(container as Node);
+        expect(isCaretInFocus(document.activeElement, window.getSelection())).toBe(false);
+
+        editable.remove();
+    });
+});
+
+describe("parseLinkHref", () => {
+    it("reads a note link with its anchor, keeping its other parameters, or an address", () => {
+        expect(parseLinkHref("#root/abc?bookmark=part")).toStrictEqual({
+            currentLink: { notePath: "root/abc" }, currentBookmark: "part"
+        });
+        expect(parseLinkHref("#root/abc?viewMode=attachments&attachmentId=x")).toStrictEqual({
+            currentLink: { notePath: "root/abc?viewMode=attachments&attachmentId=x" },
+            currentBookmark: undefined
+        });
+        expect(parseLinkHref("https://example.com/#top")).toStrictEqual({
+            currentLink: { externalLink: "https://example.com/#top" }, currentBookmark: undefined
+        });
+    });
+
+    it("reads a link to one of the document's anchors as that anchor", () => {
+        expect(parseLinkHref("#intro", [ "intro" ])).toStrictEqual({ currentAnchor: "intro" });
+        expect(parseLinkHref("#intro", [ "outro" ])).toStrictEqual({
+            currentLink: { notePath: "intro" }, currentBookmark: undefined
+        });
+        expect(parseLinkHref("https://example.com/#intro", [ "intro" ])).toStrictEqual({
+            currentLink: { externalLink: "https://example.com/#intro" }, currentBookmark: undefined
+        });
+    });
+});
+
+describe("EditableText", () => {
+    beforeEach(() => {
+        rendered.editor = undefined;
+    });
+
+    it("opens the link balloon at the caret, on the headings of the note it edits", async () => {
+        renderInto(h(EditableText, {
+            note: { noteId: "abc" } as FNote,
+            noteContext: { notePath: "root/abc" } as NoteContext,
+            viewScope: undefined,
+            ntxId: "ntx",
+            parentComponent: undefined
+        }));
+        await vi.waitFor(() => expect(rendered.editor).toBeDefined());
+        const heading = { element: {} as ModelElement, level: 2, text: "Intro" };
+        const editorApi = rendered.editor?.editorApi;
+        if (editorApi) {
+            editorApi.current = createApi(null, [], [ heading ]);
+        }
+        const request = {
+            container: document.createElement("div"), close: vi.fn(), target: "note" as const
+        };
+
+        let closeBalloon: (() => void) | null | undefined;
+        act(() => {
+            closeBalloon = rendered.editor?.showLinkDialog?.(request);
+        });
+        expect(request.container.textContent).toBe("edit link balloon");
+        expect(rendered.balloon?.onClose).toBe(request.close);
+        const opts = rendered.balloon?.opts;
+        expect(opts).toMatchObject({ target: "note", headings: [ { title: "Intro" } ] });
+        expect(opts?.headings?.[0]?.createLinkPath()).toBe("root/abc?block=new");
+
+        act(() => closeBalloon?.());
+        expect(request.container.textContent).toBe("");
+    });
+
+    it("opens the Include note balloon at the caret, on the editor's API", async () => {
+        renderInto(h(EditableText, {
+            note: { noteId: "abc" } as FNote,
+            noteContext: { notePath: "root/abc" } as NoteContext,
+            viewScope: undefined,
+            ntxId: "ntx",
+            parentComponent: undefined
+        }));
+        await vi.waitFor(() => expect(rendered.editor).toBeDefined());
+        const api = createApi(null);
+        const editorApi = rendered.editor?.editorApi;
+        if (editorApi) {
+            editorApi.current = api;
+        }
+        const request = { container: document.createElement("div"), close: vi.fn() };
+
+        let closeBalloon: (() => void) | null | undefined;
+        act(() => {
+            closeBalloon = rendered.editor?.showContentEmbedDialog?.(request);
+        });
+        expect(request.container.textContent).toBe("include note balloon");
+        expect(rendered.includeBalloon?.onClose).toBe(request.close);
+        expect(rendered.includeBalloon?.opts).toStrictEqual({ editorApi: api, sizeEditable: true });
+
+        act(() => closeBalloon?.());
+        expect(request.container.textContent).toBe("");
+    });
+
+    it("saves the whole note with the changed attachments, and drops those changes on request",
+        async () => {
+        renderInto(h(EditableText, {
+            note: { noteId: "abc" } as FNote,
+            noteContext: { notePath: "root/abc" } as NoteContext,
+            viewScope: undefined,
+            ntxId: "ntx",
+            parentComponent: undefined
+        }));
+        await vi.waitFor(() => expect(rendered.editor).toBeDefined());
+        const editorRef = rendered.editor?.editorRef;
+        if (editorRef) {
+            editorRef.current = createTextEditor("<p>Typed</p>");
+        }
+        const drawing = {
+            attachmentId: "drawing1", ownerId: "abc", role: "file",
+            mime: "application/vnd.excalidraw+json", title: "Canvas.excalidraw"
+        } as FAttachment;
+        embeds.attachmentEditor?.scheduleSave(drawing, () => "{}");
+
+        const options = spacedUpdate.options;
+        expect(options?.getData()).toStrictEqual({
+            content: "<p>Typed</p>",
+            attachments: [ {
+                attachmentId: "drawing1", role: "file", mime: "application/vnd.excalidraw+json",
+                title: "Canvas.excalidraw", content: "{}"
+            } ]
+        });
+        options?.discardChanges?.();
+        expect(options?.getData()).toStrictEqual({ content: "<p>Typed</p>" });
+    });
+
+    it("lands on the bookmark of a link as it shows again, once the note has loaded", async () => {
+        const root = document.createElement("div");
+        root.innerHTML = "<h2 id=\"intro\">Intro</h2>";
+        const heading = root.querySelector("h2");
+        expect(heading).not.toBeNull();
+        const scrollIntoView = vi.fn();
+        if (heading) {
+            heading.scrollIntoView = scrollIntoView;
+        }
+        const viewScope: ViewScope = { bookmark: "intro" };
+        const noteContext = createNoteContext({ notePath: "root/abc", viewScope });
+        const show = (isVisible: boolean) => h(EditableText, {
+            note: { noteId: "abc" } as FNote,
+            noteContext,
+            viewScope,
+            ntxId: "ntx",
+            parentComponent: undefined,
+            isVisible
+        });
+        const container = renderInto(show(true));
+        await vi.waitFor(() => expect(rendered.editor).toBeDefined());
+        const editorRef = rendered.editor?.editorRef;
+        if (editorRef) {
+            editorRef.current = createTextEditor("", root);
+        }
+        const showAgain = async () => {
+            await act(() => render(show(false), container));
+            await act(() => render(show(true), container));
+        };
+
+        // The editor still holds the content of no note.
+        await showAgain();
+        expect(viewScope.bookmark).toBe("intro");
+
+        act(() => spacedUpdate.options?.onContentChange("<p>Loaded</p>"));
+        await showAgain();
+        expect(scrollIntoView).toHaveBeenCalledOnce();
+        expect(viewScope.bookmark).toBeUndefined();
+    });
+
+    it("publishes the highlights of its editor while shown", async () => {
+        const getJson = vi.spyOn(options, "getJson").mockReturnValue([ "color" ]);
+        onTestFinished(() => getJson.mockRestore());
+        const root = document.createElement("div");
+        root.innerHTML = "<p>Text <span style=\"color:red\">red</span></p>";
+        const noteContext = createNoteContext({ notePath: "root/abc" });
+        const show = (isVisible: boolean) => h(EditableText, {
+            note: { noteId: "abc" } as FNote,
+            noteContext,
+            viewScope: undefined,
+            ntxId: "ntx",
+            parentComponent: undefined,
+            isVisible
+        });
+        const container = renderInto(show(true));
+        await vi.waitFor(() => expect(rendered.editor).toBeDefined());
+        const editorRef = rendered.editor?.editorRef;
+        if (editorRef) {
+            editorRef.current = createTextEditor("", root);
+        }
+
+        const highlights = noteContext.getContextData("scrollRailHighlights");
+        expect(highlights?.source.readTargets()).toEqual([ root.querySelector("span") ]);
+        await act(() => render(show(false), container));
+        expect(noteContext.getContextData("scrollRailHighlights")).toBeUndefined();
+    });
+});
+
+describe("getEditLinkOpts", () => {
+    const ready = async () => {};
+
+    it("edits the link at the caret, rewriting it on save", async () => {
+        const api = createApi({
+            href: "#root/abc?bookmark=part", text: "See there", display: "textLink"
+        });
+        const opts = getEditLinkOpts(api, ready);
+        expect(opts).toMatchObject({
+            text: "See there", hasSelection: false, currentTitle: "See there",
+            currentLink: { notePath: "root/abc" }, currentBookmark: "part", display: "textLink"
+        });
+
+        await opts.addLink("root/def", "Elsewhere");
+        expect(api.updateLink).toHaveBeenCalledExactlyOnceWith("root/def", "Elsewhere", undefined);
+        expect(api.addLink).not.toHaveBeenCalled();
+
+        await opts.addLinkPreview?.("https://example.com", "cardLink", "Example", "About");
+        expect(api.addLinkPreview)
+            .toHaveBeenCalledExactlyOnceWith("https://example.com", "cardLink", "Example", "About");
+    });
+
+    it("edits a selected reference link with its title still mirroring the note's", () => {
+        const api = createApi({
+            href: "#root/abc", text: "Target", display: "textLink", isReference: true
+        });
+        const opts = getEditLinkOpts(api, ready);
+        expect(opts).toMatchObject({ text: "Target", currentLink: { notePath: "root/abc" } });
+        expect(opts.currentTitle).toBeUndefined();
+    });
+
+    it("edits a selected link preview as a web link titled by its title, shown as it is", () => {
+        const api = createApi({
+            href: "https://example.com", text: "Example", description: "About", display: "cardLink"
+        });
+        expect(getEditLinkOpts(api, ready, { display: "iconAndTextLink" })).toMatchObject({
+            currentLink: { externalLink: "https://example.com" }, currentTitle: "Example",
+            currentDescription: "About", display: "cardLink"
+        });
+    });
+
+    it("edits a selected media embed as media, and reports media it cannot load", async () => {
+        const video = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+        const api = createApi({
+            href: video, text: "Clip", description: "", display: "embedLink", isMedia: true
+        });
+        const opts = getEditLinkOpts(api, ready);
+        expect(opts).toMatchObject({
+            currentLink: { externalLink: video }, currentTitle: "Clip", display: "embedLink",
+            isMedia: true
+        });
+
+        const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+        showError.mockClear();
+        api.addLinkPreview.mockRejectedValueOnce(new Error("The address plays nothing."));
+        await opts.addLinkPreview?.("https://example.com/page", "embedLink", null, null);
+        expect(showError).toHaveBeenCalledExactlyOnceWith("youtube_video.insert_failed");
+        consoleError.mockRestore();
+    });
+
+    it("adds a link from the selection outside one", async () => {
+        const api = createApi(null);
+        const opts = getEditLinkOpts(api, ready);
+        expect(opts).toMatchObject({ text: "chosen words", hasSelection: true });
+        expect(opts.currentLink).toBeUndefined();
+
+        await opts.addLink("https://example.com", "Example", true);
+        expect(api.addLink).toHaveBeenCalledExactlyOnceWith("https://example.com", "Example", true);
+        expect(api.updateLink).not.toHaveBeenCalled();
+
+        await opts.addLinkPreview?.("https://example.com", "iconAndTextLink", null, null);
+        expect(api.addLinkPreview)
+            .toHaveBeenCalledExactlyOnceWith("https://example.com", "iconAndTextLink", null, null);
+    });
+
+    it("offers the document's anchors, and edits a link to one of them as that anchor", () => {
+        expect(getEditLinkOpts(createApi(null, [ "intro" ]), ready)).toMatchObject({
+            anchors: [ "intro" ]
+        });
+
+        const api = createApi({ href: "#intro", text: "Start", display: "textLink" }, [ "intro" ]);
+        const opts = getEditLinkOpts(api, ready);
+        expect(opts).toMatchObject({
+            anchors: [ "intro" ], currentAnchor: "intro", currentTitle: "Start"
+        });
+        expect(opts.currentLink).toBeUndefined();
+    });
+
+    it("offers the headings of the note, which link to their blocks", () => {
+        const heading = { element: {} as ModelElement, level: 2, text: "Intro" };
+        const api = createApi(null, [], [ heading ]);
+        expect(getEditLinkOpts(api, ready)).toMatchObject({
+            headings: undefined, noteId: undefined
+        });
+
+        const opts = getEditLinkOpts(api, ready, { notePath: "root/abc" });
+        // The note page lists the editor's headings for this note.
+        expect(opts.noteId).toBe("abc");
+        const headings = opts.headings;
+        expect(headings).toMatchObject([
+            { kind: "heading", title: "Intro", level: 2, params: undefined }
+        ]);
+        expect(api.assignBlockId).not.toHaveBeenCalled();
+        expect(headings?.[0]?.createLinkPath()).toBe("root/abc?block=new");
+        expect(api.assignBlockId).toHaveBeenCalledExactlyOnceWith(heading);
+        api.assignBlockId.mockReturnValueOnce("a b");
+        expect(headings?.[0]?.createLinkPath()).toBe("root/abc?block=a%20b");
+        // Without an editor, the link goes to the note.
+        api.assignBlockId.mockReturnValueOnce(undefined);
+        expect(headings?.[0]?.createLinkPath()).toBe("root/abc");
+    });
+
+    it("edits a link to a heading of the note as that heading", () => {
+        const intro = { element: {} as ModelElement, level: 2, text: "Intro", blockId: "a" };
+        const edit = (href: string, isReference?: boolean) => getEditLinkOpts(
+            createApi({ href, text: "See intro", display: "textLink", isReference }, [], [ intro ]),
+            ready, { notePath: "root/abc" }
+        );
+
+        const opts = edit("#root/other/abc?block=a");
+        expect(opts).toMatchObject({
+            currentTitle: "See intro", currentHeading: { title: "Intro" }, noteId: "abc"
+        });
+        expect(opts.currentHeading).toBe(opts.headings?.[0]);
+        expect(opts.currentLink).toBeUndefined();
+
+        // A reference link has no title of its own, so that it keeps showing the heading.
+        const reference = edit("#root/abc?block=a", true);
+        expect(reference.currentHeading).toBe(reference.headings?.[0]);
+        expect(reference.currentTitle).toBeUndefined();
+
+        // A link to another note, to a range of blocks or to a block that is not a heading keeps
+        // the Note page.
+        for (const href of [
+            "#root/def?block=a", "#root/abc?block=a:b", "#root/abc?block=b", "#root/abc"
+        ]) {
+            const other = edit(href);
+            expect(other.currentHeading).toBeUndefined();
+            expect(other.currentLink?.notePath).toMatch(/^root\/(abc|def)/);
+        }
+        expect(edit("https://example.com/abc?block=a").currentHeading).toBeUndefined();
+    });
+
+    it("opens a new link on the side and with the display it is asked for", () => {
+        const opts = getEditLinkOpts(
+            createApi(null), ready, { target: "url", display: "embedLink" }
+        );
+        expect(opts).toMatchObject({ target: "url", display: "embedLink" });
+        expect(getEditLinkOpts(createApi(null), ready)).toMatchObject({
+            target: undefined, display: undefined
+        });
+    });
+});
+
+function createApi(
+    currentLink: LinkAtSelection | null, anchors: string[] = [], headings: DocumentHeading[] = []
+) {
+    return {
+        hasSelection: vi.fn(() => true),
+        getSelectedText: vi.fn(() => "chosen words"),
+        getCurrentLink: vi.fn(() => currentLink),
+        getAnchors: vi.fn(() => anchors),
+        getHeadings: vi.fn(() => headings),
+        assignBlockId: vi.fn<(heading: DocumentHeading) => string | undefined>(() => "new"),
+        addLink: vi.fn(),
+        updateLink: vi.fn(),
+        addLinkPreview: vi.fn(),
+        addLinkToEditor: vi.fn(),
+        addHtmlToEditor: vi.fn(),
+        addContentEmbed: vi.fn(),
+        addImage: vi.fn(async () => {})
+    };
+}
+
+/** A text editor that holds `data`, rendered into `root`. */
+/** A note context with `props` that keeps the data published on it. */
+function createNoteContext(props: Partial<NoteContext>) {
+    const data = new Map<string, unknown>();
+    return {
+        ...props,
+        setContextData: (key: string, value: unknown) => data.set(key, value),
+        getContextData: (key: string) => data.get(key),
+        clearContextData: (key: string) => data.delete(key)
+    } as unknown as NoteContext;
+}
+
+function createTextEditor(data: string, root = document.createElement("div")) {
+    return {
+        getData: vi.fn(() => data),
+        setData: vi.fn(),
+        editing: { view: { getDomRoot: () => root } }
+    } as unknown as CKTextEditor;
+}

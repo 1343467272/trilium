@@ -20,7 +20,6 @@ import {
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createTestEditor } from "../../../test/editor-kit.js";
-import { installGlobMock } from "../../../test/globals-test-kit.js";
 import ContentEmbed from "../content_embed/content_embed.js";
 import FileUploadEditing, {
     isHtmlIncluded,
@@ -223,6 +222,21 @@ describe("FileUploadEditing", () => {
         // Undo takes back the inserted link, not the completion of its upload.
         editor.execute("undo");
         expect(getModelData(editor.model)).toBe("<paragraph>[]</paragraph>");
+    });
+
+    it("completes an upload while the user types on after its placeholder", async () => {
+        const controls = installUploadAdapter(editor);
+        setModelData(editor.model, "<paragraph>foo[]</paragraph>");
+
+        editor.execute("fileUpload", { file: [ new File(["content"], "x.txt") ] });
+        // "bar" joins the space after the placeholder, so its insert starts inside a text node.
+        editor.execute("insertText", { text: "bar" });
+        await waitFor(() => controls.uploadCalled());
+        controls.resolveUpload({ default: "#root/abc" });
+        await waitFor(() => !getModelData(editor.model).includes("uploadId"));
+
+        expect(getModelData(editor.model))
+            .toBe("<paragraph>foo<reference href=\"#root/abc\"></reference> bar[]</paragraph>");
     });
 
     it("announces each upload and settles `done` whatever the outcome", async () => {
@@ -605,17 +619,16 @@ describe("FileUploadEditing with embeds", () => {
     it("completes an embed placeholder with the attachment it uploaded", async () => {
         const loadEmbeddedAttachment = vi.fn();
         const focusContentEmbed = vi.fn();
-        installGlobMock({
-            getComponentByEl: () => ({
-                getEmbedBoxSize: () => "small",
-                loadEmbeddedAttachment,
-                focusContentEmbed
-            })
-        });
         const editor = await createTestEditor([
             Essentials, Paragraph, FileRepository, Notification, Clipboard, ReferenceSchema,
             ContentEmbed, FileUploadEditing
-        ]);
+        ], {
+            attachmentUpload: { getEmbedBox: () => ({ boxSize: "full", isTitleHidden: false }) },
+            contentEmbed: {
+                loadAttachment: loadEmbeddedAttachment,
+                focusAttachment: focusContentEmbed
+            }
+        });
         const controls = installUploadAdapter(editor);
         setModelData(editor.model, "<paragraph>[]</paragraph>");
 
@@ -626,26 +639,25 @@ describe("FileUploadEditing with embeds", () => {
         await waitFor(() => !getModelData(editor.model).includes("uploadId"));
 
         expect(getModelData(editor.model)).toBe(
-            "<contentEmbed attachmentId=\"att1\" boxSize=\"small\"></contentEmbed>" +
+            "<contentEmbed attachmentId=\"att1\" boxSize=\"full\"></contentEmbed>" +
             "<paragraph>[]</paragraph>"
         );
         editor.editing.view.getDomRoot()?.querySelectorAll("div.include-note-wrapper");
-        expect(loadEmbeddedAttachment).toHaveBeenCalledWith("att1", expect.anything(), "small");
+        expect(loadEmbeddedAttachment).toHaveBeenCalledWith("att1", expect.anything(), "full");
         expect(focusContentEmbed).not.toHaveBeenCalled();
     });
 
     it("asks the host to focus the embed of a focus upload, before it renders", async () => {
         const calls: string[] = [];
-        installGlobMock({
-            getComponentByEl: () => ({
-                loadEmbeddedAttachment: (id: string) => calls.push(`load ${id}`),
-                focusContentEmbed: (id: string) => calls.push(`focus ${id}`)
-            })
-        });
         const editor = await createTestEditor([
             Essentials, Paragraph, FileRepository, Notification, Clipboard, ReferenceSchema,
             ContentEmbed, FileUploadEditing
-        ]);
+        ], {
+            contentEmbed: {
+                loadAttachment: (id: string) => calls.push(`load ${id}`),
+                focusAttachment: (id: string) => calls.push(`focus ${id}`)
+            }
+        });
         const controls = installUploadAdapter(editor);
         setModelData(editor.model, "<paragraph>[]</paragraph>");
 

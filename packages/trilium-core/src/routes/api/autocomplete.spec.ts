@@ -1,8 +1,11 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
+import becca_service from "../../becca/becca_service";
+import type { Request } from "../../http_interface";
 import * as cls from "../../services/context";
 import { createTextNote } from "../../test/api_fixtures";
 import { CoreApiTester } from "../../test/api_tester";
+import autocompleteRoute from "./autocomplete";
 
 /**
  * Drives the shared core autocomplete routes through {@link CoreApiTester} (no Express),
@@ -155,6 +158,93 @@ describe("Autocomplete API (core)", () => {
         it.each([ "0", "-1", "2.5", "ten" ])("400s for a limit of %s", async (limit) => {
             const res = await api.get("/api/autocomplete", { query: { query: "root", limit } });
             expect(res.status).toBe(400);
+        });
+
+        it("keeps the notes a filter matches, and lists its matches for an empty query", async () => {
+            const stamp = `filtered${Date.now()}`;
+            const { noteId: wanted } = await createTextNote(api, { title: `Wanted ${stamp}` });
+            const { noteId: unwanted } = await createTextNote(api, { title: `Unwanted ${stamp}` });
+            await api.put(`/api/notes/${wanted}/set-attribute`, {
+                body: { type: "label", name: stamp, value: "" }
+            });
+            const noteIdsOf = (results: AutocompleteResult[]) =>
+                results.map((result) => result.notePath.split("/").at(-1));
+
+            const unfiltered = await api.get<AutocompleteResult[]>("/api/autocomplete", {
+                query: { query: stamp }
+            });
+            expect(noteIdsOf(unfiltered.body))
+                .toEqual(expect.arrayContaining([ wanted, unwanted ]));
+
+            const filtered = await api.get<AutocompleteResult[]>("/api/autocomplete", {
+                query: { query: stamp, filter: `#${stamp}` }
+            });
+            expect(filtered.status).toBe(200);
+            expect(noteIdsOf(filtered.body)).toEqual([ wanted ]);
+
+            // What is typed is searched apart from the filter, so text that is query syntax of its
+            // own cannot loosen it.
+            const syntax = await api.get<AutocompleteResult[]>("/api/autocomplete", {
+                query: { query: `${stamp} OR`, filter: `#${stamp}` }
+            });
+            expect(noteIdsOf(syntax.body)).not.toContain(unwanted);
+
+            const empty = await api.get<AutocompleteResult[]>("/api/autocomplete", {
+                query: { query: "", filter: `#${stamp}` }
+            });
+            expect(noteIdsOf(empty.body)).toEqual([ wanted ]);
+        });
+
+        it("filters by note type and MIME type, grouped with OR", async () => {
+            const stamp = `picture${Date.now()}`;
+            const noteIdsOf = (results: AutocompleteResult[]) =>
+                results.map((result) => result.notePath.split("/").at(-1));
+            const create = async (mime: string) => {
+                const res = await api.post<{ note: { noteId: string } }>(
+                    "/api/notes/root/children?target=into",
+                    { body: { title: `${stamp} ${mime}`, type: "image", mime, content: "" } });
+                return res.body.note.noteId;
+            };
+            const png = await create("image/png");
+            const webp = await create("image/webp");
+            // How Trilium stores a JPEG it compressed itself.
+            const jpg = await create("image/jpg");
+            const svg = await create("image/svg+xml");
+            const unfiltered = await api.get<AutocompleteResult[]>(
+                "/api/autocomplete", { query: { query: stamp } });
+            expect(noteIdsOf(unfiltered.body)).toContain(svg);
+
+            const res = await api.get<AutocompleteResult[]>("/api/autocomplete", {
+                query: {
+                    query: stamp,
+                    filter: "note.type = image AND (note.mime = 'image/png' "
+                        + "OR note.mime = 'image/jpeg' OR note.mime = 'image/jpg' "
+                        + "OR note.mime = 'image/webp' OR note.mime = 'image/gif')"
+                }
+            });
+            const noteIds = noteIdsOf(res.body);
+            expect(noteIds).toEqual(expect.arrayContaining([ png, webp, jpg ]));
+            expect(noteIds).not.toContain(svg);
+        });
+
+        it("rejects a limit or a filter that is not a string, and ignores a blank filter", async () => {
+            const call = (query: Record<string, unknown>) => () => autocompleteRoute.getAutocomplete({ query } as unknown as Request);
+            expect(call({ query: "x", limit: [ "1" ] })).toThrow("Invalid limit.");
+            expect(call({ query: "x", filter: [ "#a" ] })).toThrow("Invalid filter data type.");
+
+            const unfiltered = await api.get<AutocompleteResult[]>("/api/autocomplete", { query: { query: "" } });
+            const blank = await api.get<AutocompleteResult[]>("/api/autocomplete", { query: { query: "", filter: "   " } });
+            expect(blank.body).toEqual(unfiltered.body);
+        });
+
+        it("falls back to the default icon for a recent note without one", async () => {
+            const { noteId } = await createTextNote(api, { title: "Iconless recent" });
+            await api.post("/api/recent-notes", { body: { noteId, notePath: `root/${noteId}` } });
+            vi.spyOn(becca_service, "getNoteTitleAndIcon").mockReturnValue({ title: "Iconless recent" });
+
+            const res = await api.get<AutocompleteResult[]>("/api/autocomplete", { query: { query: "" } });
+
+            expect(res.body.find((r) => r.notePath === `root/${noteId}`)?.icon).toBe("bx bx-note");
         });
 
         it("400s when the query param is missing", async () => {

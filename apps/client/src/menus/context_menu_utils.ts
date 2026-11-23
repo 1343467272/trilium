@@ -1,5 +1,6 @@
 import type FNote from "../entities/fnote"
 import type { MenuCommandItem, MenuItem } from "./context_menu"
+import froca from "../services/froca"
 import { t } from "../services/i18n"
 import { setArchivedOnNotes, shared } from "../services/note_set"
 import { escapeHtml } from "../services/utils"
@@ -29,17 +30,28 @@ export function getArchiveMenuItems<T>(notes: FNote[]): MenuItem<T>[] {
         } ]
 }
 
-/**
- * A name the user wrote, as a menu title.
- *
- * A menu reads a title as markup, so the name is escaped into the text it is meant to be, and boxed
- * so that `style.css` clips a long one rather than letting it widen the menu.
- */
-export function menuName(name: string) {
-    return `<span class="tn-menu-name">${escapeHtml(name)}</span>`
+/** A row with the icon and title of the note at `notePath`, with its path in the shortcut slot. */
+export async function notePathMenuItem<T>(
+    notePath: string,
+    handler: () => void
+): Promise<MenuCommandItem<T>> {
+    const { default: tree, NOTE_PATH_TITLE_SEPARATOR } = await import("../services/tree");
+    const titles = await tree.getNotePathTitleComponents(notePath);
+    const title = titles.pop() ?? "";
+    const noteId = notePath.split("/").at(-1) ?? "";
+
+    return {
+        title: escapeHtml(title),
+        trailingText: titles.join(NOTE_PATH_TITLE_SEPARATOR) || undefined,
+        uiIcon: froca.getNoteFromCache(noteId)?.getIcon(),
+        handler
+    };
 }
 
-/** A row that opens `items` as a submenu, enabled while any of their commands is. */
+/**
+ * A row that opens `items` as a submenu, enabled while any of their commands is, a row of actions
+ * included.
+ */
 export function submenuItem<T>(
     row: Pick<MenuCommandItem<T>, "title" | "uiIcon">,
     items: MenuItem<T>[]
@@ -63,6 +75,9 @@ export function splitMenuItem<T>(
     }
 }
 
-function isEnabledCommand<T>(item: MenuItem<T>) {
-    return !("kind" in item) && item.enabled !== false
+function isEnabledCommand<T>(item: MenuItem<T>): boolean {
+    if ("kind" in item) {
+        return item.kind === "actions" && item.items.some(isEnabledCommand)
+    }
+    return item.enabled !== false
 }

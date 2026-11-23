@@ -1,13 +1,21 @@
-import { describe, it, expect, beforeEach,  } from "vitest";
+import type { NoteRow, NoteType } from "@triliumnext/commons";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import searchService from "./search.js";
 import BNote from "../../../becca/entities/bnote.js";
 import BBranch from "../../../becca/entities/bbranch.js";
 import SearchContext from "../search_context.js";
+import SearchResult from "../search_result.js";
 import dateUtils from "../../utils/date.js";
 import becca from "../../../becca/becca.js";
+import becca_service from "../../../becca/becca_service.js";
+import config from "../../config.js";
 import { getContext } from "../../context.js";
+import hoistedNoteService from "../../hoisted_note.js";
+import { getLog } from "../../log.js";
 import noteService from "../../notes.js";
+import optionService from "../../options.js";
 import protectedSessionService from "../../protected_session.js";
+import scriptService from "../../script.js";
 import { encodeUtf8 } from "../../utils/binary.js";
 import { findNoteByTitle, note, NoteBuilder } from "../../../test/becca_mocking.js";
 
@@ -462,6 +470,36 @@ describe("Search", () => {
 
         expect(searchResults.length).toEqual(1);
         expect(searchResults[0].noteId).toEqual(guide.noteId);
+    });
+
+    it("refuses the regex operator when the search context disallows it", () => {
+        const target = getContext().init(() => {
+            const { note: created } = noteService.createNewNote({
+                parentNoteId: "root",
+                title: "Regex target",
+                content: "aaaa body",
+                type: "text"
+            });
+            created.setLabel("code", "abc");
+            return created;
+        });
+
+        const queries = [
+            "note.content %= 'a+ body'",
+            "#code %= 'a.c'",
+            "note.title %= '^Regex'",
+            "#code = x OR (note.content %= 'body')",
+            "#code '%=' 'a.c'"
+        ];
+        for (const query of queries) {
+            const allowed = new SearchContext();
+            expect(searchService.findResultsWithQuery(query, allowed).map((r) => r.noteId), query)
+                .toContain(target.noteId);
+
+            const refused = new SearchContext({ allowRegex: false });
+            expect(searchService.findResultsWithQuery(query, refused), query).toEqual([]);
+            expect(refused.getError(), query).toContain("%=");
+        }
     });
 
     it("fuzzy operator queries (~=) match note properties, labels and relations end-to-end (#9426)", () => {
@@ -1158,6 +1196,16 @@ describe("Search", () => {
             expect(detailsFor("orbiter").find((d) => d.noteId === asimov.noteId)?.matchedTerms).toEqual([ "writer" ]);
         });
 
+        it("reports whether the body continues past the snippet", () => {
+            const short = contentNote("Short", "<p>the needle is here</p>");
+            const long = contentNote("Long", `<p>${"padding ".repeat(60)}the needle is here</p>`);
+
+            const details = detailsFor("needle");
+
+            expect(details.find((d) => d.noteId === short.noteId)?.contentSnippetTruncated).toBe(false);
+            expect(details.find((d) => d.noteId === long.noteId)?.contentSnippetTruncated).toBe(true);
+        });
+
         it("highlights the word a fuzzy body match actually matched", () => {
             // "writer" is two edits from "orbiter", which AUTO allows for a 7-character token, so
             // this note is a result even though the word the user typed appears nowhere in it.
@@ -1202,7 +1250,7 @@ describe("Search", () => {
 
 
     it("breaks a collapsible summary onto its own line in the quick-search snippet", () => {
-        // striptags concatenates block text with no separator, which would merge a
+        // `stripTags()` concatenates block text with no separator, which would merge a
         // collapsible's summary straight into its body ("Summary TitleBody text").
         const noteBuilder = note("Collapsible note");
         noteBuilder.note.getContent = () => "<details class=\"trilium-collapsible\"><summary>Summary Title</summary><p>Body text here</p></details><p>After the block</p>";
@@ -1233,6 +1281,18 @@ describe("Search", () => {
         expect(snippet.split("\n")).toEqual([ "First line", "second line", "third line", "Next paragraph" ]);
     });
 
+    it("keeps a code note's indentation in the snippet", () => {
+        // Collapsing the whitespace of a line, as prose snippets do, would run the source together
+        // and lose the nesting the code is read by.
+        const noteBuilder = note("script.ts", { type: "code", mime: "text/typescript" });
+        noteBuilder.note.getContent = () => "function main() {\n\tif (ready) {\n\t\trun();\n\t}\n}";
+        rootNote.child(noteBuilder);
+
+        const snippet = searchService.extractContentSnippet(noteBuilder.note.noteId, [ "run" ]);
+        // Tabs are widened to the four spaces the code editor draws them as.
+        expect(snippet.split("\n")).toEqual([ "    if (ready) {", "        run();", "    }", "}..." ]);
+    });
+
     it("escapes angle brackets in the note title instead of dropping them", () => {
         // The title is interpolated into the autocomplete dropdown as raw HTML, so a title
         // containing markup-like text must come back escaped. Stripping only "<" would render
@@ -1259,7 +1319,7 @@ describe("Search", () => {
     });
 
     it("surfaces link-preview url/title/description as separate lines in the quick-search snippet", () => {
-        // The url/title/description live in data attributes that striptags would otherwise drop,
+        // The url/title/description live in data attributes that `stripTags()` would drop,
         // leaving a blank snippet even though the note matched on the embedded title. The entity-
         // encoded ampersand in the title must be decoded rather than shown as "&amp;".
         const noteBuilder = note("Link preview note");
@@ -1271,8 +1331,8 @@ describe("Search", () => {
     });
 
     it("decodes HTML entities in the quick-search snippet instead of showing escape codes", () => {
-        // striptags leaves entities (&lt;, &gt;, &amp;, &nbsp;) untouched, which would surface as
-        // literal escape codes in the dropdown.
+        // `stripTags()` leaves entities (&lt;, &gt;, &amp;, &nbsp;) untouched, so they would
+        // surface as literal escape codes in the dropdown.
         const noteBuilder = note("Entity note");
         noteBuilder.note.getContent = () => "<p>if a &lt; b &amp;&amp; b &gt; c, then&nbsp;done</p>";
         rootNote.child(noteBuilder);
@@ -1335,6 +1395,265 @@ describe("Search", () => {
             expect(finds("a<b", telco.noteId)).toBe(true);
             expect(finds("&lt;", literal.noteId)).toBe(true);
             expect(finds("at<t", literal.noteId)).toBe(false);
+        });
+    });
+
+    describe("saved searches backed by a script", () => {
+        const originalScriptingEnabled = config.Security.backendScriptingEnabled;
+
+        beforeEach(() => {
+            config.Security.backendScriptingEnabled = true;
+        });
+
+        afterEach(() => {
+            config.Security.backendScriptingEnabled = originalScriptingEnabled;
+            vi.restoreAllMocks();
+        });
+
+        function savedSearch(scriptParams: Partial<NoteRow> = { type: "code", mime: "application/javascript;env=backend" }) {
+            const script = note("Search script", scriptParams);
+            const search = note("Saved search", { type: "search" }).relation("searchScript", script.note);
+            rootNote.child(script).child(search);
+            return { script: script.note, search: search.note };
+        }
+
+        it("returns the notes the script hands back, as ids or as notes", () => {
+            const { search } = savedSearch();
+            const europe = note("Europe");
+            rootNote.child(europe);
+            const executeNote = vi.spyOn(scriptService, "executeNote");
+
+            executeNote.mockReturnValue([ europe.note.noteId, "missingNote", "root", search.noteId ]);
+            expect(searchService.searchFromNote(search)).toEqual({
+                searchResultNoteIds: [ europe.note.noteId, "missingNote" ],
+                highlightedTokens: [],
+                highlightedTokenInfos: [],
+                error: null
+            });
+
+            executeNote.mockReturnValue([ europe.note ]);
+            expect(searchService.searchFromNote(search).searchResultNoteIds).toEqual([ europe.note.noteId ]);
+
+            executeNote.mockReturnValue([]);
+            expect(searchService.searchFromNote(search).searchResultNoteIds).toEqual([]);
+
+            executeNote.mockReturnValue("not an array");
+            expect(searchService.searchFromNote(search).searchResultNoteIds).toEqual([]);
+        });
+
+        it("runs nothing when the script cannot or must not be run", () => {
+            const executeNote = vi.spyOn(scriptService, "executeNote");
+
+            const missing = savedSearch();
+            delete becca.notes[missing.script.noteId];
+            expect(searchService.searchFromNote(missing.search).searchResultNoteIds).toEqual([]);
+
+            const frontend = savedSearch({ type: "code", mime: "application/javascript;env=frontend" });
+            expect(searchService.searchFromNote(frontend.search).searchResultNoteIds).toEqual([]);
+
+            const textScript = savedSearch({ type: "text", mime: "text/html" });
+            expect(searchService.searchFromNote(textScript.search).searchResultNoteIds).toEqual([]);
+
+            const locked = savedSearch();
+            locked.search.isProtected = true;
+            expect(searchService.searchFromNote(locked.search).searchResultNoteIds).toEqual([]);
+
+            config.Security.backendScriptingEnabled = false;
+            expect(searchService.searchFromNote(savedSearch().search).searchResultNoteIds).toEqual([]);
+
+            expect(executeNote).not.toHaveBeenCalled();
+        });
+    });
+
+    describe("query handling", () => {
+        afterEach(() => vi.restoreAllMocks());
+
+        it("refuses a note that has no path to the root", () => {
+            note("Orphan").label("orphanMark");
+
+            const searchContext = new SearchContext({ includeHiddenNotes: true, includeArchivedNotes: true });
+            expect(() => searchService.findResultsWithQuery("#orphanMark", searchContext))
+                .toThrow("Can't find note path");
+        });
+
+        it("reports an unclosed parenthesis and treats an empty query as a search", () => {
+            rootNote.child(note("Alpha").label("a"));
+            const searchContext = new SearchContext();
+
+            expect(searchService.findResultsWithQuery("#a AND (#b", searchContext)).toBeDefined();
+            expect(searchContext.getError()).toBe("Did not find matching right parenthesis.");
+            expect(searchService.findFirstNoteWithQuery("", new SearchContext())).toBeInstanceOf(BNote);
+            expect(searchService.validateSearchQuery("#a AND (#b")).toBe("Did not find matching right parenthesis.");
+        });
+
+        it("ignores an empty or blank quoted token instead of failing the search", () => {
+            rootNote.child(note("Alpha")).child(note("Beta"));
+            const noteIdsOf = (query: string) => searchService.searchNotes(query).map((found) => found.noteId).sort();
+
+            expect(noteIdsOf(`alpha ""`)).toEqual(noteIdsOf("alpha"));
+            expect(noteIdsOf(`alpha " "`)).toEqual(noteIdsOf("alpha"));
+            expect(noteIdsOf(`""`)).toEqual(noteIdsOf(""));
+            expect(searchService.validateSearchQuery(`""`)).toBeNull();
+        });
+
+        it("searches from the root when hoisted inside the hidden subtree", () => {
+            rootNote.child(note("Europe"));
+            vi.spyOn(hoistedNoteService, "isHoistedInHiddenSubtree").mockReturnValue(true);
+            vi.spyOn(optionService, "getOptionBool").mockReturnValue(false);
+            vi.spyOn(becca_service, "getNoteTitleAndIcon").mockReturnValue({ title: "Europe" });
+
+            const results = searchService.searchNotesForAutocomplete("europe");
+
+            expect(results.map((result) => [ result.noteTitle, result.icon ])).toEqual([ [ "Europe", "bx bx-note" ] ]);
+        });
+    });
+
+    describe("content snippet edge cases", () => {
+        afterEach(() => vi.restoreAllMocks());
+
+        function snippetNote(type: NoteType, content: string) {
+            const noteBuilder = note("Snippet", { type, mime: type === "text" ? "text/html" : "application/json" });
+            noteBuilder.note.getContent = () => content;
+            rootNote.child(noteBuilder);
+            return noteBuilder.note.noteId;
+        }
+
+        it("returns nothing for a missing note, empty chat or whitespace-only body", () => {
+            expect(searchService.extractContentSnippet("missingNote", [ "x" ])).toBe("");
+            expect(searchService.extractContentSnippet(snippetNote("llmChat", "{}"), [ "x" ])).toBe("");
+            expect(searchService.extractContentSnippet(snippetNote("text", "<p> </p>"), [ "x" ])).toBe("");
+        });
+
+        it("shows the prose of a chat note", () => {
+            const chat = JSON.stringify({ messages: [ { role: "user", content: "hello assistant" } ] });
+
+            expect(searchService.extractContentSnippet(snippetNote("llmChat", chat), [ "hello" ])).toBe("hello assistant");
+        });
+
+        it("keeps link previews without data attributes and icons without a name out of the text", () => {
+            const noteId = snippetNote("text", `<p>before</p><section class="link-embed"></section>`
+                + `<p>icon <span class="tn-icon"></span> after</p>`);
+
+            expect(searchService.extractContentSnippet(noteId, [ "icon" ])).toBe("before\nicon after");
+        });
+
+        it("takes the first four lines when no line holds a token or a regex token is invalid", () => {
+            const noteId = snippetNote("text", [ "one", "two", "three", "four", "five", "six" ].map((line) => `<p>${line}</p>`).join(""));
+
+            expect(searchService.extractContentSnippet(noteId, [ { token: "(", type: "regex" } ]))
+                .toBe("one\ntwo\nthree\nfour...");
+        });
+
+        it("keeps long words whole at both ends of a single-line snippet", () => {
+            const content = `${"a".repeat(150)} needle ${"b".repeat(150)}`;
+            const noteId = snippetNote("text", `<p>${content}</p>`);
+
+            expect(searchService.extractContentSnippet(noteId, [ "needle" ]))
+                .toBe(`...${content.substring(51, 251)}...`);
+        });
+    });
+
+    describe("attribute snippet edge cases", () => {
+        afterEach(() => vi.restoreAllMocks());
+
+        it("returns nothing for a missing note and logs a failure", () => {
+            const broken = note("Broken").label("topic");
+            rootNote.child(broken);
+            vi.spyOn(broken.note, "getAttributes").mockImplementation(() => {
+                throw new Error("broken");
+            });
+            const error = vi.spyOn(getLog(), "error").mockImplementation(() => {});
+
+            expect(searchService.extractAttributeSnippet("missingNote", [ "topic" ])).toBe("");
+            expect(searchService.extractAttributeSnippet(broken.note.noteId, [ "topic" ])).toBe("");
+            expect(error).toHaveBeenCalledWith(expect.stringContaining(broken.note.noteId));
+        });
+
+        it("names a relation's target by its title, or by its id when the target is gone", () => {
+            const target = note("Target");
+            const gone = note("Gone");
+            const source = note("Source").relation("author", target.note).relation("authorOld", gone.note);
+            rootNote.child(target).child(source);
+            delete becca.notes[gone.note.noteId];
+
+            expect(searchService.extractAttributeSnippet(source.note.noteId, [ "author" ]))
+                .toBe(`~author="Target"\n~authorOld="${gone.note.noteId}"`);
+        });
+
+        it("leaves out a definition when the note holds the attribute it defines", () => {
+            const parent = note("Parent")
+                .label("label:origin", "promoted,single,boolean", true)
+                .label("relation:source", "promoted,single", true);
+            const child = note("Child").label("origin", "true");
+            const other = note("Other").label("source");
+            rootNote.child(parent);
+            parent.child(child).child(other);
+
+            expect(searchService.extractAttributeSnippet(child.note.noteId, [ "origin" ]))
+                .toBe(`#origin="true"`);
+            expect(searchService.extractAttributeSnippet(parent.note.noteId, [ "origin" ]))
+                .toBe(`#label:origin="promoted,single,boolean"`);
+            expect(searchService.extractAttributeSnippet(other.note.noteId, [ "source" ]))
+                .toBe(`#source\n#relation:source="promoted,single"`);
+        });
+
+        it("cuts a long snippet at a line, at a word or mid-word", () => {
+            const lines = note("Lines").label("topic1", "x".repeat(30)).label("topic2", "y".repeat(30));
+            const words = note("Words").label("topic", "word ".repeat(20).trim());
+            const solid = note("Solid").label("topic", "z".repeat(100));
+            rootNote.child(lines).child(words).child(solid);
+
+            expect(searchService.extractAttributeSnippet(lines.note.noteId, [ "topic" ], 60))
+                .toBe(`#topic1="${"x".repeat(30)}"`);
+            expect(searchService.extractAttributeSnippet(words.note.noteId, [ "topic" ], 60))
+                .toBe(`#topic="${"word ".repeat(10).trim()}...`);
+            expect(searchService.extractAttributeSnippet(solid.note.noteId, [ "topic" ], 60))
+                .toBe(`#topic="${"z".repeat(49)}...`);
+        });
+    });
+
+    describe("highlighting edge cases", () => {
+        it("reports a term matched by two spellings of a token once", () => {
+            const needle = note("Needle");
+            needle.note.getContent = () => "<p>the needle</p>";
+            rootNote.child(needle);
+            const searchContext = new SearchContext();
+            searchContext.highlightedTokens.push("needle", "NEEDLE");
+
+            const [ details ] = searchService.buildSearchResultDetails([ new SearchResult([ "root", needle.note.noteId ]) ], searchContext);
+
+            expect(details.matchedTerms).toEqual([ "needle" ]);
+        });
+
+        it("skips empty and repeated tokens, zero-width matches and runaway matches", () => {
+            const empty = note("");
+            const many = note("a ".repeat(60).trim());
+            rootNote.child(empty).child(many);
+            const emptyResult = new SearchResult([ "root", empty.note.noteId ]);
+            const manyResult = new SearchResult([ "root", many.note.noteId ]);
+
+            searchService.highlightSearchResults([ emptyResult, manyResult ], [
+                { token: "", type: "plain" },
+                { token: "a", type: "plain" },
+                { token: "a", type: "plain" },
+                { token: "x*", type: "regex" }
+            ]);
+
+            expect(emptyResult.highlightedNoteTitle).toBe("");
+            expect(manyResult.highlightedNoteTitle?.match(/<b>a<\/b>/g)).toHaveLength(50);
+        });
+
+        it("shows the attribute and highlights the title a Hangul query matched (#12601)", () => {
+            const gpu = note("그래픽 GPU").label("alias", "Graphic Card").label("alias", "그래픽카드");
+            rootNote.child(gpu);
+            const searchContext = new SearchContext();
+
+            const results = searchService.findResultsWithQuery("그래픽", searchContext);
+            const [ details ] = searchService.buildSearchResultDetails(results, searchContext);
+
+            expect(details.noteId).toBe(gpu.note.noteId);
+            expect(details.highlightedNoteTitle).toBe("<b>그래픽</b> GPU");
+            expect(details.attributeSnippet).toBe(`#alias="그래픽카드"`);
         });
     });
 

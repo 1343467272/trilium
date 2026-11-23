@@ -1,16 +1,18 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import type FNote from "../entities/fnote";
 import { buildNote } from "../test/easy-froca";
 import { allViewTypes } from "../widgets/collections/interface";
 import { getPresentationThemes } from "../widgets/collections/presentation/themes";
 import { MEDIA_PLAY_MODES } from "../widgets/type_widgets/file/media_play_mode";
-import attributeService, { getBuiltinLabelSelectOptions, getBuiltinLabelValueType, isBuiltinAttribute, removeOwnedAttributesByNameOrType, setAttribute, setBooleanWithInheritance, setLabel, setRelation } from "./attributes";
+import attributeService, { getBuiltinLabelSelectOptions, getBuiltinLabelValueType, isBuiltinAttribute, removeOwnedAttributesByNameOrType, setAttribute, setBooleanWithInheritance, setLabel, setLabelValueWithInheritance, setRelation } from "./attributes";
 import froca from "./froca";
 import server from "./server.js";
 
 // Spy on server methods to track calls
 server.put = vi.fn(async () => ({})) as typeof server.put;
 server.remove = vi.fn(async () => ({})) as typeof server.remove;
+server.post = vi.fn(async () => ({})) as typeof server.post;
 
 describe("Set boolean with inheritance", () => {
     beforeEach(() => {
@@ -137,6 +139,181 @@ describe("Set boolean with inheritance", () => {
             isInheritable: false
         }, undefined);
     });
+
+    it("compares with the inherited value when the note owns the label too", async () => {
+        buildNote({
+            title: "Parent note",
+            "#foo(inheritable)": "",
+            "children": [
+                { id: "ownsTrue", title: "Owns true", "#foo": "" },
+                { id: "ownsFalse", title: "Owns false", "#foo": "false" }
+            ]
+        });
+        const ownsTrue = froca.notes["ownsTrue"];
+        const ownsFalse = froca.notes["ownsFalse"];
+
+        const overrideId = ownsFalse.getOwnedLabel("foo")?.attributeId;
+        expect(overrideId).toBeTruthy();
+        await setBooleanWithInheritance(ownsFalse, "foo", true);
+        expect(server.remove).toHaveBeenCalledWith(`notes/ownsFalse/attributes/${overrideId}`);
+        expect(server.put).not.toHaveBeenCalled();
+
+        vi.clearAllMocks();
+        // Removing the owned label would leave the inherited one in effect.
+        await setBooleanWithInheritance(ownsTrue, "foo", false);
+        expect(server.put).toHaveBeenCalledWith(`notes/ownsTrue/set-attribute`, {
+            type: "label",
+            name: "foo",
+            value: "false",
+            isInheritable: false
+        }, undefined);
+        expect(server.remove).not.toHaveBeenCalled();
+    });
+
+    it("removes every owned duplicate to restore the inherited value", async () => {
+        buildNote({
+            title: "Parent note",
+            "#foo(inheritable)": "",
+            "children": [ { id: "twoFalse", title: "Owns false twice", "#foo": [ "false", "false" ] } ]
+        });
+        const note = froca.notes["twoFalse"];
+        const [ first, second ] = note.getOwnedLabels("foo");
+
+        await setBooleanWithInheritance(note, "foo", true);
+        expect(server.remove).toHaveBeenCalledTimes(2);
+        expect(server.remove).toHaveBeenCalledWith(`notes/twoFalse/attributes/${first.attributeId}`);
+        expect(server.remove).toHaveBeenCalledWith(`notes/twoFalse/attributes/${second.attributeId}`);
+        expect(server.put).not.toHaveBeenCalled();
+    });
+
+    it("removes the owned duplicates before overriding the inherited value", async () => {
+        buildNote({
+            title: "Parent note",
+            "#foo(inheritable)": "",
+            "children": [ { id: "twoTrue", title: "Owns true twice", "#foo": [ "", "" ] } ]
+        });
+        const note = froca.notes["twoTrue"];
+        const [ , second ] = note.getOwnedLabels("foo");
+
+        await setBooleanWithInheritance(note, "foo", false);
+        expect(server.remove).toHaveBeenCalledExactlyOnceWith(
+            `notes/twoTrue/attributes/${second.attributeId}`
+        );
+        expect(server.put).toHaveBeenCalledExactlyOnceWith(`notes/twoTrue/set-attribute`, {
+            type: "label",
+            name: "foo",
+            value: "false",
+            isInheritable: false
+        }, undefined);
+        // `set-attribute` updates whichever owned label it finds, so only one can be left by then.
+        expect(vi.mocked(server.remove).mock.invocationCallOrder[0])
+            .toBeLessThan(vi.mocked(server.put).mock.invocationCallOrder[0]);
+    });
+
+    it("waits for the label write and surfaces its failure", async () => {
+        const note = buildNote({ title: "New note" });
+        vi.mocked(server.put).mockRejectedValueOnce(new Error("offline"));
+        await expect(setBooleanWithInheritance(note, "foo", true)).rejects.toThrow("offline");
+    });
+
+    it("waits for the label removal and surfaces its failure", async () => {
+        const note = buildNote({ title: "New note", "#foo": "" });
+        vi.mocked(server.remove).mockRejectedValueOnce(new Error("offline"));
+        await expect(setBooleanWithInheritance(note, "foo", false)).rejects.toThrow("offline");
+    });
+});
+
+describe("Set label value with inheritance", () => {
+    const set = (note: FNote, value: string, isInheritable = false) =>
+        setLabelValueWithInheritance(note, "mode", value, "a", isInheritable);
+    const putCall = (noteId: string, value: string, isInheritable = false) => [
+        `notes/${noteId}/set-attribute`,
+        { type: "label", name: "mode", value, isInheritable },
+        undefined
+    ];
+    const removeCall = (note: FNote, index: number) => [
+        `notes/${note.noteId}/attributes/${note.getOwnedLabels("mode")[index]?.attributeId}`
+    ];
+
+    beforeEach(() => {
+        vi.clearAllMocks();
+        buildNote({
+            title: "Parent note",
+            "#mode(inheritable)": "b",
+            children: [
+                { id: "inherits", title: "Inherits" },
+                { id: "overrides", title: "Overrides", "#mode": [ "c", "c" ] }
+            ]
+        });
+    });
+
+    it("leaves a note alone that reads the value already, the default included", async () => {
+        await set(froca.notes["inherits"], "b");
+        await set(froca.notes["overrides"], "c");
+        await set(buildNote({ title: "Bare" }), "a");
+        await set(buildNote({ title: "Blank", "#mode": "" }), "a");
+
+        expect(server.put).not.toHaveBeenCalled();
+        expect(server.remove).not.toHaveBeenCalled();
+    });
+
+    it("overrides the inherited or default value with an owned label", async () => {
+        await set(froca.notes["inherits"], "a");
+        expect(vi.mocked(server.put).mock.lastCall).toEqual(putCall("inherits", "a"));
+
+        const bare = buildNote({ title: "Bare" });
+        await set(bare, "b");
+        expect(vi.mocked(server.put).mock.lastCall).toEqual(putCall(bare.noteId, "b"));
+        expect(server.remove).not.toHaveBeenCalled();
+    });
+
+    it("removes the owned labels when they keep the value from being inherited", async () => {
+        const note = froca.notes["overrides"];
+        const expectedRemovals = [ removeCall(note, 0), removeCall(note, 1) ];
+        await set(note, "b");
+        expect(vi.mocked(server.remove).mock.calls).toEqual(expectedRemovals);
+        expect(server.put).not.toHaveBeenCalled();
+
+        vi.clearAllMocks();
+        const owned = buildNote({ title: "Owned", "#mode": "b" });
+        const expectedRemoval = removeCall(owned, 0);
+        await set(owned, "a");
+        expect(vi.mocked(server.remove).mock.calls).toEqual([ expectedRemoval ]);
+        expect(server.put).not.toHaveBeenCalled();
+    });
+
+    it("removes the owned duplicates before changing the value", async () => {
+        const note = froca.notes["overrides"];
+        const expectedRemoval = removeCall(note, 1);
+        await set(note, "d");
+
+        expect(vi.mocked(server.remove).mock.calls).toEqual([ expectedRemoval ]);
+        expect(vi.mocked(server.put).mock.calls).toEqual([ putCall("overrides", "d") ]);
+        expect(vi.mocked(server.remove).mock.invocationCallOrder[0])
+            .toBeLessThan(vi.mocked(server.put).mock.invocationCallOrder[0]);
+    });
+
+    it("keeps an owned label inheritable when asked to, so the children read the value", async () => {
+        // An inheritable label in place already, or inherited from a parent, needs no write.
+        await set(buildNote({ title: "Inheritable", "#mode(inheritable)": "b" }), "b", true);
+        await set(froca.notes["inherits"], "b", true);
+        expect(server.put).not.toHaveBeenCalled();
+        expect(server.remove).not.toHaveBeenCalled();
+
+        const bare = buildNote({ title: "Bare" });
+        await set(bare, "b", true);
+        expect(vi.mocked(server.put).mock.calls).toEqual([ putCall(bare.noteId, "b", true) ]);
+
+        // `set-attribute` leaves an owned label's inheritability as it is, so the label is replaced.
+        vi.clearAllMocks();
+        const plain = buildNote({ title: "Plain", "#mode": "b" });
+        const expectedRemoval = removeCall(plain, 0);
+        await set(plain, "b", true);
+        expect(vi.mocked(server.remove).mock.calls).toEqual([ expectedRemoval ]);
+        expect(vi.mocked(server.put).mock.calls).toEqual([ putCall(plain.noteId, "b", true) ]);
+        expect(vi.mocked(server.remove).mock.invocationCallOrder[0])
+            .toBeLessThan(vi.mocked(server.put).mock.invocationCallOrder[0]);
+    });
 });
 
 describe("addLabel / setLabel / setRelation", () => {
@@ -242,6 +419,41 @@ describe("setLabelValues", () => {
         await attributeService.setLabelValues(note, "tags", []);
         expect(server.remove).toHaveBeenCalledTimes(3);
     });
+
+    it("removes only the label of a value taken out of the middle (#12382)", async () => {
+        const note = noteHolding("a", "b", "c", "d");
+
+        await attributeService.setLabelValues(note, "tags", [ "a", "c", "d" ]);
+
+        expect(server.put).not.toHaveBeenCalled();
+        expect(vi.mocked(server.remove).mock.calls).toEqual([
+            [ `notes/${note.noteId}/attributes/attr-1`, undefined ]
+        ]);
+
+        // Removing one value and appending another leaves the kept labels alone.
+        vi.clearAllMocks();
+        await attributeService.setLabelValues(note, "tags", [ "a", "c", "d", "e" ]);
+        expect(vi.mocked(server.remove).mock.calls).toEqual([
+            [ `notes/${note.noteId}/attributes/attr-1`, undefined ]
+        ]);
+        expect(vi.mocked(server.put).mock.calls).toEqual([ [
+            `notes/${note.noteId}/attribute`,
+            { attributeId: undefined, type: "label", name: "tags", value: "e" },
+            undefined
+        ] ]);
+    });
+
+    it("rewrites the labels after a value inserted mid-set, as a new one goes last", async () => {
+        const note = noteHolding("a", "c");
+
+        await attributeService.setLabelValues(note, "tags", [ "a", "b", "c" ]);
+
+        expect(server.remove).not.toHaveBeenCalled();
+        expect(vi.mocked(server.put).mock.calls.map(([ , body ]) => body)).toEqual([
+            { attributeId: "attr-1", type: "label", name: "tags", value: "b" },
+            { attributeId: undefined, type: "label", name: "tags", value: "c" }
+        ]);
+    });
 });
 
 describe("setRelationValues", () => {
@@ -270,6 +482,24 @@ describe("setRelationValues", () => {
         vi.clearAllMocks();
         await attributeService.setRelationValues(note, "crew", [ "aaa" ], "comp-1");
         expect(server.remove).toHaveBeenCalledWith(`notes/${note.noteId}/attributes/rel-1`, "comp-1");
+    });
+
+    it("removes only the relation of a target taken out of the middle (#12382)", async () => {
+        const note = buildNote({ title: "N" });
+        for (const [ index, value ] of [ "aaa", "bbb", "ccc" ].entries()) {
+            note.attributes.push(`rel-${index}`);
+            froca.attributes[`rel-${index}`] = {
+                attributeId: `rel-${index}`, noteId: note.noteId, type: "relation",
+                name: "crew", value, position: index, isInheritable: false
+            } as never;
+        }
+
+        await attributeService.setRelationValues(note, "crew", [ "aaa", "ccc" ], "comp-1");
+
+        expect(server.put).not.toHaveBeenCalled();
+        expect(vi.mocked(server.remove).mock.calls).toEqual([
+            [ `notes/${note.noteId}/attributes/rel-1`, "comp-1" ]
+        ]);
     });
 });
 
@@ -348,29 +578,31 @@ describe("removeAttributeById / removeOwnedAttributesByNameOrType", () => {
 describe("removeOwnedLabelByName / removeOwnedRelationByName", () => {
     beforeEach(() => vi.clearAllMocks());
 
-    it("removeOwnedLabelByName removes an existing label and returns true", () => {
+    it("removeOwnedLabelByName removes an existing label and returns true", async () => {
         const note = buildNote({ title: "N", "#color": "red" });
         const labelId = note.getOwnedLabel("color")!.attributeId;
-        expect(attributeService.removeOwnedLabelByName(note, "color")).toBe(true);
+        await expect(attributeService.removeOwnedLabelByName(note, "color")).resolves.toBe(true);
         expect(server.remove).toHaveBeenCalledWith(`notes/${note.noteId}/attributes/${labelId}`);
     });
 
-    it("removeOwnedLabelByName returns false when label is absent", () => {
+    it("removeOwnedLabelByName returns false when label is absent", async () => {
         const note = buildNote({ title: "N" });
-        expect(attributeService.removeOwnedLabelByName(note, "missing")).toBe(false);
+        await expect(attributeService.removeOwnedLabelByName(note, "missing")).resolves.toBe(false);
         expect(server.remove).not.toHaveBeenCalled();
     });
 
-    it("removeOwnedRelationByName removes an existing relation and returns true", () => {
+    it("removeOwnedRelationByName removes an existing relation and returns true", async () => {
         const note = buildNote({ title: "N", "~template": "tpl1" });
         const relId = note.getOwnedRelation("template")!.attributeId;
-        expect(attributeService.removeOwnedRelationByName(note, "template")).toBe(true);
+        await expect(attributeService.removeOwnedRelationByName(note, "template"))
+            .resolves.toBe(true);
         expect(server.remove).toHaveBeenCalledWith(`notes/${note.noteId}/attributes/${relId}`);
     });
 
-    it("removeOwnedRelationByName returns false when relation is absent", () => {
+    it("removeOwnedRelationByName returns false when relation is absent", async () => {
         const note = buildNote({ title: "N" });
-        expect(attributeService.removeOwnedRelationByName(note, "missing")).toBe(false);
+        await expect(attributeService.removeOwnedRelationByName(note, "missing"))
+            .resolves.toBe(false);
         expect(server.remove).not.toHaveBeenCalled();
     });
 });
@@ -456,48 +688,77 @@ describe("isAffecting", () => {
 describe("toggleDangerousAttribute", () => {
     beforeEach(() => vi.clearAllMocks());
 
-    it("disables a label by prefixing it and removing the original", async () => {
+    it("disables a label by adding a prefixed copy before removing the original", async () => {
         const note = buildNote({ title: "N", "#run": "frontendStartup" });
-        const attrId = note.getOwnedLabel("run")!.attributeId;
+        const attr = note.getOwnedLabel("run");
+        if (!attr) throw new Error("missing #run");
         await attributeService.toggleDangerousAttribute(note, "label", "run", false);
-        expect(server.put).toHaveBeenCalledWith(`notes/${note.noteId}/set-attribute`, {
+        expect(server.post).toHaveBeenCalledWith(`notes/${note.noteId}/attributes`, {
             type: "label",
             name: "disabled:run",
             value: "frontendStartup",
-            isInheritable: false
-        }, undefined);
-        expect(server.remove).toHaveBeenCalledWith(`notes/${note.noteId}/attributes/${attrId}`);
-        // The renamed attribute must be PUT before the original is removed, to avoid a flicker
-        // where there would momentarily be no active content attribute.
-        const putMock = server.put as unknown as ReturnType<typeof vi.fn>;
-        const removeMock = server.remove as unknown as ReturnType<typeof vi.fn>;
-        expect(putMock.mock.invocationCallOrder[0]).toBeLessThan(removeMock.mock.invocationCallOrder[0]);
+            isInheritable: false,
+            position: attr.position
+        });
+        expect(server.remove).toHaveBeenCalledWith(`notes/${note.noteId}/attributes/${attr.attributeId}`);
+        expect(server.put).not.toHaveBeenCalled();
+        expectAddedBeforeRemoved();
     });
 
-    it("enables a disabled relation by stripping the prefix", async () => {
-        const note = buildNote({ title: "N", "~disabled:runOnInstance": "tgt" });
-        const attrId = note.getOwnedRelation("disabled:runOnInstance")!.attributeId;
-        await attributeService.toggleDangerousAttribute(note, "relation", "runOnInstance", true);
-        expect(server.put).toHaveBeenCalledWith(`notes/${note.noteId}/set-attribute`, {
+    it("keeps an inheritable relation inheritable and in place through disable and enable", async () => {
+        const note = buildNote({ title: "N", "#first": "", "~shareTemplate(inheritable)": "tpl" });
+        const attr = note.getOwnedRelation("shareTemplate");
+        if (!attr) throw new Error("missing ~shareTemplate");
+        expect(attr.position).toBe(1);
+        await attributeService.toggleDangerousAttribute(note, "relation", "shareTemplate", false);
+        expect(server.post).toHaveBeenCalledWith(`notes/${note.noteId}/attributes`, {
             type: "relation",
-            name: "runOnInstance",
-            value: "tgt",
-            isInheritable: false
+            name: "disabled:shareTemplate",
+            value: "tpl",
+            isInheritable: true,
+            position: 1
         });
-        expect(server.remove).toHaveBeenCalledWith(`notes/${note.noteId}/attributes/${attrId}`);
-        // The renamed attribute must be PUT before the original is removed, to avoid a flicker
-        // where there would momentarily be no active content attribute.
-        const putMock = server.put as unknown as ReturnType<typeof vi.fn>;
-        const removeMock = server.remove as unknown as ReturnType<typeof vi.fn>;
-        expect(putMock.mock.invocationCallOrder[0]).toBeLessThan(removeMock.mock.invocationCallOrder[0]);
+
+        const disabledNote = buildNote({ title: "N", "~disabled:shareTemplate(inheritable)": "tpl" });
+        const disabledAttr = disabledNote.getOwnedRelation("disabled:shareTemplate");
+        if (!disabledAttr) throw new Error("missing ~disabled:shareTemplate");
+        await attributeService.toggleDangerousAttribute(disabledNote, "relation", "shareTemplate", true);
+        expect(server.post).toHaveBeenCalledWith(`notes/${disabledNote.noteId}/attributes`, {
+            type: "relation",
+            name: "shareTemplate",
+            value: "tpl",
+            isInheritable: true,
+            position: 0
+        });
+        expect(server.remove).toHaveBeenCalledWith(`notes/${disabledNote.noteId}/attributes/${disabledAttr.attributeId}`);
+    });
+
+    it("keeps each value of a repeated attribute as an attribute of its own", async () => {
+        const note = buildNote({ title: "N", "#run": [ "frontendStartup", "backendStartup" ] });
+        await attributeService.toggleDangerousAttribute(note, "label", "run", false);
+        const postMock = server.post as unknown as ReturnType<typeof vi.fn>;
+        expect(postMock.mock.calls.map(([ url, body ]) => [ url, body.name, body.value ])).toEqual([
+            [ `notes/${note.noteId}/attributes`, "disabled:run", "frontendStartup" ],
+            [ `notes/${note.noteId}/attributes`, "disabled:run", "backendStartup" ]
+        ]);
+        expect(server.remove).toHaveBeenCalledTimes(2);
     });
 
     it("skips attributes whose name already matches the desired state", async () => {
         const note = buildNote({ title: "N", "#widget": "x" });
         await attributeService.toggleDangerousAttribute(note, "label", "widget", true);
+        expect(server.post).not.toHaveBeenCalled();
         expect(server.put).not.toHaveBeenCalled();
         expect(server.remove).not.toHaveBeenCalled();
     });
+
+    // The copy goes in before the original is removed, so the note never goes without the active
+    // content attribute in between.
+    function expectAddedBeforeRemoved() {
+        const postMock = server.post as unknown as ReturnType<typeof vi.fn>;
+        const removeMock = server.remove as unknown as ReturnType<typeof vi.fn>;
+        expect(postMock.mock.invocationCallOrder[0]).toBeLessThan(removeMock.mock.invocationCallOrder[0]);
+    }
 });
 
 describe("getNameWithoutDangerousPrefix", () => {

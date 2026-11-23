@@ -8,18 +8,21 @@ describe("LogService (base)", () => {
     // directly and assert it forwards to the console.
     afterEach(() => vi.restoreAllMocks());
 
-    it("forwards log/info/error to the console", () => {
+    it("forwards log/info/warn/error to the console", () => {
         const service = new LogService();
         const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
         const infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
+        const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
         const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
         service.log("hello");
         service.info("info-msg");
+        service.warn("careful");
         service.error("boom");
 
         expect(logSpy).toHaveBeenCalledWith("hello");
         expect(infoSpy).toHaveBeenCalledWith("info-msg");
+        expect(warnSpy).toHaveBeenCalledWith("WARNING: ", "careful");
         expect(errorSpy).toHaveBeenCalledWith("ERROR: ", "boom");
     });
 
@@ -35,6 +38,7 @@ describe("LogService (base)", () => {
         const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 
         service.banner(undefined);
+        service.banner("   ");
         expect(logSpy).not.toHaveBeenCalled();
 
         // Single short word: exercises the no-wrap path.
@@ -55,6 +59,12 @@ describe("LogService (base)", () => {
         const wrappedBox = logSpy.mock.calls[0][0] as string;
         expect(wrappedBox).toContain(longWord);
         expect(wrappedBox.split("\n").length).toBeGreaterThan(4);
+
+        // A trailing space after an oversized word leaves no empty line behind.
+        logSpy.mockClear();
+        service.banner(`${"y".repeat(300)} `);
+        const trailingBox = logSpy.mock.calls[0][0] as string;
+        expect(trailingBox.trim().split("\n")).toHaveLength(3);
     });
 });
 

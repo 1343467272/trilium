@@ -1,4 +1,6 @@
 import becca from "../../../becca/becca.js";
+import BAttribute from "../../../becca/entities/battribute.js";
+import { saveLinks } from "../../../services/notes.js";
 import * as becca_easy_mocking from "../../../test/becca_easy_mocking.js";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -11,7 +13,11 @@ const findResultsMock = vi.hoisted(() => vi.fn());
 
 vi.mock("../../../services/notes.js", async (importOriginal) => {
     const actual = await importOriginal<typeof import("../../../services/notes.js")>();
-    return { ...actual, default: { createNewNote: vi.fn() } };
+    return {
+        ...actual,
+        default: { createNewNote: vi.fn() },
+        saveLinks: vi.fn((_note: unknown, content: string | Uint8Array) => ({ forceFrontendReload: false, content }))
+    };
 });
 
 vi.mock("../../../services/search/services/search.js", async (importOriginal) => {
@@ -58,6 +64,17 @@ describe("note_tools — write tools return post-write content", () => {
                 title: note.title,
                 content: "new code"
             });
+        });
+
+        it("stores the content as link scanning rewrote it", () => {
+            const note = buildNote({ id: "code2", type: "code", mime: "text/plain", content: "old" });
+            withMutableContent(note, "old");
+            vi.mocked(saveLinks).mockReturnValueOnce({ forceFrontendReload: true, content: "rewritten" });
+
+            const result = getTool("set_note_content").execute({ noteId: "code2", content: "new code" });
+
+            expect(note.setContent).toHaveBeenLastCalledWith("rewritten", { forceFrontendReload: true });
+            expect(result).toMatchObject({ success: true, content: "rewritten" });
         });
 
         it("returns Markdown for text notes (HTML round-trip)", () => {
@@ -297,6 +314,42 @@ describe("note_tools — write tools return post-write content", () => {
         });
     });
 
+    describe("disableVersioning label", () => {
+        const calls: Array<[string, Record<string, unknown>]> = [
+            ["set_note_content", { content: "new" }],
+            ["append_to_note", { content: "more" }],
+            ["edit_note_content", { edits: [{ oldText: "a", newText: "z" }] }]
+        ];
+
+        for (const [tool, args] of calls) {
+            it(`${tool} snapshots only a note with no own or inherited #disableVersioning`, () => {
+                const codeNote = { type: "code" as const, mime: "text/plain", content: "a\nb" };
+                const owner = buildNote({ id: "ver-owner", ...codeNote, "#disableVersioning": "" });
+                buildNote({ id: "ver-parent", children: [ { id: "ver-heir", ...codeNote } ] });
+                new BAttribute({
+                    attributeId: "ver-parent-label",
+                    noteId: "ver-parent",
+                    type: "label",
+                    name: "disableVersioning",
+                    value: "",
+                    isInheritable: true
+                });
+                const heir = becca.getNoteOrThrow("ver-heir");
+                const plain = buildNote({ id: "ver-plain", ...codeNote });
+
+                for (const note of [ owner, heir, plain ]) {
+                    withMutableContent(note, "a\nb");
+                    expect(getTool(tool).execute({ noteId: note.noteId, ...args })).toMatchObject({ success: true });
+                    expect(note.setContent).toHaveBeenCalled();
+                }
+
+                expect(owner.saveRevision).not.toHaveBeenCalled();
+                expect(heir.saveRevision).not.toHaveBeenCalled();
+                expect(plain.saveRevision).toHaveBeenCalledWith({ source: "llm" });
+            });
+        }
+    });
+
     describe("create_note", () => {
         it("returns the created note's content", async () => {
             buildNote({ id: "parent1", title: "Parent" });
@@ -402,14 +455,14 @@ describe("note_tools — write tools return post-write content", () => {
 
             findResultsMock.mockReturnValue([
                 { noteId: "sa" },
-                { noteId: "stale" } // not in becca → filtered out within the limit
+                { noteId: "stale" } // not in becca → filtered out before counting
             ]);
 
             const result = getTool("search_notes").execute({ query: "alpha", limit: 5 }) as {
                 totalResults: number;
                 results: any[];
             };
-            expect(result.totalResults).toBe(2);
+            expect(result.totalResults).toBe(1);
             expect(result.results).toHaveLength(1); // stale id dropped
             expect(result.results[0]).toMatchObject({ noteId: "sa", title: "Alpha", parentTitle: "Search parent" });
         });

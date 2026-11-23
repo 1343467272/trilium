@@ -3,9 +3,8 @@ import type { StandaloneSaveResult } from "@triliumnext/commons";
 /**
  * Saving a download inside the Capacitor shell, which has no download manager of its own: the
  * WebView drops a response that says `Content-Disposition: attachment`, silently. The page does
- * the whole job instead — fetch (still routed to the worker by the service worker on Android and
- * by the iOS interceptors on `capacitor://`), write to the app's storage, hand the file to the
- * system share sheet.
+ * the whole job instead — fetch (still routed to the worker by the shell's native request bridge),
+ * write to the app's storage, hand the file to the system share sheet.
  *
  * A database backup takes the same last step through {@link saveChunksToDevice}, reading its bytes
  * straight off the local worker rather than out of a response.
@@ -345,9 +344,11 @@ async function writeThroughSink(
 /** The chunk's bytes as exactly one ArrayBuffer, which is what the message channel carries. */
 function exactBuffer(chunk: Uint8Array): ArrayBuffer {
     const { buffer, byteOffset, byteLength } = chunk;
+    /* v8 ignore else -- rechunk() yields only whole arrays it allocated itself */
     if (byteOffset === 0 && byteLength === buffer.byteLength && buffer instanceof ArrayBuffer) {
         return buffer;
     }
+    /* v8 ignore next -- see above */
     return buffer.slice(byteOffset, byteOffset + byteLength) as ArrayBuffer;
 }
 
@@ -364,12 +365,15 @@ async function withoutCallLogging<T>(write: () => Promise<T>): Promise<T> {
     const cap = (window as any).Capacitor;
     const wasEnabled = cap?.isLoggingEnabled;
 
+    // getPlugin() has already thrown when window.Capacitor is absent, so `cap` is set here.
+    /* v8 ignore else */
     if (cap) {
         cap.isLoggingEnabled = false;
     }
     try {
         return await write();
     } finally {
+        /* v8 ignore else */
         if (cap) {
             cap.isLoggingEnabled = wasEnabled;
         }
@@ -470,6 +474,7 @@ function take(parts: Uint8Array[], size: number): Uint8Array {
 
     while (filled < size) {
         const part = parts[0];
+        /* v8 ignore next 3 -- rechunk() never asks for more bytes than `parts` holds */
         if (!part) {
             return out.subarray(0, filled);
         }
@@ -497,7 +502,7 @@ function take(parts: Uint8Array[], size: number): Uint8Array {
  * overflows the call stack. The crypto provider's `encodeBase64` is not reachable from here: it
  * lives in the worker, and this runs on the page.
  */
-function toBase64(bytes: Uint8Array): string {
+export function toBase64(bytes: Uint8Array): string {
     const native = (bytes as Uint8Array & { toBase64?: () => string }).toBase64;
     if (typeof native === "function") {
         return native.call(bytes);

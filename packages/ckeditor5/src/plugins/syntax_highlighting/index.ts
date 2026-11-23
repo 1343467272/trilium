@@ -18,18 +18,43 @@ interface SpanStackEntry {
 export default class SyntaxHighlighting extends Plugin {
 
     private config!: EditorConfig;
-    private hljs!: HighlightJs;
+    private hljs?: HighlightJs;
+    /** The languages that highlight.js has, `true`, or is loading, `false`. */
+    private readonly languages = new Map<string, boolean>();
 
-    async init() {
+    init() {
         const config = this.editor.config.get("syntaxHighlighting") as EditorConfig | null;
         if (!config || !config.enabled) {
             return;
         }
 
         this.config = config;
-        this.hljs = await config.loadHighlightJs();
-
         this.initTextEditor(this.editor);
+    }
+
+    /** Loads highlight.js with the language `mimeType`, then highlights the code blocks in it. */
+    private loadLanguage(mimeType: string) {
+        if (this.languages.has(mimeType)) {
+            return;
+        }
+        this.languages.set(mimeType, false);
+        void this.config.loadHighlightJs(mimeType).then((hljs) => {
+            this.hljs = hljs;
+            this.languages.set(mimeType, true);
+            if (this.editor.state === "destroyed") {
+                return;
+            }
+            const model = this.editor.model;
+            model.change((writer) => {
+                for (const root of model.document.getRoots()) {
+                    for (const { item } of model.createRangeIn(root)) {
+                        if (item.is("element", "codeBlock") && item.getAttribute("language") === mimeType) {
+                            this.highlightCodeBlock(item, writer);
+                        }
+                    }
+                }
+            });
+        });
     }
 
     initTextEditor(textEditor: Editor) {
@@ -114,7 +139,7 @@ export default class SyntaxHighlighting extends Plugin {
                     // it already has children, like when pasting one or more
                     // full codeblocks, undoing a delete, changing the language,
                     // etc (the postfixer won't get later changes for those).
-                    /* v8 ignore next -- defensive: an "insert" differ change always has a nodeAfter, so codeBlock is never falsy here */
+                    /* v8 ignore else -- an "insert" differ change always has a nodeAfter */
                     if (codeBlock) {
                         log("dirtying inserted codeBlock " + JSON.stringify(codeBlock.toJSON()));
                         dirtyCodeBlocks.add(codeBlock as ModelElement);
@@ -153,18 +178,21 @@ export default class SyntaxHighlighting extends Plugin {
      */
     highlightCodeBlock(codeBlock: ModelElement, writer: ModelWriter) {
         log("highlighting codeblock " + JSON.stringify(codeBlock.toJSON()));
-        /* v8 ignore start -- defensive: dirtied code blocks are always attached to the document, so root.document and its model are always present */
         const model = codeBlock.root.document?.model;
+        /* v8 ignore if -- every dirtied code block is in a root of the model's document */
         if (!model) {
             return;
         }
-        /* v8 ignore stop */
 
         // Can't invoke addMarker with an already existing marker name,
         // clear all highlight markers first. Marker names follow the
-        // pattern hljs:cssClassName:uniqueId, eg hljs:hljs-comment:1
+        // pattern hljs:cssClassName:uniqueId, eg hljs:hljs-comment:1.
+        // Markers of other features (find results, comments) stay.
         const codeBlockRange = model.createRangeIn(codeBlock);
         for (const marker of model.markers.getMarkersIntersectingRange(codeBlockRange)) {
+            if (!marker.name.startsWith("hljs:")) {
+                continue;
+            }
             dbg("removing marker " + marker.name);
             writer.removeMarker(marker.name);
         }
@@ -184,6 +212,12 @@ export default class SyntaxHighlighting extends Plugin {
 
         // Don't highlight if the code is too big, as the typing performance will be highly degraded.
         if (codeBlock.childCount >= HIGHLIGHT_MAX_BLOCK_COUNT) {
+            return;
+        }
+
+        const hljs = this.hljs;
+        if (!hljs || !this.languages.get(mimeType)) {
+            this.loadLanguage(mimeType);
             return;
         }
 
@@ -232,9 +266,9 @@ export default class SyntaxHighlighting extends Plugin {
 
         let highlightRes;
         if (mimeType === this.config.defaultMimeType) {
-            highlightRes = this.hljs.highlightAuto(text);
+            highlightRes = hljs.highlightAuto(text);
         } else {
-            highlightRes = this.hljs.highlight(text, { language: mimeType });
+            highlightRes = hljs.highlight(text, { language: mimeType });
         }
 
         if (!highlightRes) {
@@ -364,22 +398,24 @@ const tag = "SyntaxHighlightWidget";
 const debugLevels = ["error", "warn", "info", "log", "debug"];
 const debugLevel = debugLevels.indexOf("warn");
 
-/* v8 ignore start -- dead debug scaffolding: debugLevel is a hardcoded "warn", so these level gates and the disabled-logger noops never vary at runtime */
+/* v8 ignore next -- debugLevel is a hardcoded "warn", so the gate below replaces this noop */
 let warn = function (...args: unknown[]) {};
+/* v8 ignore else -- debugLevel is a hardcoded "warn", so this gate always passes */
 if (debugLevel >= debugLevels.indexOf("warn")) {
     warn = console.warn.bind(console, tag + ": ");
 }
 
 let log = function (...args: unknown[]) {};
+/* v8 ignore if -- debugLevel is a hardcoded "warn", below "log" */
 if (debugLevel >= debugLevels.indexOf("log")) {
     log = console.log.bind(console, tag + ": ");
 }
 
 let dbg = function (...args: unknown[]) {};
+/* v8 ignore if -- debugLevel is a hardcoded "warn", below "debug" */
 if (debugLevel >= debugLevels.indexOf("debug")) {
     dbg = console.debug.bind(console, tag + ": ");
 }
-/* v8 ignore stop */
 
 function assert(e: boolean, msg?: string) {
     console.assert(e, tag + ": " + msg);

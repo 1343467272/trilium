@@ -1,14 +1,17 @@
 import "./NodeMemo.css";
 
-import { AttributeEditor, type CKTextEditor, type EditorConfig, MEMO_PLUGINS } from "@triliumnext/ckeditor5";
+import {
+    AttributeEditor, type CKTextEditor, type EditorConfig, MEMO_PLUGINS
+} from "@triliumnext/ckeditor5";
 import type { DISPLAYABLE_LOCALE_IDS } from "@triliumnext/commons";
 import type { NodeObj, Topic } from "mind-elixir";
 import { useEffect, useLayoutEffect, useRef } from "preact/hooks";
 
 import { t } from "../../../services/i18n";
+import link from "../../../services/link";
 import { escapeHtml } from "../../../services/utils";
 import CKEditor, { type CKEditorApi } from "../../react/CKEditor";
-import { useTriliumOption } from "../../react/hooks";
+import { useTriliumOption } from "../../react/hooks/options";
 
 /**
  * The memo a node carries: text kept about it, which the map itself never shows.
@@ -112,11 +115,15 @@ export default function NodeMemo({ selectionKey, memo, readOnly, onCommit }: {
  * dictionary has to be fetched, which is done for the field by the wrapper that raises the editor
  * (see the `uiLanguage` it is handed).
  */
-function buildMemoEditorConfig(): EditorConfig {
+export function buildMemoEditorConfig(): EditorConfig {
     return {
         extraPlugins: MEMO_PLUGINS,
         toolbar: { items: MEMO_TOOLBAR_ITEMS },
         placeholder: t("mind-map.memo-placeholder"),
+        referenceLink: {
+            getTitle: link.getReferenceLinkTitle,
+            getTitleSync: link.getReferenceLinkTitleSync
+        },
         licenseKey: "GPL"
     };
 }
@@ -194,7 +201,7 @@ export const MEMO_MARKER_ATTRIBUTE = "data-has-memo";
  * @param container the element holding the rendered nodes.
  */
 export function renderMemoMarkers(container: HTMLElement) {
-    for (const topic of container.querySelectorAll<Topic>("me-tpc")) {
+    for (const topic of container.querySelectorAll<Topic>(".me-tpc")) {
         // Anything written at all, as the panel's own tab reads it (see `getCommonValue`), so that
         // the two never disagree over a memo one of them counts and the other does not.
         const memo = topic.nodeObj && getNodeMemo(topic.nodeObj);

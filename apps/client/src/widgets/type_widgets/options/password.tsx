@@ -7,7 +7,6 @@ import { useCallback, useEffect, useState } from "preact/hooks";
 import dialog from "../../../services/dialog";
 import { t } from "../../../services/i18n";
 import { oauthAccountLabel, oauthProviderDisplayName } from "../../../services/oauth_status";
-import protected_session_holder from "../../../services/protected_session_holder";
 import server from "../../../services/server";
 import toast from "../../../services/toast";
 import { isElectron } from "../../../services/utils";
@@ -18,7 +17,7 @@ import FormGroup from "../../react/FormGroup";
 import FormSelect from "../../react/FormSelect";
 import FormText from "../../react/FormText";
 import FormTextBox from "../../react/FormTextBox";
-import { useTriliumOption } from "../../react/hooks";
+import { useTriliumOption } from "../../react/hooks/options";
 import Modal from "../../react/Modal";
 import RawHtml from "../../react/RawHtml";
 import MfaStatusBadge, { MfaStatusTone } from "./components/MfaStatusBadge";
@@ -111,9 +110,6 @@ function ChangePasswordModal({ show, onHidden }: ChangePasswordModalProps) {
             setNewPassword1("");
             setNewPassword2("");
             toast.showMessage(t("password.password_changed_success"));
-
-            // password changed so current protected session is invalid and needs to be cleared
-            protected_session_holder.resetProtectedSession();
         } else if (result.message) {
             toast.showError(result.message);
         }

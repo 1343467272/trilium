@@ -1,6 +1,6 @@
 import "./WebView.css";
 
-import { WEBVIEW_SESSION_PARTITION } from "@triliumnext/commons";
+import { WEBVIEW_SESSION_PARTITION } from "@triliumnext/commons/src/lib/shared_constants.js";
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 
 import appContext from "../../components/app_context";
@@ -12,7 +12,7 @@ import utils from "../../services/utils";
 import Button from "../react/Button";
 import FormGroup from "../react/FormGroup";
 import FormTextBox from "../react/FormTextBox";
-import { useNoteLabel } from "../react/hooks";
+import { useNoteLabel } from "../react/hooks/note";
 import SetupForm from "./helpers/SetupForm";
 import { TypeWidgetProps } from "./type_widget";
 
@@ -36,7 +36,7 @@ export default function WebView({ note, ntxId }: TypeWidgetProps) {
         : <BrowserWebView src={webViewSrc} ntxId={ntxId} />;
 }
 
-function DesktopWebView({ src, ntxId }: { src: string, ntxId: string | null | undefined }) {
+export function DesktopWebView({ src, ntxId }: { src: string, ntxId: string | null | undefined }) {
     const webviewRef = useRef<HTMLElement>(null);
 
     useEffect(() => {

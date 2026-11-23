@@ -8,11 +8,10 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 
 import type { MenuItem } from "../../menus/context_menu";
 import { isMobile, isNarrowLayout, onNarrowLayoutChange } from "../../services/utils";
-import { focusListItem } from "./FormList";
-import { useTooltip, useUniqueName } from "./hooks";
-import { suspendModalFocusTraps } from "./modal_focustrap";
-import Menu from "./Menu";
-import Popup, { type PopupProps } from "./Popup";
+import type * as DropdownPopups from "./DropdownPopups";
+import { useBodyClass, useUniqueName } from "./hooks/dom";
+import { useTooltip } from "./hooks/tooltip";
+import type { PopupProps } from "./Popup";
 
 type DataAttributes = {
     [key: `data-${string}`]: string | number | boolean | undefined;
@@ -27,8 +26,13 @@ export interface DropdownProps extends Pick<HTMLAttributes<HTMLDivElement>, "id"
      * `handler`, then closes the menu.
      */
     items?: MenuItem<unknown>[];
-    /** For a {@link Dropdown} of {@link items}, offers an input at its top that filters them. */
+    /**
+     * For a {@link Dropdown} of {@link items}, or of children whose rows `MenuItemRows` draws,
+     * offers an input at its top that filters them.
+     */
     filterable?: boolean;
+    /** For a {@link filterable} menu above its toggle, keeps the rows in their own order. */
+    keepOrder?: boolean;
     title?: string;
     dropdownContainerStyle?: CSSProperties;
     dropdownContainerClassName?: string;
@@ -37,11 +41,21 @@ export interface DropdownProps extends Pick<HTMLAttributes<HTMLDivElement>, "id"
     /** If set to true, then the dropdown button will be considered an icon action (without normal border and sized for icons only). */
     iconAction?: boolean;
     noSelectButtonStyle?: boolean;
+    /**
+     * Leaves the look of the toggle to {@link buttonClassName} alone, without Bootstrap's `btn`, for a
+     * toggle on a surface that styles its own buttons, such as an `OverlayControlGroup`.
+     */
+    bareButton?: boolean;
     /** Disables the toggle, and closes the popup if it is open. */
     disabled?: boolean;
     text?: ComponentChildren;
     onShown?: () => void;
     onHidden?: () => void;
+    /**
+     * Whether the popup's content can draw. While `false`, an open dropdown draws no popup, as for
+     * content whose module is still loading. Defaults to `true`.
+     */
+    ready?: boolean;
     /** The side of the toggle the popup prefers; it flips to the other near the viewport's edge. */
     placement?: Placement;
     /**
@@ -53,6 +67,11 @@ export interface DropdownProps extends Pick<HTMLAttributes<HTMLDivElement>, "id"
     dropdownRef?: RefObject<DropdownHandle | null>;
     titlePosition?: "top" | "right" | "bottom" | "left";
     titleOptions?: Partial<Tooltip.Options>;
+    /**
+     * For a launcher bar menu: on a phone, dims the page above the bar and leaves the popup to the
+     * stylesheet, which pins it above the bar. On a tablet's wider mobile layout, the popup opens
+     * beside its toggle over the dimmed page. No effect on a desktop layout.
+     */
     mobileBackdrop?: boolean;
     /**
      * On a phone, shows the popup as a sheet rising from the bottom of the screen over a dimmed
@@ -88,6 +107,16 @@ export interface DropdownHandle {
 const TOGGLE_GAP = 2;
 
 /**
+ * The `MenuItemRows` of `Menu.tsx`, for rows given as data among the children of a {@link Dropdown}.
+ * A dropdown draws its children only once its popups have loaded, so this keeps `Menu.tsx` out of
+ * the modules that a closed dropdown loads.
+ */
+export function DropdownMenuItemRows<T>({ items }: { items: MenuItem<T>[] }) {
+    const MenuItemRows = dropdownPopups?.MenuItemRows;
+    return MenuItemRows ? <MenuItemRows items={items} /> : null;
+}
+
+/**
  * A menu under a toggle: its rows are `FormListItem`s and the other `FormList` rows, which the
  * menu's keys move between. For anything else, such as a picker or a form, use {@link DropdownPanel}.
  */
@@ -96,7 +125,7 @@ export default function Dropdown(props: DropdownProps) {
         <DropdownToggle
             {...props}
             hasPopup="menu"
-            popup={({ popupProps, className, bottomSheet, startAt, isWanted, dismiss, close }) => (
+            popup={({ popupProps, className, bottomSheet, startAt, isWanted, dismiss, close }, { Menu }) => (
                 <Menu
                     {...popupProps}
                     className={className}
@@ -105,6 +134,7 @@ export default function Dropdown(props: DropdownProps) {
                     isWanted={isWanted}
                     items={props.items}
                     filterable={props.filterable}
+                    keepOrder={props.keepOrder}
                     onSelect={(item, e) => {
                         item.handler?.(item, e);
                         if (!item.items) close();
@@ -128,13 +158,14 @@ export function DropdownPanel({ scrollable, ...props }: DropdownPanelProps) {
         <DropdownToggle
             {...props}
             hasPopup="true"
-            onToggleArrow={(popup, edge) => focusListItem(popup, edge)}
-            popup={({ popupProps, className, bottomSheet, startAt, dismiss }) => (
+            onToggleArrow={(popup, edge, { focusListItem }) => focusListItem(popup, edge)}
+            popup={({ popupProps, className, bottomSheet, startAt, dismiss }, { PanelPopup }) => (
                 <PanelPopup
                     {...popupProps}
                     // Otherwise it grows with its content, as Bootstrap's dropdowns did.
                     capHeight={!!scrollable}
-                    placedByStylesheet={bottomSheet}
+                    placedByStylesheet={popupProps.placedByStylesheet}
+                    reveal
                     className={clsx("dropdown-menu show", className, bottomSheet && "mobile-bottom-menu")}
                     startAt={startAt}
                     onDismiss={dismiss}
@@ -152,7 +183,7 @@ export function DropdownPanel({ scrollable, ...props }: DropdownPanelProps) {
 interface PopupSlot {
     /** Placement, portal, backdrop and click handling, for the `Popup` or `Menu`. */
     popupProps: Pick<PopupProps, "anchor" | "placement" | "offset" | "portalClassName" | "backdropClassName"
-        | "elementRef" | "style" | "aria-labelledby" | "onClick">;
+        | "elementRef" | "style" | "aria-labelledby" | "onClick" | "placedByStylesheet">;
     className: string;
     bottomSheet: boolean;
     /** The item to start at, for a popup a key on the toggle opened. */
@@ -167,27 +198,30 @@ interface PopupSlot {
  * The toggle both kinds of dropdown share: the button, its tooltip, the open state and its
  * callbacks, the handle, and the phone's cover. `popup` draws what opens under it.
  */
-function DropdownToggle({ id, className, buttonClassName, title, text, dropdownContainerStyle, dropdownContainerClassName, dropdownContainerRef: externalContainerRef, hideToggleArrow, iconAction, disabled, noSelectButtonStyle, onShown, onHidden, placement, autoClose = true, buttonProps, dropdownRef, titlePosition, titleOptions, mobileBackdrop: mobileBackdropProp, mobileBottomSheet, backdrop, hasPopup, onToggleArrow, popup }: Omit<DropdownProps, "children"> & {
+function DropdownToggle({ id, className, buttonClassName, title, text, dropdownContainerStyle, dropdownContainerClassName, dropdownContainerRef: externalContainerRef, hideToggleArrow, iconAction, disabled, noSelectButtonStyle, bareButton, onShown, onHidden, ready = true, placement, autoClose = true, buttonProps, dropdownRef, titlePosition, titleOptions, mobileBackdrop: mobileBackdropProp, mobileBottomSheet, backdrop, hasPopup, onToggleArrow, popup }: Omit<DropdownProps, "children"> & {
     hasPopup: "menu" | "true";
     /** Called for Up or Down on the toggle while the popup is up. */
-    onToggleArrow?(popup: HTMLElement, edge: "first" | "last"): void;
-    popup(slot: PopupSlot): ComponentChildren;
+    onToggleArrow?(popup: HTMLElement, edge: "first" | "last", popups: typeof DropdownPopups): void;
+    popup(slot: PopupSlot, popups: typeof DropdownPopups): ComponentChildren;
 }) {
     // The sheet is placed by the app's own rule and dims what is behind it, so it is asked for as
     // one thing and unpacked here. It follows the layout, as a tablet can turn while it is open.
-    const followsLayout = !!mobileBottomSheet && isMobile();
+    const followsLayout = (!!mobileBottomSheet || !!mobileBackdropProp) && isMobile();
     const [ narrow, setNarrow ] = useState(isNarrowLayout);
     useEffect(() => {
         if (!followsLayout) return;
         setNarrow(isNarrowLayout());
         return onNarrowLayoutChange(() => setNarrow(isNarrowLayout()));
     }, [ followsLayout ]);
-    const bottomSheet = followsLayout && narrow;
+    const bottomSheet = followsLayout && narrow && !!mobileBottomSheet;
+    // A launcher bar menu on a phone is pinned above the bar by `style.css`.
+    const pinnedAboveBar = followsLayout && narrow && !mobileBottomSheet;
     const mobileBackdrop = (!!mobileBackdropProp || !!mobileBottomSheet) && isMobile();
     const containerRef = useRef<HTMLDivElement | null>(null);
     const triggerRef = useRef<HTMLButtonElement | null>(null);
     const popupRef = useRef<HTMLDivElement | null>(null);
     const [ shown, setShown ] = useState(false);
+    useBodyClass("backdrop-open", shown && (!!backdrop || mobileBackdrop));
     /** The item to start at once the popup shows, for a popup a key on the toggle opened. */
     const [ startAt, setStartAt ] = useState<"first" | "last">();
 
@@ -210,12 +244,22 @@ function DropdownToggle({ id, className, buttonClassName, title, text, dropdownC
     const shownRef = useRef(shown);
     const callbacks = useRef({ onShown, onHidden, hideTooltip });
     callbacks.current = { onShown, onHidden, hideTooltip };
+    const restoreFocusTraps = useRef<(() => void) | null>(null);
     const setOpen = useCallback((open: boolean) => {
         if (shownRef.current === open) return;
         shownRef.current = open;
+        // A dialog's focus trap would pull focus out of a popup that stands outside the dialog. The
+        // traps go before the render, since a bottom sheet takes focus in the effect that places it.
+        if (open && dropdownPopups) {
+            restoreFocusTraps.current = dropdownPopups.suspendModalFocusTraps();
+        }
         // Focus that the popup holds goes back to the toggle, as a native menu button's does; a
         // command that moved it elsewhere keeps it there.
         if (!open && popupRef.current?.contains(document.activeElement)) triggerRef.current?.focus();
+        if (!open) {
+            restoreFocusTraps.current?.();
+            restoreFocusTraps.current = null;
+        }
         if (!open) setStartAt(undefined);
         setShown(open);
         if (open) {
@@ -260,11 +304,26 @@ function DropdownToggle({ id, className, buttonClassName, title, text, dropdownC
         return () => cover?.classList.remove("show", "global-menu-cover");
     }, [ shown, mobileBackdrop ]);
 
-    // A dialog's focus trap would pull focus out of a popup that stands outside the dialog.
-    useLayoutEffect(() => {
-        if (!shown) return;
-        return suspendModalFocusTraps();
+    useEffect(() => () => restoreFocusTraps.current?.(), []);
+
+    // The popup draws once its module has loaded, which a toggle about to be pressed starts.
+    const [ , setPopupsLoaded ] = useState(false);
+    useEffect(() => {
+        if (!shown || dropdownPopups) return;
+        let cancelled = false;
+        void preloadDropdownPopups().then((popups) => {
+            if (cancelled) return;
+            // Before the popup draws, as `setOpen()` does once the popups have loaded.
+            if (shownRef.current && !restoreFocusTraps.current) {
+                restoreFocusTraps.current = popups.suspendModalFocusTraps();
+            }
+            setPopupsLoaded(true);
+        });
+        return () => {
+            cancelled = true;
+        };
     }, [ shown ]);
+    const preloadPopups = () => void preloadDropdownPopups();
 
     const ariaId = useUniqueName("button");
     const toggleId = id ?? ariaId;
@@ -285,7 +344,9 @@ function DropdownToggle({ id, className, buttonClassName, title, text, dropdownC
             <button
                 {...buttonProps}
                 className={clsx(
-                    iconAction ? "icon-action" : "btn",
+                    iconAction ? "icon-action" : !bareButton && "btn",
+                    // `.icon-action` styles its disabled state by class, as `ActionButton` sets it.
+                    iconAction && disabled && "disabled",
                     !noSelectButtonStyle && "select-button",
                     buttonClassName,
                     !hideToggleArrow && "dropdown-toggle",
@@ -297,6 +358,18 @@ function DropdownToggle({ id, className, buttonClassName, title, text, dropdownC
                 aria-expanded={shown}
                 id={toggleId}
                 disabled={disabled}
+                onPointerEnter={(e) => {
+                    buttonProps?.onPointerEnter?.(e);
+                    preloadPopups();
+                }}
+                onPointerDown={(e) => {
+                    buttonProps?.onPointerDown?.(e);
+                    preloadPopups();
+                }}
+                onFocus={(e) => {
+                    buttonProps?.onFocus?.(e);
+                    preloadPopups();
+                }}
                 onClick={(e) => {
                     buttonProps?.onClick?.(e);
                     setOpen(!shownRef.current);
@@ -308,7 +381,7 @@ function DropdownToggle({ id, className, buttonClassName, title, text, dropdownC
                     e.preventDefault();
                     const edge = e.key === "ArrowDown" ? "first" : "last";
                     if (shown) {
-                        if (popupRef.current) onToggleArrow?.(popupRef.current, edge);
+                        if (popupRef.current && dropdownPopups) onToggleArrow?.(popupRef.current, edge, dropdownPopups);
                     } else {
                         setStartAt(edge);
                         setOpen(true);
@@ -319,7 +392,7 @@ function DropdownToggle({ id, className, buttonClassName, title, text, dropdownC
                 <span className="caret" />
             </button>
 
-            {shown && triggerRef.current && popup({
+            {shown && ready && triggerRef.current && dropdownPopups && popup({
                 popupProps: {
                     anchor: triggerRef.current,
                     placement,
@@ -327,6 +400,7 @@ function DropdownToggle({ id, className, buttonClassName, title, text, dropdownC
                     // In a wrapper with the dropdown's classes, so CSS scoped under them still
                     // applies to the popup in the page's body. style.css stacks a portaled popup by
                     // `tn-dropdown-portal`, and its backdrop just under it.
+                    placedByStylesheet: bottomSheet || pinnedAboveBar,
                     portalClassName: clsx("tn-dropdown-portal", className),
                     backdropClassName: backdrop ? "tn-dropdown-backdrop" : undefined,
                     elementRef: popupRef,
@@ -343,44 +417,20 @@ function DropdownToggle({ id, className, buttonClassName, title, text, dropdownC
                     setOpen(false);
                 },
                 close: () => setOpen(false)
-            })}
+            }, dropdownPopups)}
         </div>
     );
 }
 
-/** A panel's popup, whose items Up and Down move between. */
-function PanelPopup({ startAt, elementRef, ...props }: PopupProps & { startAt: "first" | "last" | undefined }) {
-    const popupRef = useRef<HTMLDivElement | null>(null);
+/** The popups, which load once a toggle is about to be pressed or opens. */
+let dropdownPopups: typeof DropdownPopups | undefined;
+let dropdownPopupsLoad: Promise<typeof DropdownPopups> | undefined;
 
-    // Captured at the window, so Bootstrap's handler for keys in a `.dropdown-menu`, which finds
-    // no toggle beside a popup, never sees them.
-    useEffect(() => {
-        const onKeyDown = (e: KeyboardEvent) => {
-            const popup = popupRef.current;
-            const target = e.target as Element;
-            if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
-            if (!popup?.contains(target) || /input|textarea/i.test(target.tagName)) return;
-            e.preventDefault();
-            e.stopPropagation();
-            focusListItem(popup, e.key === "ArrowDown" ? "next" : "previous", target);
-        };
-        window.addEventListener("keydown", onKeyDown, true);
-        return () => window.removeEventListener("keydown", onKeyDown, true);
-    }, []);
-
-    const setElement = useCallback((element: HTMLDivElement | null) => {
-        popupRef.current = element;
-        if (typeof elementRef === "function") elementRef(element);
-        else if (elementRef) elementRef.current = element;
-    }, [ elementRef ]);
-
-    return (
-        <Popup
-            {...props}
-            elementRef={setElement}
-            onPlaced={() => {
-                if (startAt && popupRef.current) focusListItem(popupRef.current, startAt);
-            }}
-        />
-    );
+/** Loads the popups ahead of the first dropdown that opens, which then draws its popup at once. */
+export function preloadDropdownPopups() {
+    dropdownPopupsLoad ??= import("./DropdownPopups").then((popups) => {
+        dropdownPopups = popups;
+        return popups;
+    });
+    return dropdownPopupsLoad;
 }

@@ -226,6 +226,20 @@ describe("setupPrintingHandlers", () => {
             expect(e.sender.send).toHaveBeenCalledWith("print-progress", { progress: 42, action: "printing" });
         });
 
+        it("renders in a tiny frameless window instead of offscreen on Linux", async () => {
+            setPlatform("linux");
+            await fireOn("print-note", { notePath: "root/abc" });
+            expect(h.lastBwOpts).toMatchObject({
+                show: true,
+                width: 1,
+                height: 1,
+                frame: false,
+                skipTaskbar: true,
+                focusable: false,
+                webPreferences: { offscreen: false }
+            });
+        });
+
         it("stringifies a non-Error rejection in the error payload", async () => {
             // Reject with a plain string so the `err instanceof Error` ternaries
             // take their String(err) / undefined arms.
@@ -465,6 +479,53 @@ describe("setupPrintingHandlers", () => {
             h.loadURL.mockRejectedValue("load string");
             const e2 = await fireOn("print-from-preview", { ...PDF_OPTS, silent: false });
             expect(e2.sender.send).toHaveBeenCalledWith("print-done", { type: "error", message: "load string", stack: undefined });
+        });
+    });
+
+    describe("live printing", () => {
+        async function fireLive(channel: string, payload: object) {
+            const fn = h.on.get(channel);
+            if (!fn) throw new Error(`no on-handler for ${channel}`);
+            const sender = {
+                send: vi.fn(),
+                printToPDF: vi.fn(async () => Buffer.from("live-pdf")),
+                print: vi.fn((_opts: unknown, cb: (success: boolean) => void) => cb(true))
+            };
+            await fn({ sender }, { ...payload, liveJobId: 3 });
+            return sender;
+        }
+
+        it("previews the sender's own window, leaving it prepared", async () => {
+            const sender = await fireLive("export-as-pdf-preview", PDF_OPTS);
+
+            expect(h.loadURL).not.toHaveBeenCalled();
+            expect(h.printToPDF).not.toHaveBeenCalled();
+            expect(sender.printToPDF).toHaveBeenCalledOnce();
+            expect(sender.send).toHaveBeenCalledWith("export-as-pdf-preview-result", expect.objectContaining({ requestId: 7, buffer: Buffer.from("live-pdf") }));
+            expect(sender.send).not.toHaveBeenCalledWith("print-done", expect.anything());
+            expect(h.destroy).not.toHaveBeenCalled();
+        });
+
+        it("prints the sender's own window and reports print-done so it is restored", async () => {
+            const sender = await fireLive("print-from-preview", { ...PDF_OPTS, silent: true, deviceName: "HP" });
+
+            expect(h.loadURL).not.toHaveBeenCalled();
+            expect(h.print).not.toHaveBeenCalled();
+            expect(sender.print).toHaveBeenCalledWith(expect.objectContaining({ silent: true, deviceName: "HP" }), expect.any(Function));
+            expect(sender.send).toHaveBeenCalledWith("print-done", { type: "single-note" }, 3);
+            expect(h.destroy).not.toHaveBeenCalled();
+        });
+
+        it("tags a failed live print with its job so the sender's window is restored", async () => {
+            const fn = h.on.get("print-from-preview");
+            const sender = {
+                send: vi.fn(),
+                print: vi.fn(() => { throw new Error("no printer"); })
+            };
+            await fn?.({ sender }, { ...PDF_OPTS, silent: true, liveJobId: 3 });
+
+            expect(sender.send).toHaveBeenCalledWith("print-from-preview-done");
+            expect(sender.send).toHaveBeenCalledWith("print-done", expect.objectContaining({ type: "error", message: "no printer" }), 3);
         });
     });
 });

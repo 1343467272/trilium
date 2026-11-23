@@ -5,9 +5,14 @@ import { join } from 'path';
 import { defineConfig } from 'vite';
 import { viteStaticCopy } from 'vite-plugin-static-copy'
 
-import { shareMermaidManifest, stripUniverEmojiData, stripUniverHyphenation } from './vite-plugins.mjs';
+import { startupChunkGroup } from './startup-chunks.mjs';
+import { translationCatalogues } from './translation-catalogues.mjs';
+import {
+    bundleStylesheet, narrowThirdPartySelectors, SHARE_THEME_APP_LOADERS, shareTheme,
+    stripUniverEmojiData, stripUniverHyphenation
+} from './vite-plugins.mjs';
 
-const assets = [ "assets", "stylesheets", "fonts", "translations" ];
+const assets = [ "assets", "stylesheets", "fonts" ];
 
 const isDev = process.env.NODE_ENV === "development";
 let plugins: any = [];
@@ -19,18 +24,24 @@ if (isDev) {
         // work on such a view; components then reload with the page instead of in place.
         ...(process.env.TRILIUM_NO_HMR ? [] : [ prefresh() ]),
         stripUniverHyphenation(),
-        stripUniverEmojiData()
+        stripUniverEmojiData(),
+        narrowThirdPartySelectors(),
+        translationCatalogues(join(import.meta.dirname, "src/translations")),
+        ...shareTheme()
     ];
 } else {
     plugins = [
         stripUniverHyphenation(),
         stripUniverEmojiData(),
-        shareMermaidManifest("src/share_mermaid.json"),
+        narrowThirdPartySelectors(),
+        translationCatalogues(join(import.meta.dirname, "src/translations")),
+        ...shareTheme(),
         viteStaticCopy({
             targets: assets.map((asset) => ({
                 src: `src/${asset}/**/*`,
                 dest: asset,
-                rename: { stripBase: 2 }
+                rename: { stripBase: 2 },
+                ...(asset === "stylesheets" && { transform: bundleStylesheet })
             }))
         }),
         viteStaticCopy({
@@ -65,7 +76,11 @@ export default defineConfig(() => ({
     },
     css: {
         transformer: 'lightningcss',
-        devSourcemap: isDev
+        devSourcemap: isDev,
+        preprocessorOptions: {
+            // The share theme builds Bootstrap's tooltips from its partials, which only `@import` loads.
+            scss: { silenceDeprecations: [ "import" ], quietDeps: true }
+        }
     },
     server: {
         watch: {
@@ -120,7 +135,13 @@ export default defineConfig(() => ({
                     return "src/[name].js";
                 },
                 chunkFileNames: "src/[name]-[hash].js",
-                assetFileNames: "src/[name]-[hash].[ext]"
+                assetFileNames: "src/[name]-[hash].[ext]",
+                // By default every module that two lazily loaded parts share gets a chunk of its
+                // own, which made a start of the app request about 300 scripts.
+                codeSplitting: {
+                    includeDependenciesRecursively: false,
+                    groups: [ startupChunkGroup(import.meta.dirname, SHARE_THEME_APP_LOADERS) ]
+                }
             },
             onwarn(warning, rollupWarn) {
                 if (warning.code === "MODULE_LEVEL_DIRECTIVE") {
@@ -139,9 +160,27 @@ export default defineConfig(() => ({
         setupFiles: [
             "./src/test/setup.ts"
         ],
+        server: {
+            deps: {
+                // The plugin reads `rrule` through a namespace import, which Node resolves to the
+                // package's CommonJS build with no named exports. Bundling it applies Vite's interop.
+                inline: [
+                    "@fullcalendar/rrule",
+                    // Univer's components and the React libraries under them run on preact/compat
+                    // in the app, so specs bundle them to apply the same `react` alias.
+                    /@univerjs\/design/,
+                    /@radix-ui\//,
+                    /@floating-ui\/react-dom/,
+                    /react-remove-scroll/,
+                    /react-style-singleton/,
+                    /use-callback-ref/,
+                    /use-sidecar/
+                ]
+            }
+        },
         reporters: [
             "verbose",
-            ["html", { outputFile: "./test-output/vitest/html/index.html" }],
+            ["html", { outputDir: "./test-output/vitest/html" }],
             ["junit", { outputFile: "./test-output/vitest/junit.xml", addFileAttribute: true }]
         ],
         coverage: {

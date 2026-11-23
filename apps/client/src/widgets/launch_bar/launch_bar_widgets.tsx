@@ -3,14 +3,13 @@ import { createContext } from "preact";
 import { useContext } from "preact/hooks";
 
 import FNote from "../../entities/fnote";
-import { showLauncherContextMenu } from "../../menus/launcher_button_context_menu";
-import utils from "../../services/utils";
+import type { ContextMenuEvent } from "../../menus/context_menu";
+import type { ShowLauncherContextMenuOptions } from "../../menus/launcher_button_context_menu";
+import { isMobile } from "../../services/utils";
 import ActionButton, { ActionButtonProps } from "../react/ActionButton";
 import Dropdown, { DropdownPanel, DropdownProps } from "../react/Dropdown";
-import { useNoteLabel, useNoteProperty } from "../react/hooks";
+import { useNoteLabel, useNoteProperty } from "../react/hooks/note";
 import Icon from "../react/Icon";
-
-const cachedIsMobile = utils.isMobile();
 
 // Hoisted so the reference is stable across renders — an inline object would change identity
 // every render and defeat Dropdown's tooltip-config memoization, recreating the tooltip each time.
@@ -27,10 +26,18 @@ export interface LauncherNoteProps {
     launcherNote: FNote;
 }
 
-/** Builds the default right-click handler that shows the launch-bar icon context menu (with the "Remove from launch bar" entry). Used by widgets that render a raw element rather than going through {@link LaunchBarActionButton} / {@link LaunchBarDropdownButton}. */
-export function launcherContextMenuHandler(launcherNote: FNote | null | undefined) {
+/**
+ * Builds the default right-click handler that shows the launch-bar icon context menu (with the
+ * "Remove from launch bar" entry). Used by widgets that render a raw element rather than going
+ * through {@link LaunchBarActionButton} / {@link LaunchBarDropdownButton}. `parentNoteId` is the
+ * launch bar section that shows the button, see `ShowLauncherContextMenuOptions`.
+ */
+export function launcherContextMenuHandler(
+    launcherNote: FNote | null | undefined,
+    parentNoteId?: string
+) {
     if (!launcherNote) return undefined;
-    return (e: MouseEvent) => showLauncherContextMenu(launcherNote, e);
+    return (e: MouseEvent) => showLauncherContextMenu(launcherNote, e, { parentNoteId });
 }
 
 export function LaunchBarActionButton({ className, launcherNote, onContextMenu, ...props }: Omit<ActionButtonProps, "noIconActionClass" | "titlePosition"> & { launcherNote?: FNote }) {
@@ -47,9 +54,16 @@ export function LaunchBarActionButton({ className, launcherNote, onContextMenu, 
     );
 }
 
-export function LaunchBarDropdownButton({ children, icon, launcherNote, buttonProps, panel, ...props }: Pick<DropdownProps, "title" | "children" | "onShown" | "autoClose" | "dropdownRef" | "buttonProps"> & {
+export function LaunchBarDropdownButton({
+    children, icon, launcherNote, parentNoteId, buttonProps, panel, ...props
+}: Pick<
+    DropdownProps, "title" | "children" | "onShown" | "ready" | "autoClose" | "dropdownRef"
+        | "buttonProps" | "filterable" | "keepOrder"
+> & {
     icon: string,
     launcherNote?: FNote,
+    /** The launch bar section that shows the button. See `ShowLauncherContextMenuOptions`. */
+    parentNoteId?: string,
     /** Opens a {@link DropdownPanel} rather than a menu, for content other than `FormList` rows. */
     panel?: boolean
 }) {
@@ -57,7 +71,7 @@ export function LaunchBarDropdownButton({ children, icon, launcherNote, buttonPr
     const titlePosition = getTitlePosition(isHorizontalLayout);
 
     const resolvedButtonProps = launcherNote && !buttonProps?.onContextMenu
-        ? { ...buttonProps, onContextMenu: launcherContextMenuHandler(launcherNote) }
+        ? { ...buttonProps, onContextMenu: launcherContextMenuHandler(launcherNote, parentNoteId) }
         : buttonProps;
     const Component = panel ? DropdownPanel : Dropdown;
 
@@ -90,9 +104,28 @@ export function useLauncherIconAndTitle(note: FNote) {
     };
 }
 
+/** The side of a launcher its tooltips and popups open on. */
+export function useLaunchBarTitlePosition() {
+    const { isHorizontalLayout } = useContext(LaunchBarContext);
+    return getTitlePosition(isHorizontalLayout);
+}
+
+/**
+ * Shows the launch bar menu of `launcherNote`, as `launcher_button_context_menu` does, which it
+ * imports on the first right-click. The browser's own menu is prevented before the import.
+ */
+export async function showLauncherContextMenu<T extends string>(
+    launcherNote: FNote | null | undefined,
+    e: ContextMenuEvent,
+    options?: ShowLauncherContextMenuOptions<T>
+) {
+    e.preventDefault();
+    const menu = await import("../../menus/launcher_button_context_menu");
+    await menu.showLauncherContextMenu(launcherNote, e, options);
+}
+
+/** Beside a vertical bar, above the bottom bar of a phone and below the top bar of a desktop. */
 function getTitlePosition(isHorizontalLayout: boolean) {
-    if (cachedIsMobile) {
-        return "top";
-    }
-    return isHorizontalLayout ? "bottom" : "right";
+    if (!isHorizontalLayout) return "right";
+    return isMobile() ? "top" : "bottom";
 }

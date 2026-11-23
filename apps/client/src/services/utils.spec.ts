@@ -1,3 +1,5 @@
+import { dayjs } from "@triliumnext/commons/src/lib/dayjs.js";
+import type { ViteHotContext } from "vite/types/hot.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import utils, {
@@ -31,7 +33,9 @@ import utils, {
     reloadFrontendApp,
     replaceHtmlEscapedSlashes,
     restartDesktopApp,
+    reuseAcrossHotReloads,
     rootCauseMessage,
+    STACKED_TREE_LAYOUT,
     toggleBodyClass
 } from "./utils.js";
 
@@ -118,6 +122,20 @@ describe("formatSize", () => {
         expect(formatSize(5 * 1024 ** 5)).toBe("5120 TiB");
     });
 
+    it("shows a size in another size's unit, for figures read down a column", () => {
+        const total = 711_000_000;
+        expect(formatSize(643_854, 2, total)).toBe("0.61 MiB");
+        expect(formatSize(40_257_283, 2, total)).toBe("38.39 MiB");
+        expect(formatSize(0, 2, total)).toBe("0.00 MiB");
+    });
+
+    it("shows a size too small for the places of its unit as below the smallest step", () => {
+        const total = 2.5 * 1024 ** 3;
+        expect(formatSize(643_854, 2, total)).toBe("<0.01 GiB");
+        expect(formatSize(643_854, 0, total)).toBe("<1 GiB");
+        expect(formatSize(0, 2, total)).toBe("0.00 GiB");
+    });
+
     it("keeps the places it is given, trailing zeros and all", () => {
         // For a counter that is still climbing: dropping the zero shortens the text on every other
         // update, and the line shifts about while it is being read.
@@ -128,22 +146,22 @@ describe("formatSize", () => {
         // Nothing below a byte to show, however many places were asked for.
         expect(formatSize(512, 2)).toBe("512 B");
     });
+
+    it("moves to the next unit when the size rounds up to 1024 of its own", () => {
+        expect(formatSize(1024 * 1024 - 1)).toBe("1 MiB");
+        expect(formatSize(1024 ** 3 - 1024)).toBe("1 GiB");
+        expect(formatSize(1024 * 1024 - 1, 1)).toBe("1.0 MiB");
+        expect(formatSize(1023, 2)).toBe("1023 B");
+        expect(formatSize(1024 * 1024 - 6000)).toBe("1018.14 KiB");
+        // a unit given by unitOf stays, as the column shares it
+        expect(formatSize(1024 * 1024 - 1, 0, 1024 * 1024 - 1)).toBe("1024 KiB");
+    });
 });
 
 describe("formatDateTime / date helpers", () => {
     it("uses the default ISO date + time format when no custom format is given", () => {
         const date = new Date(2024, 0, 5, 9, 7); // local time -> 2024-01-05 09:07
         expect(formatDateTime(date)).toBe("2024-01-05 09:07");
-    });
-
-    it("uses a user-supplied dayjs format when provided", () => {
-        const date = new Date(2024, 0, 5, 9, 7);
-        expect(formatDateTime(date, "YYYY")).toBe("2024");
-    });
-
-    it("treats a whitespace-only custom format as absent", () => {
-        const date = new Date(2024, 11, 31, 23, 59);
-        expect(formatDateTime(date, "   ")).toBe("2024-12-31 23:59");
     });
 
     it("formatDateISO (via default export) pads month and day", () => {
@@ -160,8 +178,16 @@ describe("formatDateTime / date helpers", () => {
         expect(utils.now()).toMatch(/^\d{2}:\d{2}:\d{2}$/);
     });
 
-    it("localNowDateTime() returns a dayjs formatted timestamp", () => {
-        expect(utils.localNowDateTime()).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\./);
+    it("localNowDateTime() matches dayjs' YYYY-MM-DD HH:mm:ss.SSSZZ, offset included", () => {
+        vi.useFakeTimers();
+        try {
+            for (const time of [ new Date(2024, 0, 5, 9, 7, 3, 45), new Date(2024, 6, 15, 23, 59, 59, 999) ]) {
+                vi.setSystemTime(time);
+                expect(utils.localNowDateTime()).toBe(dayjs(time).format("YYYY-MM-DD HH:mm:ss.SSSZZ"));
+            }
+        } finally {
+            vi.useRealTimers();
+        }
     });
 });
 
@@ -227,6 +253,12 @@ describe("isHtmlEmpty", () => {
 
     it("detects plain text content", () => {
         expect(isHtmlEmpty("<p>hello</p>")).toBe(false);
+    });
+
+    it("counts a block with an id as content, which references point at", () => {
+        expect(isHtmlEmpty(`<p data-trilium-block-id="p">&nbsp;</p>`)).toBe(false);
+        expect(isHtmlEmpty(`<hr data-trilium-block-id="r">`)).toBe(false);
+        expect(isHtmlEmpty("<p>&nbsp;</p><hr>")).toBe(true);
     });
 
     it("logs and returns false for a non-string input", () => {
@@ -321,6 +353,32 @@ describe("platform / device detection", () => {
         expect(fileAccept(".enex")).toBe("*/*");
     });
 
+    it("takes a mobile viewport that docks the tree for a tablet's, which shows the desktop launchers", () => {
+        const original = window.glob.device;
+        let isTreeStacked = true;
+        vi.spyOn(window, "matchMedia").mockImplementation((query) => ({
+            matches: query === STACKED_TREE_LAYOUT && isTreeStacked
+        }) as MediaQueryList);
+        try {
+            window.glob.device = "mobile";
+            expect([ utils.isTablet(), utils.hasDesktopLaunchBar(), utils.getLaunchBarRootId() ])
+                .toEqual([ false, false, "_lbMobileRoot" ]);
+
+            // A foldable, as it unfolds.
+            isTreeStacked = false;
+            expect([ utils.isTablet(), utils.hasDesktopLaunchBar(), utils.getLaunchBarRootId() ])
+                .toEqual([ true, true, "_lbRoot" ]);
+
+            window.glob.device = "desktop";
+            isTreeStacked = true;
+            expect([ utils.isTablet(), utils.hasDesktopLaunchBar(), utils.getLaunchBarRootId() ])
+                .toEqual([ false, true, "_lbRoot" ]);
+        } finally {
+            window.glob.device = original;
+            vi.restoreAllMocks();
+        }
+    });
+
     it("isMobile / isDesktop respond to glob.device", () => {
         const original = window.glob.device;
         window.glob.device = "mobile";
@@ -370,6 +428,18 @@ describe("isIOS (named export)", () => {
         uaSpy.mockReturnValue("iPad");
         expect(isIOS()).toBe(true);
         uaSpy.mockReturnValue("Windows");
+        expect(isIOS()).toBe(false);
+    });
+
+    it("tells an iPad, which reports a Mac user agent, from a Mac by its touch points", async () => {
+        const { isIOS } = await import("./utils.js");
+        vi.spyOn(navigator, "userAgent", "get").mockReturnValue(
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) "
+            + "Version/26.5 Safari/605.1.15"
+        );
+        const touchPoints = vi.spyOn(navigator, "maxTouchPoints", "get").mockReturnValue(5);
+        expect(isIOS()).toBe(true);
+        touchPoints.mockReturnValue(0);
         expect(isIOS()).toBe(false);
     });
 });
@@ -505,6 +575,21 @@ describe("DOM / clipboard helpers (default export)", () => {
         delete (document as any).execCommand;
     });
 
+    it("copyHtmlToClipboard leaves later copies alone after execCommand throws", () => {
+        (document as any).execCommand = () => {
+            throw new Error("execCommand failed");
+        };
+        expect(() => utils.copyHtmlToClipboard("<b>old</b>")).toThrow("execCommand failed");
+        delete (document as any).execCommand;
+
+        const setData = vi.fn();
+        const later: any = new Event("copy", { cancelable: true });
+        later.clipboardData = { setData };
+        document.dispatchEvent(later);
+        expect(later.defaultPrevented).toBe(false);
+        expect(setData).not.toHaveBeenCalled();
+    });
+
     it("copyHtmlToClipboard tolerates a copy event without clipboardData", () => {
         const execSpy = vi.fn(() => {
             document.dispatchEvent(new Event("copy"));
@@ -583,10 +668,10 @@ describe("timeLimit (default export)", () => {
         expect(utils.timeLimit(42 as any, 1000)).toBe(42);
     });
 
-    it("resolves when the promise settles before the limit (timer sees it as resolved)", async () => {
+    it("resolves when the promise settles before the limit", async () => {
         const result = utils.timeLimit(Promise.resolve("done"), 1000);
         await expect(result).resolves.toBe("done");
-        // Advance past the limit so the timeout callback runs and observes `resolved === true`.
+        // Advancing past the limit checks that the timeout does not turn the result into a rejection.
         await vi.advanceTimersByTimeAsync(1000);
         await expect(result).resolves.toBe("done");
     });
@@ -596,6 +681,14 @@ describe("timeLimit (default export)", () => {
         const limited = utils.timeLimit(never, 50, "too slow");
         const assertion = expect(limited).rejects.toThrow("too slow");
         await vi.advanceTimersByTimeAsync(60);
+        await assertion;
+    });
+
+    it("forwards a rejection immediately instead of waiting for the limit", async () => {
+        const failing = Promise.reject(new Error("boom"));
+        const limited = utils.timeLimit(failing, 30000);
+        const assertion = expect(limited).rejects.toThrow("boom");
+        await vi.advanceTimersByTimeAsync(0);
         await assertion;
     });
 
@@ -1011,5 +1104,21 @@ describe("isPreAuthScreen", () => {
     it("does NOT flag an unset glob (unit-test / unknown state) — strict === false keeps eager loads working", () => {
         setGlob({});
         expect(isPreAuthScreen()).toBe(false);
+    });
+});
+
+describe("reuseAcrossHotReloads", () => {
+    it("returns the stored instance on re-evaluation, and a fresh one without `hot.data`", () => {
+        const hot = { data: {} } as unknown as ViteHotContext;
+        const create = vi.fn(() => ({}));
+
+        const first = reuseAcrossHotReloads(hot, create);
+        expect(reuseAcrossHotReloads(hot, create)).toBe(first);
+        expect(create).toHaveBeenCalledTimes(1);
+
+        // Vitest's `import.meta.hot` stub has no `data`.
+        const stub = {} as unknown as ViteHotContext;
+        expect(reuseAcrossHotReloads(stub, create)).not.toBe(reuseAcrossHotReloads(stub, create));
+        expect(reuseAcrossHotReloads(undefined, create)).not.toBe(first);
     });
 });

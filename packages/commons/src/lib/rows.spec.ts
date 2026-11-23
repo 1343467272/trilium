@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { ALLOWED_NOTE_TYPES, REVISION_SOURCES } from "./rows.js";
+import { ALLOWED_NOTE_TYPES, isNoteType, REVISION_SOURCES } from "./rows.js";
 
 describe("REVISION_SOURCES", () => {
     it("contains the expected revision source values in order", () => {
-        expect(REVISION_SOURCES).toEqual(["auto", "manual", "etapi", "llm", "restore"]);
+        expect(REVISION_SOURCES).toEqual([
+            "auto", "manual", "etapi", "llm", "restore", "draft", "fragment"
+        ]);
     });
 });
 
@@ -41,5 +43,16 @@ describe("ALLOWED_NOTE_TYPES", () => {
             "spreadsheet",
             "llmChat"
         ]);
+    });
+});
+
+describe("isNoteType", () => {
+    it("accepts exactly the allowed note types", () => {
+        for (const type of ALLOWED_NOTE_TYPES) {
+            expect(isNoteType(type)).toBe(true);
+        }
+        for (const value of ["EVILTYPE", "html", "Text", "", undefined, null, 42, {}]) {
+            expect(isNoteType(value)).toBe(false);
+        }
     });
 });

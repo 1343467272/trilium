@@ -1,6 +1,12 @@
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 
+import becca from "../../becca/becca";
+import { load } from "../../becca/becca_loader";
+import { getContext } from "../../services/context";
+import eventService from "../../services/events";
+import { getLog } from "../../services/log";
 import { getSql } from "../../services/sql/index";
+import { registerVirtualNoteProvider, unregisterVirtualNoteProvider } from "../../services/virtual_notes";
 import { createTextNote } from "../../test/api_fixtures";
 import { CoreApiTester } from "../../test/api_tester";
 
@@ -30,6 +36,7 @@ function setExpanded(branchIds: string[], isExpanded: number) {
             "UPDATE branches SET isExpanded = ? WHERE branchId = ?",
             [ isExpanded, branchId ]
         );
+        becca.getBranchOrThrow(branchId).isExpanded = !!isExpanded;
     }
 }
 
@@ -149,8 +156,12 @@ describe("Branches API (core)", () => {
             const notAnArray = await api.put(`/api/branches/move-to/${parent.branchId}`, {
                 body: { branchIds: child.branchId }
             });
+            const notAString = await api.put(`/api/branches/move-to/${parent.branchId}`, {
+                body: { branchIds: [ 42 ] }
+            });
 
-            expect([ missingBranch.status, missingTarget.status, notAnArray.status ]).toEqual([ 400, 400, 400 ]);
+            expect([ missingBranch.status, missingTarget.status, notAnArray.status, notAString.status ])
+                .toEqual([ 400, 400, 400, 400 ]);
             expect(getBranchRow(child.branchId)?.isDeleted).toBe(0);
         });
 
@@ -165,6 +176,19 @@ describe("Branches API (core)", () => {
             );
             expect(res.status).toBe(200);
             expect(res.body.success).toBe(true);
+        });
+
+        it("reorders a branch before a sibling that has siblings above it", async () => {
+            const parent = await createTextNote(api, { title: "Reorder of three" });
+            const first = await createTextNote(api, { parentNoteId: parent.noteId, title: "First" });
+            const second = await createTextNote(api, { parentNoteId: parent.noteId, title: "Second" });
+            const third = await createTextNote(api, { parentNoteId: parent.noteId, title: "Third" });
+
+            const res = await api.put(`/api/branches/${third.branchId}/move-before/${second.branchId}`);
+            expect(res.status).toBe(200);
+            expect(becca.getNoteOrThrow(parent.noteId).getChildBranches()
+                .sort((a, b) => a.notePosition - b.notePosition)
+                .map((branch) => branch.branchId)).toEqual([ first.branchId, third.branchId, second.branchId ]);
         });
 
         it("reorders a branch after a sibling", async () => {
@@ -256,6 +280,36 @@ describe("Branches API (core)", () => {
             expect(getBranchRow(branchId)?.isExpanded).toBe(0);
         });
 
+        it("announces the change of a known branch only", async () => {
+            const { branchId } = await createTextNote(api, { title: "Announced expansion" });
+            const emit = vi.spyOn(eventService, "emit");
+            const error = vi.spyOn(getLog(), "error");
+
+            try {
+                expect((await api.put("/api/branches/missingBranch123/expanded/1")).status).toBe(204);
+                expect(emit.mock.calls.filter(([ type ]) => type === eventService.ENTITY_CHANGED)).toEqual([]);
+
+                expect((await api.put(`/api/branches/${branchId}/expanded/1`)).status).toBe(204);
+                expect(emit).toHaveBeenCalledWith(eventService.ENTITY_CHANGED, {
+                    entityName: "branches", entity: becca.getBranchOrThrow(branchId)
+                });
+                expect(error).not.toHaveBeenCalled();
+            } finally {
+                emit.mockRestore();
+                error.mockRestore();
+            }
+        });
+
+        it("leaves the root branch alone and expands nothing below an unknown branch", async () => {
+            const root = await api.put("/api/branches/none_root/expanded/0");
+            expect(root.status).toBe(204);
+            expect(getBranchRow("none_root")?.isExpanded).toBe(1);
+
+            const subtree = await api.put<{ branchIds: string[] }>("/api/branches/missingBranch123/expanded-subtree/1");
+            expect(subtree.status).toBe(200);
+            expect(subtree.body.branchIds).toEqual([]);
+        });
+
         it("expands every descendant of a subtree, once per branch", async () => {
             const tree = await createSubtreeWithClone();
             setExpanded(tree.collapsed, 0);
@@ -287,6 +341,73 @@ describe("Branches API (core)", () => {
                 expect(getBranchRow(branchId)?.isExpanded).toBe(0);
             }
         });
+
+        it("reaches the virtual subtree below a note, and a subtree that is virtual itself", async () => {
+            const anchor = await createTextNote(api, { title: "Virtual anchor" });
+            const persistedChild = await createTextNote(api, { parentNoteId: anchor.noteId, title: "Persisted child" });
+            registerVirtualNoteProvider({
+                namespace: "_vexp",
+                parentNoteId: anchor.noteId,
+                getSubtree: () => [{
+                    id: "_vexp",
+                    title: "Virtual root",
+                    type: "book",
+                    children: [{
+                        id: "_vexpBook",
+                        title: "Virtual book",
+                        type: "book",
+                        children: [{ id: "_vexpPage", title: "Virtual page", type: "text" }]
+                    }]
+                }]
+            });
+
+            try {
+                getContext().init(() => load());
+                const virtualBranchIds = [ `${anchor.noteId}__vexp`, "_vexp__vexpBook", "_vexpBook__vexpPage" ];
+                const isExpanded = (branchId: string) => becca.getBranch(branchId)?.isExpanded;
+
+                const expand = await api.put<{ branchIds: string[] }>(`/api/branches/${anchor.branchId}/expanded-subtree/1`);
+                expect(new Set(expand.body.branchIds)).toEqual(new Set([ anchor.branchId, persistedChild.branchId, ...virtualBranchIds ]));
+                expect(getBranchRow(persistedChild.branchId)?.isExpanded).toBe(1);
+                expect(virtualBranchIds.map(isExpanded)).toEqual([ true, true, true ]);
+
+                const collapse = await api.put<{ branchIds: string[] }>(`/api/branches/_vexp__vexpBook/expanded-subtree/0`);
+                expect(new Set(collapse.body.branchIds)).toEqual(new Set([ "_vexp__vexpBook", "_vexpBook__vexpPage" ]));
+                expect(virtualBranchIds.map(isExpanded)).toEqual([ true, false, false ]);
+                expect(getBranchRow(persistedChild.branchId)?.isExpanded).toBe(1);
+            } finally {
+                unregisterVirtualNoteProvider("_vexp");
+                getContext().init(() => load());
+            }
+        });
+
+        it("expands a note with more children than a call can take as arguments", async () => {
+            const anchor = await createTextNote(api, { title: "Crowded anchor" });
+            const childCount = 200_000;
+            registerVirtualNoteProvider({
+                namespace: "_vbig",
+                parentNoteId: anchor.noteId,
+                getSubtree: () => [{
+                    id: "_vbig",
+                    title: "Crowded note",
+                    type: "book",
+                    children: Array.from({ length: childCount }, (_, index) => ({
+                        id: `_vbig${index}`, title: `Child ${index}`, type: "text" as const
+                    }))
+                }]
+            });
+
+            try {
+                getContext().init(() => load());
+
+                const res = await api.put<{ branchIds: string[] }>(`/api/branches/${anchor.noteId}__vbig/expanded-subtree/1`);
+                expect(res.status).toBe(200);
+                expect(res.body.branchIds).toHaveLength(childCount + 1);
+            } finally {
+                unregisterVirtualNoteProvider("_vbig");
+                getContext().init(() => load());
+            }
+        }, 60_000);
     });
 
     describe("prefixes", () => {
@@ -336,6 +457,15 @@ describe("Branches API (core)", () => {
             expect(res.body.count).toBe(2);
             expect(getBranchRow(a.branchId)?.prefix).toBe("batch");
             expect(getBranchRow(b.branchId)?.prefix).toBe("batch");
+        });
+
+        it("clears the prefix of a batch when given an empty one", async () => {
+            const a = await createTextNote(api, { title: "Batch clear" });
+            await api.put("/api/branches/set-prefix-batch", { body: { branchIds: [ a.branchId ], prefix: "x" } });
+
+            const res = await api.put("/api/branches/set-prefix-batch", { body: { branchIds: [ a.branchId ], prefix: " " } });
+            expect(res.status).toBe(200);
+            expect(getBranchRow(a.branchId)?.prefix).toBeNull();
         });
 
         it("400s when branchIds is not an array", async () => {

@@ -1,4 +1,13 @@
 // public/sw.js
+declare const self: ServiceWorkerGlobalScope;
+
+/** What a tab's local bridge answers a `LOCAL_FETCH` with (see `local-bridge.ts`). */
+interface LocalFetchReply {
+    type: "LOCAL_FETCH_RESPONSE" | "NOT_LEADER";
+    id: string;
+    response: { status?: number; headers?: Record<string, string>; body?: ArrayBuffer };
+}
+
 const VERSION = "localserver-v1.4";
 const STATIC_CACHE = `static-${VERSION}`;
 
@@ -111,11 +120,12 @@ async function networkFirst(request) {
 // a worker), so every tab's API traffic has to reach that specific tab. This is
 // a cache: the service worker is evicted when idle and loses it, so a miss falls
 // back to probing the open tabs.
-let leaderClientId = null;
+let leaderClientId: string | null = null;
 
 self.addEventListener("message", (event) => {
     if (event.data?.type === "LEADER_ANNOUNCE" && event.source) {
-        leaderClientId = event.source.id;
+        // Pages announce through `navigator.serviceWorker.controller`, so the source is a window.
+        leaderClientId = (event.source as WindowClient).id;
     }
 });
 
@@ -133,7 +143,7 @@ function isMainAppWindow(client) {
 async function findLeader(candidates) {
     for (const candidate of candidates) {
         const channel = new MessageChannel();
-        const replied = new Promise((resolve) => {
+        const replied = new Promise<{ isLeader?: boolean } | null>((resolve) => {
             const timeout = setTimeout(() => resolve(null), 1_000);
             channel.port1.onmessage = (event) => {
                 clearTimeout(timeout);
@@ -157,7 +167,6 @@ async function findLeader(candidates) {
  * window — which replies NOT_LEADER if it is not the one, leaving the caller to retry.
  */
 async function findLeaderClient() {
-    // @ts-expect-error - self.clients is valid in service worker context
     const all = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
     const candidates = all.filter(isMainAppWindow);
 
@@ -182,7 +191,6 @@ async function findLeaderClient() {
  * forwarder would report as whatever the static host says. This says so instead.
  */
 async function answerShareRequest(request, clientId) {
-    // @ts-expect-error - self.clients is valid in service worker context
     const all = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
 
     if (!all.some(isMainAppWindow)) {
@@ -198,11 +206,29 @@ async function answerShareRequest(request, clientId) {
     return forwardToClientLocalServer(request, clientId);
 }
 
-async function forwardToClientLocalServer(request, _clientId, retried = false) {
-    const { client, candidates } = await findLeaderClient();
+/**
+ * How long a request waits for a tab to own the database. A reloaded leader page requests
+ * `/bootstrap` before the browser has released the previous page's Web Lock and promoted it, so
+ * for a moment no tab answers as leader.
+ */
+const LEADER_WAIT_MS = 30_000;
+const LEADER_RETRY_DELAY_MS = 250;
 
-    // If no page is available, fall back to network
-    if (!client) return fetch(request);
+/**
+ * Answers a local API request that no tab can serve. The static host has no API of its own: a
+ * network request for one returns `index.html`, which the client fails to parse as JSON.
+ */
+function noLeaderResponse(reason) {
+    return new Response(JSON.stringify({ message: reason }), {
+        status: 503,
+        headers: { "content-type": "application/json; charset=utf-8" }
+    });
+}
+
+async function forwardToClientLocalServer(request, _clientId, deadline = Date.now() + LEADER_WAIT_MS) {
+    const { client } = await findLeaderClient();
+
+    if (!client) return noLeaderResponse("No Trilium tab is open to answer this request.");
 
     const reqUrl = request.url;
     const headersObj = {};
@@ -219,7 +245,7 @@ async function forwardToClientLocalServer(request, _clientId, retried = false) {
     const id = crypto.randomUUID();
     const channel = new MessageChannel();
 
-    const responsePromise = new Promise((resolve, reject) => {
+    const responsePromise = new Promise<LocalFetchReply | undefined>((resolve, reject) => {
         // Long enough for a request the worker answers late because it is deep inside one
         // synchronous stretch of work (a VACUUM of a multi-gigabyte database blocks it for well
         // over a minute), and just short of the ~5 minutes Chromium gives a fetch event before
@@ -253,22 +279,21 @@ async function forwardToClientLocalServer(request, _clientId, retried = false) {
 
     const localResp = await responsePromise;
 
-    // We picked a follower. It refused to open a second database; re-resolve the
-    // leader and try once more. Only once: leadership can flip between a tab
-    // answering WHO_IS_LEADER and that same tab serving the fetch, so an
-    // unbounded retry could ping-pong between two tabs indefinitely.
+    // We picked a follower, which refuses to open a second database. Re-resolve the leader until
+    // `deadline`: a tab can be waiting for the Web Lock, and leadership can flip between a tab
+    // answering WHO_IS_LEADER and that same tab serving the fetch.
     if (localResp?.type === "NOT_LEADER") {
         leaderClientId = null;
-        if (retried) return fetch(request);
+        if (Date.now() >= deadline) {
+            return noLeaderResponse("No Trilium tab took ownership of the database in time.");
+        }
 
-        const leader = await findLeader(candidates.filter((c) => c.id !== client.id));
-        if (!leader) return fetch(request);
-        return forwardToClientLocalServer(request, _clientId, true);
+        await new Promise((resolve) => setTimeout(resolve, LEADER_RETRY_DELAY_MS));
+        return forwardToClientLocalServer(request, _clientId, deadline);
     }
 
     if (!localResp || localResp.type !== "LOCAL_FETCH_RESPONSE" || localResp.id !== id) {
-    // Protocol mismatch; fall back
-        return fetch(request);
+        return noLeaderResponse("The Trilium tab sent an unexpected reply.");
     }
 
     // localResp.response: { status, headers, body }
@@ -329,7 +354,9 @@ async function streamBackupDownload(url) {
     let streamController: ReadableStreamDefaultController<Uint8Array> | null = null;
     const requestMore = () => {
         while (streamController && outstanding < MAX_CHUNKS_IN_FLIGHT
+            /* v8 ignore start -- @preserve: desiredSize is null only on an errored stream, and neither pull() nor a chunk handler reaches requestMore() after controller.error(). */
             && (streamController.desiredSize ?? 0) > 0) {
+            /* v8 ignore stop */
             outstanding++;
             port.postMessage({ type: "pull" });
         }
@@ -409,7 +436,7 @@ self.addEventListener("fetch", (event) => {
     // On the Capacitor custom URL scheme (capacitor://) the WebView serves app assets
     // through its native URLSchemeHandler, which a service worker cannot reach via fetch() —
     // let those requests fall through to the WebView's own loader. In practice the SW is only
-    // registered on http/https origins (main.ts uses a fetch/XHR interceptor instead of a SW
+    // registered on http/https origins (main.ts installs the native request bridge instead
     // on capacitor://), so this is a defensive guard rather than a hot path.
     if (self.location.protocol === "capacitor:") {
         return;

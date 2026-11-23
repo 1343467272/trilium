@@ -5,7 +5,7 @@ import { Suggestion } from "../../services/note_autocomplete";
 import tree from "../../services/tree";
 import Button from "../react/Button";
 import FormGroup from "../react/FormGroup";
-import { useTriliumEvent } from "../react/hooks";
+import { useTriliumEvent } from "../react/hooks/events";
 import Modal from "../react/Modal";
 import NoteAutocomplete, { type NoteAutocompleteHandle } from "../react/NoteAutocomplete";
 
@@ -48,7 +48,7 @@ export default function NotePickerDialog() {
             title={opts.current?.title ?? t("note_picker.title")}
             size="lg"
             zIndex={2000}
-            onShown={() => autocompleteRef.current?.showRecentNotes()}
+            onShown={() => autocompleteRef.current?.focus()}
             onSubmit={() => {
                 pickedNoteId.current = tree.getNoteIdFromUrl(suggestion?.notePath);
                 setShown(false);

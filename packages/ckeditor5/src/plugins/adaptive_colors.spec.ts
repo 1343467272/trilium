@@ -1,11 +1,14 @@
 import {
     _getModelData as getModelData,
     _setModelData as setModelData,
+    ButtonView,
     type ClassicEditor,
+    type ColorGridView,
     type DowncastAttributeEvent,
     Essentials,
     FontBackgroundColor,
     FontColor,
+    type FontColorSelectorDropdownView,
     GeneralHtmlSupport,
     type ModelElement,
     Paragraph,
@@ -17,6 +20,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import { createTestEditor } from "../../test/editor-kit.js";
 import AdaptiveColors from "./adaptive_colors.js";
+import Aside from "./aside/aside.js";
 
 describe("AdaptiveColors", () => {
     let editor: ClassicEditor;
@@ -120,6 +124,32 @@ describe("AdaptiveColors", () => {
         expect(saved).not.toContain("--tn-border-color");
     });
 
+    it("writes the variable of the background color of an aside, and of its swatches",
+        async () => {
+            const withAside = await createTestEditor([
+                Essentials, Paragraph, Aside, AdaptiveColors
+            ]);
+            const saved = "<aside style=\"--tn-background:#e64d4d;background-color:#e64d4d;\">" +
+                "<p>A</p></aside><p>Text</p>";
+            withAside.setData(saved);
+            expect(getModelData(withAside.model, { withoutSelection: true })).toBe(
+                "<asideBlock backgroundColor=\"#e64d4d\"><asideContent><paragraph>A</paragraph>" +
+                "</asideContent></asideBlock><paragraph>Text</paragraph>");
+            expect(withAside.getData()).toBe(saved);
+            const widget = withAside.editing.view.getDomRoot()?.querySelector("aside");
+            expect(widget?.style.getPropertyValue("--tn-background")).toBe("#e64d4d");
+
+            const aside = withAside.model.document.getRoot()?.getChild(0) as ModelElement;
+            withAside.model.change((writer) => writer.setSelection(aside, "on"));
+            withAside.execute("asideColor", { value: null });
+            expect(withAside.getData()).toBe("<aside><p>A</p></aside><p>Text</p>");
+            expect(widget?.style.getPropertyValue("--tn-background")).toBe("");
+
+            const { staticColorsGrid } = openColorDropdown(withAside, "asideColor");
+            expect(tileStyles(staticColorsGrid, "--tn-background"))
+                .toEqual([ [ "#555555", "rgb(85, 85, 85)" ] ]);
+        });
+
     it("keeps a variable out of the model, also with General HTML Support", async () => {
         const withGhs = await createTestEditor(
             [ Essentials, Paragraph, FontColor, GeneralHtmlSupport, AdaptiveColors ],
@@ -133,4 +163,61 @@ describe("AdaptiveColors", () => {
         expect(withGhs.getData())
             .toBe("<p><span style=\"--tn-color:#e64d4d;color:#e64d4d;\">a</span></p>");
     });
+
+    it("gives the tiles of the font color dropdowns the variable of their color", async () => {
+        const withPalette = await createTestEditor(
+            [ Essentials, Paragraph, FontColor, FontBackgroundColor, AdaptiveColors ],
+            {
+                fontColor: { colors: [ "#e64d4d", "#4d99e6" ] },
+                fontBackgroundColor: { colors: [ "#e5e64d" ], documentColors: 0 }
+            }
+        );
+        withPalette.setData("<p><span style=\"color:#4de64d;\">a</span></p>");
+
+        const fontColor = openColorDropdown(withPalette, "fontColor");
+        expect(tileStyles(fontColor.staticColorsGrid, "--tn-color")).toEqual([
+            [ "#e64d4d", "rgb(230, 77, 77)" ],
+            [ "#4d99e6", "rgb(77, 153, 230)" ]
+        ]);
+        expect(tileStyles(fontColor.documentColorsGrid, "--tn-color"))
+            .toEqual([ [ "#4de64d", "rgb(77, 230, 77)" ] ]);
+
+        // Each opening rebuilds the document colors.
+        fontColor.dropdown.isOpen = false;
+        withPalette.setData("<p><span style=\"color:#994de6;\">b</span></p>");
+        fontColor.dropdown.isOpen = true;
+        expect(tileStyles(fontColor.documentColorsGrid, "--tn-color"))
+            .toEqual([ [ "#994de6", "rgb(153, 77, 230)" ] ]);
+
+        const background = openColorDropdown(withPalette, "fontBackgroundColor");
+        expect(tileStyles(background.staticColorsGrid, "--tn-background"))
+            .toEqual([ [ "#e5e64d", "rgb(229, 230, 77)" ] ]);
+        expect(background.documentColorsGrid).toBeUndefined();
+
+        // Tiles of an unrendered dropdown have no element yet; other components are unchanged.
+        const unrendered = withPalette.ui.componentFactory.create("fontColor");
+        expect(() => { (unrendered as FontColorSelectorDropdownView).isOpen = true; })
+            .not.toThrow();
+        expect(withPalette.ui.componentFactory.create("undo")).toBeInstanceOf(ButtonView);
+    });
 });
+
+/** Renders and opens a font color dropdown, which builds its color grids. */
+function openColorDropdown(editor: ClassicEditor, name: string) {
+    const dropdown = editor.ui.componentFactory.create(name) as FontColorSelectorDropdownView;
+    dropdown.render();
+    dropdown.isOpen = true;
+    if (!dropdown.colorSelectorView) {
+        throw new Error(`The ${name} dropdown has no color selector.`);
+    }
+    const { staticColorsGrid, documentColorsGrid } =
+        dropdown.colorSelectorView.colorGridsFragmentView;
+    return { dropdown, staticColorsGrid, documentColorsGrid };
+}
+
+/** The variable and the inline background of each tile. */
+function tileStyles(grid: ColorGridView | undefined, variable: string) {
+    return [ ...grid?.items ?? [] ].map(({ element }) => [
+        element?.style.getPropertyValue(variable), element?.style.backgroundColor
+    ]);
+}

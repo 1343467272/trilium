@@ -18,9 +18,10 @@ pnpm --filter <pkg> test <pattern>      # e.g. pnpm --filter server test spec/et
 pnpm --filter <pkg> coverage             # per-package coverage (client, server, standalone)
 pnpm typecheck                           # all projects, native compiler, a few seconds
 pnpm dev:format-check | dev:format-fix   # stylistic formatting
+pnpm dev:check-startup [--update]        # client startup requests vs the allowlists, ~30 s
 ```
 
-- **Never run ESLint** (`dev:linter-check`, `dev:linter-fix`, `npx eslint`) — it dies with an out-of-memory error, so a run tells you nothing. CI does not lint either — there is no `eslint`/`linter-check` step anywhere in `.github/workflows/`, so lint findings never block a merge; the gates are `pnpm typecheck` and the per-package `test --coverage` runs. (`packages/*` is ignored by the ESLint config anyway.)
+- **Never run ESLint** (`dev:linter-check`, `dev:linter-fix`, `npx eslint`) — it dies with an out-of-memory error, so a run tells you nothing. CI does not lint either — there is no `eslint`/`linter-check` step anywhere in `.github/workflows/`, so lint findings never block a merge; the gates are `pnpm typecheck`, the per-package `test --coverage` runs and `pnpm dev:check-startup` (`startup.yml`), which fails when the client's startup makes a request its allowlist lacks: a module made eager by a change to the client shows up there (see the `measure-startup-requests` skill). (`packages/*` is ignored by the ESLint config anyway.)
 - **Never run `pnpm test:all`, `test:parallel`, `test:sequential`, or a whole-package `coverage`** during development — CI runs them on every push. Run the **narrowest** suite that covers what you touched: `pnpm --filter <pkg> test <pattern>` (Vitest treats the trailing argument as a substring filter over spec paths). Core specs need **two** runs, server and standalone (see Testing). Only reach for a full suite if the user asks or wants a final check.
 - **Typecheck with `pnpm typecheck`, not a raw `tsc`** — it resolves the project references a hand-written `tsc -p …` gets wrong, and is far cheaper than a test suite. Still, run it **once, after a piece of work is finished** — not after every edit: it builds the project references, and repeating it is a common way to lose minutes across a session. Two ways its output misleads: the incremental build does not recheck the files that use an ambient `.d.ts` (`types-lib.d.ts`) after it changes — delete `apps/client/dist/*.tsbuildinfo` (gitignored) before trusting the result; and a dependent project (`tsconfig.spec.json`, `apps/build-docs`) is checked only once the app project compiles, so its errors appear only after the app's are fixed, and some vanish with them.
 - **Two TypeScript versions, on purpose**: root `package.json` has `typescript` 6.x (the JS compiler API that TypeDoc, typescript-eslint and the browser-bundled language service in `packages/codemirror` load) and `@typescript/native` (7, drives `pnpm typecheck` and owns the `tsc` bin). Do **not** bump `typescript` to 7, dedupe them, or switch to the `@typescript/typescript6` shim (no `lib.*.d.ts` → client build breaks). Reasoning: `docs/Developer Guide/Developer Guide/Environment Setup.md`, "TypeScript".
@@ -36,12 +37,22 @@ pnpm dev:format-check | dev:format-fix   # stylistic formatting
 - **Commit by explicit path** — `git commit -F <message file> -- <paths>`, not whatever the index holds. The user stages and unstages in this worktree too, so between two commands the index can gain their files or lose yours. Give each commit its own message file: a `Write` onto an existing path that has not been read fails, and the commit then takes the old message.
 - **Never run a tree-wide git operation — no `git stash`, `git checkout --`, `git restore`.** The user edits this worktree at the same time, so a stash takes their uncommitted work with it, and their IDE can flush a partial buffer onto the stashed state and block the pop. To decide whether a failure predates your change, argue statically instead — check whether the failing spec even imports the module you touched. If a real A/B is unavoidable, copy the file, edit it in place, and restore it, touching only files you wrote; prefer `git worktree add` on a temp dir over anything that reaches the whole tree.
 
+### Commit messages
+
+- **Format**: `type(area): imperative summary`, e.g. `fix(search): keep result paths out of the bookmarks clone (closes #10021)`. The area names the subsystem (`search`, `share`, `desktop`, `collections/table`), never a file; the types in use are `fix`, `feat`, `perf`, `docs`, `chore` and `build`.
+- **Subject**: imperative mood, short (aim for 50 characters before any suffix), no trailing period, and it states the user-visible outcome rather than the mechanism.
+- **Issue references go in the subject**: `(closes #N)` for a bugfix, `(#N)` when the issue stays open, `(regression of #N)` for a regression. The body never carries the closing keyword.
+- **Body**: separated from the subject by a blank line, wrapped at 72 characters, and omitted when the subject says it all. Use it to explain what the user saw and why the code did it (naming the offending identifier), what changes and why that shape — including the alternative rejected — and what is deliberately unchanged or out of scope. Measurements, before/after numbers and red/green verification belong here, not in code comments.
+- **AI attribution is an `Assisted-by` trailer, not prose.** When an AI tool wrote or materially shaped the commit, end the message with a blank line and `Assisted-by: <tool and model>` (e.g. `Assisted-by: DeepSeek V4.1 Flash`), one trailer per tool. `Co-Authored-By` is for human co-authors and `Signed-off-by` is the human's DCO certification, so neither names a tool; never announce the tool in the subject or as a `Generated with …` footer. A commit hook rewrites the trailer to name the model (`Assisted-by: Claude Code (Claude Opus 5.5)`); that is expected, so leave it alone and don't mention it to the user.
+- **One logical change per commit**, each message self-contained: PR bodies are assembled from these bodies, so a message that only reads in sequence with the previous commit loses its rationale.
+
 ### Opening a PR
 
 `git push -u origin <branch>` then `gh pr create --base main --title … --body-file <file>`. There is no PR template in `.github/`, so the body is yours to shape.
 
 - **`origin` is `TriliumNext/Trilium`** — the working directory is named `Notes` and ~19 contributor forks are configured as remotes, so neither the path nor the remote list names the target. `gh` resolves it from `remote.origin.gh-resolved`, already set, so `--repo` is redundant; `upstream` is the archived `zadam/trilium` and is never a base.
 - **Write the body from the commit bodies, grouped by what the change does** — `git log --format='=== %s%n%b' main..HEAD`. A feature branch here carries a long, self-contained rationale per commit (the measurements, the rejected alternative, the reason a value is what it is), and a PR description that restates the subject lines throws all of it away. Group the commits under headings by area, not chronologically: a reviewer reads the reworked subsystem, not the order it was built in.
+- **The body describes the change, not how the branch got there.** No section on merges from `main`, conflict resolutions or rebases: they are branch bookkeeping, and the diff against `main` already holds their result. No "Testing" section either: CI runs the suites on every push, so a list of local `typecheck`/spec runs adds nothing. A red/green run that proves a fix belongs in that commit's body, and an untested gap goes in the chat reply to the user.
 - **Pass the body via `--body-file`, not `--body`.** Markdown of this length in an argument hits shell quoting and heredoc-in-`fish` problems; write it to the scratchpad first.
 - **Cosmetic `edit-docs` churn is ignored, not mentioned.** `pnpm edit-docs:edit-docs` (and `edit-docs:sync-docs`) reformats whole `apps/server/src/assets/doc_notes/**/*.html` files it merely opened (`<li><p>x</p></li>` ↔ `<li>x</li>`, `&nbsp;` shifted across a tag, attributes rewrapped), so a docs commit routinely touches pages the branch has nothing to do with. That is expected and needs neither a rebase nor a note in the description. Read the diff first, though: reflow is safe, but a changed `href`, a dropped `<img src>` or a paragraph that lost its text is a real defect and must be fixed before the PR goes up.
 
@@ -54,6 +65,7 @@ apps/
   desktop/              # Electron: server + client in one process (see developing-electron-desktop skill)
   standalone/           # whole stack in the browser: core in a Web Worker on SQLite WASM + OPFS, no Node (see developing-standalone skill)
   mobile/               # Capacitor shell around standalone (see developing-capacitor-mobile skill)
+  showcase/             # Play Store and Flathub listings, website hero and screenshots, from a demo document (building-showcase-assets skill)
   web-clipper/, website/, db-compare/, dump-db/, edit-docs/, build-docs/, icon-pack-builder/, script-deployer/
 packages/
   trilium-core/         # entities, services, SQL, sync, most API routes — shared by server, desktop, standalone
@@ -120,7 +132,9 @@ Shared components live in `apps/client/src/widgets/react/` — **always** reuse 
 - **Per-component CSS files**: each component should have a matching `.css` file (e.g. `my_dialog.tsx` → `my_dialog.css`), imported at the top of the component file.
 - **CSS nesting for scoping**: since CSS modules are not available, scope styles using a root class and native CSS nesting. For example, a dialog with `className="my-dialog"` should have its styles nested under `.modal.my-dialog { … }`.
 - **Reuse existing components** instead of building custom markup — prefer `FormTextBox`, `FormTextBoxWithUnit`, `FormSelect`, `Slider`, `Button`, etc. over hand-rolled `<input>`, `<select>`, or `<button>` elements.
+- **Mobile layout CSS goes by screen size, not into `style.css`** (which every layout loads). The shell of the mobile layout (`#mobile-rest-container`, `#detail-container`, `#mobile-sidebar-wrapper`, the launch bar, mobile modals and bottom sheets) is styled in `apps/client/src/layouts/`: `MobileLayout.css` for both sizes, `MobileLayout.phone.css` for `@media (max-width: 991px)` and `MobileLayout.tablet.css` for `@media (min-width: 992px)`, all imported by `MobileLayout.tsx`. A component's own phone or tablet variant stays in its component CSS under the same media query. The breakpoint must match `NARROW_LAYOUT` (`apps/client/src/services/utils.ts`), which code reads through `useMediaQuery(NARROW_LAYOUT)` or `isNarrowLayout()`. The note tree has a breakpoint of its own, as a tablet in portrait docks it while keeping the bottom launch bar: whether it lies under the note or docks beside it is `STACKED_TREE_LAYOUT` (`isTreeStacked()`: under 744px wide, or a screen under 600px on its shorter side, which an open keyboard does not change), and its rules live in `MobileSidebar.css` and `MobileNoteNavigator.css`. Dialogs follow the same breakpoint, not `NARROW_LAYOUT`: they are bottom sheets (and the master-detail flow of `useMobileMasterDetail()`) only on a phone, and float as on desktop on a tablet in either orientation, so their phone rules sit under `@media (max-width: 743px), (max-device-width: 599px), (max-device-height: 599px)`.
 - **Safe-area insets** always read `var(--safe-area-inset-top, env(safe-area-inset-top))` (and the `-bottom`/`-left`/`-right` twins), never a bare `env()`. Android's WebView leaves `env(safe-area-inset-*)` at `0`, so `apps/mobile`'s `MainActivity` injects the real values as those custom properties; the `env()` fallback covers iOS and desktop browsers, where nothing is injected. Details in the **`developing-capacitor-mobile` skill**.
+- **Colors in note content** (font, highlight, table and cell colors) are saved with a `--tn-*` variable next to the color and adapted to the theme only in CSS (`packages/ckeditor5/src/theme/adaptive_colors.css`). Load the **`working-with-adaptive-colors` skill** before touching the palette, the `AdaptiveColors` plugin, the `--adaptive-*` limits or a surface that shows note colors.
 
 ### API Architecture
 
@@ -148,10 +162,16 @@ Shared components live in `apps/client/src/widgets/react/` — **always** reuse 
 `apps/standalone` runs the client on the page and `@triliumnext/core` — plain JS — in a dedicated Web Worker over `@sqlite.org/sqlite-wasm` persisted in OPFS; a Web Lock elects the one tab that owns the database, which answers its own API calls straight from the worker (`standaloneApi.localFetch`); the service worker forwards other tabs' calls to it and covers what the page still requests. Every core provider has a browser twin in `apps/standalone/src/lightweight/` — **a new provider or Node import in core breaks this build first.** Load the **`developing-standalone` skill** before touching `sw.ts`, `main.ts`, `local-server-worker.ts`, `lightweight/*` or `vite.config.mts`.
 
 ### Mobile (Capacitor) app
-`apps/mobile` wraps the standalone WASM build in a Capacitor WebView — no network backend. Its one tab always owns the worker, so the client answers most API calls in-page; what still leaves it (images, fonts, uploads) goes through the service worker on Android, at `https://localhost`, and through `apps/standalone/src/ios-interceptors.ts` on iOS, at `capacitor://localhost`, where no service worker can register. **`iosScheme: "https"` is a no-op and must not be re-added, and the iOS interceptor path is not dead code.** Load the **`developing-capacitor-mobile` skill** before touching `apps/mobile`, `ios-interceptors.ts`, `capacitor_http_handler.ts` or the `capacitor:` branches of `sw.ts`/`main.ts`.
+`apps/mobile` wraps the standalone WASM build in a Capacitor WebView — no network backend. Its one tab always owns the worker, so the client answers most API calls in-page; what still leaves it (images, fonts, media, iframes) goes to a native request bridge instead of a service worker: `TriliumRequestBridge.java` from `shouldInterceptRequest` on Android, at `https://localhost`, and `TriliumRequestBridge.swift` from Capacitor's `capacitor://` scheme handler (re-typed with `object_setClass`) on iOS, where no service worker can register. Both forward to `apps/standalone/src/native-request-bridge.ts` and answer GET/HEAD only. **`iosScheme: "https"` is a no-op and must not be re-added.** Load the **`developing-capacitor-mobile` skill** before touching `apps/mobile`, `native-request-bridge.ts`, `capacitor_http_handler.ts` or the `capacitor:` branches of `sw.ts`/`main.ts`.
 
 ### PDF viewer
 PDF notes render in Mozilla's PDF.js viewer plus Trilium's code from `packages/pdfjs-viewer`, which every app serves from the built `dist` — **rebuild it (`pnpm --filter @triliumnext/pdfjs-viewer build`) after every viewer change**, since no `*:start` script does; load the **`developing-pdf-viewer` skill** before touching the viewer, `Pdf.tsx` or the PDF sidebar panels.
+
+### Outline (right sidebar)
+The Outline tab (`apps/client/src/widgets/sidebar/TableOfContents.tsx`) picks a provider by note type: text notes read the editor or the rendered content, Markdown and AI chat notes publish `toc` context data, and PDF, DOCX, ODT and EPUB files, as notes or as attachments, go through `CachedToCProvider`, which shows the ToC cache of the document their type widget publishes as `tocDocument`. Load the **`working-with-toc-cache` skill** before touching `CachedToCProvider`, a `tocDocument` publisher (`Pdf.tsx`, `Office.tsx`, `Attachment.tsx`) or the outline of a new file format.
+
+### Vim mode in text notes
+Text notes have an optional Vim mode: the Vim engine of code notes (`@replit/codemirror-vim-core`) drives CKEditor through an adapter in `packages/ckeditor5/src/plugins/vim/`, which reads the note as a list of lines. **A new block, widget or container in the text editor has to work as lines too**, and the engine's quirks are answered by wrappers that look removable and are not. Load the **`developing-vim-mode` skill** before touching the plugin, `text/vim_mode.ts`, `layout/VimStatus.tsx` or the structure of the text editor's model. The skill also holds the tools for testing Vim mode in the running app (`live.mjs`, `simulate.mjs`) and the plan of a simulation round.
 
 ### Database
 
@@ -163,10 +183,11 @@ SQLite (`better-sqlite3` on Node, `@sqlite.org/sqlite-wasm` on OPFS in standalon
 - Client: `import { t } from "../services/i18n"`; everywhere else: `import { t } from "i18next"`. Never hardcode user-facing text, including in Electron dialogs/tray/IPC.
 - **The `en` catalogues are US English** — `color`, `center`, `meter`, `recognize`, `labeled`, `canceled`. `en-GB` is a locale of its own and carries only the strings whose British spelling differs, so when a new or edited string contains one of those words, add the British form there too (`node .claude/skills/translating-locales/locale.mjs merge en-GB <catalog> <file>`). Leave `en-GB` alone when the spelling is the same in both.
 - Interpolate with `{{var}}`. The client turns i18next's HTML-escaping off in `initLocale()` — translated strings are rendered as text, where escaping reached the reader as `&#x2F;` — so a string headed for a sink that takes HTML escapes its own values: `Menu` titles and `highlightedNotePathTitle` take HTML, so their callers wrap interpolated values in `escapeHtml()` (`t("table_view.hide-column", { title: escapeHtml(title) })`), and the confirm/info dialogs sanitize a string message with DOMPurify (`SanitizedHtml`). The server catalogue still escapes, hence `{{- var}}` on its quote-carrying values. Interpolated **components** whose order can vary by language (links, note references) use `<Trans>` from `react-i18next`, not `t()`.
+- **Menu labels**: a noun for an item that opens a place or toggles a mode (_Backend log_, _Fullscreen_, never "Show …"/"Toggle …"), an imperative verb only for one that acts (_Reload frontend_, _Log out_), and a trailing "..." when it needs more input. Rules: `building-client-ui` skill, "Dropdowns: menus and panels". To reword a string, change the English value and keep the key.
 - **Multi-paragraph text is one message with `\n\n` between paragraphs**, never a key per paragraph, so the translation decides where paragraphs fall. Render it with `.pre-wrap-text` or split it on blank lines into `<p>` — see the `working-with-translations` skill.
 - Third-party components (mind-map context menu, …) still go through `t()` with their strings under a dedicated namespace (e.g. `"mind-map"`).
 - **Text editor (`packages/ckeditor5`)**: plugins call `editor.t("English text")` — the English text *is* the message id, the entry lives under `text-editor.ck` keyed by its slug, and `apps/client/src/services/i18n.spec.ts` fails on a missing or stale one. Rules (name it `t`, literal argument, don't shadow upstream strings, `MESSAGE_OVERRIDES`, `renderShortcut`): **`ckeditor5-plugin-development` skill**.
-- New locale: `docs/Developer Guide/Developer Guide/Concepts/Internationalisation  Translations/Adding a new locale.md`.
+- New display language: load the **`adding-a-display-language` skill** (readiness, the per-library mappings, the Electron locale check); the step list is `docs/Developer Guide/Developer Guide/Concepts/Internationalisation  Translations/Adding a new locale.md`.
 
 ### Attribute Inheritance
 
@@ -184,6 +205,7 @@ Use `note.getOwnedAttribute()` for direct, `note.getAttribute()` for inherited.
 ### Shared Types Policy
 - Types shared between client and server belong in `@triliumnext/commons` (`packages/commons/src/lib/`)
 - Import shared types directly from `@triliumnext/commons` - do not re-export them from app-specific modules
+- **In code the browser loads** (`apps/client`, `packages/ckeditor5`, `packages/codemirror`, `packages/share-theme`), only `import type` comes from the `@triliumnext/commons` index. A value comes from its own file: `import { dayjs } from "@triliumnext/commons/src/lib/dayjs.js"`. The dev server serves modules one by one, so one value import from the index loads all of its ~60 files
 - Keep app-specific types (e.g., `LlmProvider` for server, `StreamCallbacks` for client) in their respective apps
 
 ## Important Patterns
@@ -212,7 +234,7 @@ Use `note.getOwnedAttribute()` for direct, `note.getAttribute()` for inherited.
 
 - **Server tests** (`apps/server/spec/`): Vitest, must run sequentially (shared DB), forks pool, max 6 workers
 - **Client tests** (`apps/client/src/`): Vitest with happy-dom environment, can run in parallel
-- **Core tests** (`packages/trilium-core/src/**/*.spec.ts`): `trilium-core` has no runner of its own — the **server and standalone suites both include** its specs (`apps/server/vite.config.mts`, `apps/standalone/vite.config.mts`) and run them against different platform providers (node + better-sqlite3 vs. happy-dom + sqlite-wasm). Green under `pnpm --filter server test` is **not** proof; run `pnpm --filter standalone test` as well. See the `writing-unit-tests` skill for the cross-runtime traps
+- **Core tests** (`packages/trilium-core/src/**/*.spec.ts`): `trilium-core` has no runner of its own — the **server and standalone suites both include** its specs (`apps/server/vite.config.mts`, `apps/standalone/vite.config.mts`) and run them against different platform providers (node + better-sqlite3 vs. sqlite-wasm in a scope shaped like standalone's Web Worker: no DOM, and dependencies resolved through their `browser` builds). Green under `pnpm --filter server test` is **not** proof; run `pnpm --filter standalone test` as well. See the `writing-unit-tests` skill for the cross-runtime traps
 - **E2E tests** (`packages/trilium-e2e/`): Shared Playwright tests, run via `pnpm --filter server e2e` or `pnpm --filter standalone e2e`
 - **ETAPI tests** (`apps/server/spec/etapi/`): External API contract tests
 - **Browser-mode tests** (`packages/ckeditor5`) drive a real headless Chromium via `@vitest/browser-playwright` (`pnpm exec playwright install chromium` once); where that browser cannot run (NixOS), point `CHROME_BIN` at a system one — never add a local override config. See the `ckeditor5-testing` skill
@@ -224,9 +246,13 @@ Use `note.getOwnedAttribute()` for direct, `note.getAttribute()` for inherited.
 
 ## Documentation
 
-- Script API reference — Generated by `apps/build-docs` (TypeDoc) into the gitignored `site/script-api/{backend,frontend,electron}` and published to [docs.triliumnotes.org](https://docs.triliumnotes.org/). Not committed; never hand-edit — it's regenerated from the script API type definitions
-- `docs/User Guide/` — Markdown pages plus `!!!meta.json`; the in-app help under `apps/server/src/assets/doc_notes/` and `apps/standalone/src/assets/help_meta.json` are **generated from it and never hand-edited**. Edit the Markdown by hand or in the editor (`pnpm edit-docs:edit-docs`), then run `pnpm edit-docs:sync-docs` so the HTML and both help metas follow. A page's shape (a new page, an image, a rename, a move) is meta work — the **`writing-documentation` skill**'s `docs.mjs` does it (`new`, `image`, `rename`, `move`, `delete`) and audits the trees (`check`); load the skill before touching `docs/`
+- `docs/User Guide/` — Markdown pages plus `!!!meta.json`; the in-app help artifacts `apps/server/src/assets/help/help_meta.json` and `help_content.json` are **generated from it and never hand-edited**. Edit the Markdown by hand or in the editor (`pnpm edit-docs:edit-docs`), then run `pnpm edit-docs:sync-docs` so both artifacts follow. A page's shape (a new page, an image, a rename, a move) is meta work — the **`writing-documentation` skill**'s `docs.mjs` does it (`new`, `image`, `rename`, `move`, `delete`) and audits the trees (`check`); load the skill before touching `docs/`
+- Generated User Guide pages — the ETAPI, internal API, Electron API and frontend/backend script API references are rendered by `apps/edit-docs` (`openapi_markdown.ts`, `typedoc_markdown.ts`) from the sources listed under `openApiPages` / `typeDocPages` in `edit-docs-config.yaml`, on every `sync-docs` and `edit-docs` run. Never hand-edit them: change the OpenAPI document or the TypeScript comments, then `sync-docs`
 - `docs/Developer Guide/` and `docs/Release Notes/` — Safe for direct Markdown editing (also normalized by `sync-docs`)
+
+### In-app help (the `_help` subtree)
+
+Help pages are **virtual notes** (`packages/trilium-core/src/services/virtual_notes.ts`): they exist only in becca, are never persisted or synced, and are read-only through an inheritable `readOnly` label on `_help`. `edit-docs` renders them from the Markdown into the two artifacts above; their images stay in `docs/User Guide/` and every packaging path (server, desktop, standalone) copies them itself. Load the **`in-app-help` skill** before touching the pipeline or its providers.
 
 ### A user-facing change is documented in the same change
 
@@ -237,7 +263,8 @@ follow-up. Before reporting the work done: `node .claude/skills/writing-document
 --diff` (plus `impact "<feature name>"` for names the diff cannot know) lists the pages that mention the
 changed UI strings and the help pages wired from the touched components; read every hit and edit what
 describes an affordance that changed; a feature no page covers gets a page (`docs.mjs new`). Then
-`docs.mjs sync` and `docs.mjs check`. Release notes are the maintainer's at release time — not on a branch.
+`docs.mjs sync` and `docs.mjs check`. The release note itself is the maintainer's at release time; what a
+change contributes to it is a changelog entry (below).
 
 Two traps this catches:
 
@@ -247,6 +274,43 @@ Two traps this catches:
 - **A capability gate has a blast radius.** Widening one (a note type added to a list a widget switches
   on) can surface panels, bars and menu entries the change never mentioned. Grep the gate's other readers
   and say what else now appears.
+
+### A user-facing change gets a changelog entry
+
+The release note is built from `.changelog/*.md` files, one per change a user can notice, so **a fix or
+feature that reaches users adds its entry in the same commit**. Skip it for internal changes, for a fix to
+something introduced since the last release, and for a fix whose closed issue's title already reads as the
+entry (closed issues are listed without one).
+
+1. `pnpm changelog:new <slug>` prints the path of a new file; replace its whole template, comments
+   included, with only the keys that apply.
+2. `type`: `fix` or `improvement` for most changes. `area` is required for both, one of the names the
+   template lists (`AREAS` in `scripts/release-notes.mts`), e.g. `Text editor`, `Search`, `Tree`.
+3. `closes: [N]` when the commit closes an issue. It only links: the issue is still closed by
+   `(closes #N)` in the commit subject. Leave it out for a discussion or an idea.
+4. `credits` names only an outside contributor whose code is the change. **Never credit the reporter** of
+   the bug or the author of the idea, and leave it out when the maintainers wrote the change.
+5. The body is one short line, past tense for a fix, describing what the user saw, not the code,
+   and naming the symptom once rather than every case or condition that triggers it (no "when the
+   size is not 100%" clause): "Typing `/2`
+   in the slash command menu suggested the column layout before the heading", not "Rank exact alias
+   matches first". A highlight is a few short paragraphs in the same plain register; its numbers are
+   the ones a user feels, never request counts or sizes (`writing-documentation` skill,
+   `references/changelog-entries.md`).
+6. `pnpm changelog:lint`, then commit the entry with the code.
+
+```markdown
+---
+type: fix
+area: Text editor
+---
+
+Typing `/2` to `/4` in the slash command menu suggested the column layout before the heading of that level.
+```
+
+Full format, `notable` and the other types: `.changelog/README.md`. `pnpm chore:release-notes <version>
+--unlisted` lists the fixes and features that slipped through without one. Entries are public before the
+release: the nightly release body lists them as the next note will (`pnpm chore:release-notes unreleased`).
 
 ## Recipes
 
@@ -265,6 +329,15 @@ Tools are `defineTools({...})` registries in `packages/trilium-core/src/services
 
 ### Server-Side Static Assets
 Node-side assets (templates, translations, prompts) live in `apps/server/src/assets/` and are read via `RESOURCE_DIR` from `apps/server/src/services/resource_dir.ts` (`path.join(RESOURCE_DIR, "llm", "prompts", …)`); assets core itself reads (`schema.sql`, LLM skills) live in `packages/trilium-core/src/assets/`. **Never resolve paths with `import.meta.url`/`fileURLToPath` or `__dirname` + relative path** — the server bundles to `dist/main.mjs` plus lazy `chunks/`, so both point at the bundle (or at whichever chunk the module landed in), not the source tree.
+
+#### A new static route needs a dev path too, and a 200 does not mean it works
+
+In dev, Vite's middleware owns whole URL prefixes and answers anything it does not recognise with `index.html`. A missing static route therefore returns **200 with `text/html`**, not a 404 — so `curl -o /dev/null -w "%{http_code}"`, and any test that only checks the status, passes while every asset is broken. **Check `Content-Type` (or the body), never the status alone.**
+
+Two places apply the fallback, and both need the route added explicitly:
+
+- **server** — `apps/server/src/routes/assets.ts` mounts Vite on `/${assetUrlFragment}/` with an allowlist (`/images/`, `/doc_notes/`, `/help/`) of prefixes that fall through to the static mounts. A path not on that list is swallowed
+- **standalone** — `apps/standalone/vite.config.mts`; `viteStaticCopy` targets are served in dev, but anything copied by a custom plugin needs its own `configureServer` middleware (see `copyHelpAssetsPlugin` and `pdfjsServePlugin`). A plugin marked `apply: "build"` does nothing under `standalone:start`
 
 ## MCP Server
 

@@ -294,6 +294,42 @@ describe("DeepSeekProvider reasoning effort", () => {
         const legacy = await requestBody({ model: "deepseek-chat", reasoningEffort: "max" });
         expect(legacy).not.toHaveProperty("thinking");
         expect(legacy).not.toHaveProperty("reasoning_effort");
+
+        // A chat without a model runs the provider's default, `deepseek-chat`, which has no levels.
+        const unnamed = await requestBody({ reasoningEffort: "max" });
+        expect(unnamed).toMatchObject({ model: "deepseek-chat" });
+        expect(unnamed).not.toHaveProperty("thinking");
+    });
+});
+
+describe("DeepSeekProvider web search", () => {
+    it("offers built-in search through DeepSeek's Search API, with the provider's key", async () => {
+        const fetchMock = vi.fn()
+            .mockResolvedValueOnce(sseResponse([ { choices: [ { index: 0, delta: { role: "assistant", tool_calls: [ {
+                index: 0, id: "call1", type: "function", function: { name: "web_search", arguments: JSON.stringify({ query: "trilium" }) }
+            } ] }, finish_reason: "tool_calls" } ] } ]))
+            .mockResolvedValueOnce(new Response(JSON.stringify({ results: [ { title: "Trilium", url: "https://triliumnotes.org", summary: "Notes" } ] })))
+            .mockResolvedValueOnce(sseResponse([ { choices: [ { index: 0, delta: { role: "assistant", content: "Found it" }, finish_reason: "stop" } ] } ]));
+        vi.stubGlobal("fetch", fetchMock);
+
+        const config: LlmProviderConfig = { model: "deepseek-v4-flash", enableWebSearch: true };
+        for await (const _ of streamToChunks(new DeepSeekProvider("sk-deep").chat([{ role: "user", content: "Search" }], config))) { /* drain */ }
+
+        expect(fetchMock).toHaveBeenCalledTimes(3);
+        const [ chatUrl, chatInit ] = fetchMock.mock.calls[0] as [ string, RequestInit ];
+        expect(chatUrl).toBe("https://api.deepseek.com/v1/chat/completions");
+        const toolNames = JSON.parse(String(chatInit.body)).tools.map((t: { function: { name: string } }) => t.function.name);
+        expect(toolNames.sort()).toEqual([ "read_web_page", "web_search" ]);
+
+        const [ searchUrl, searchInit ] = fetchMock.mock.calls[1] as [ string, RequestInit ];
+        expect(searchUrl).toBe("https://api.deepseek.com/v1/tools/search");
+        expect(new Headers(searchInit.headers).get("Authorization")).toBe("Bearer sk-deep");
+        expect(JSON.parse(String(searchInit.body))).toMatchObject({ query: "trilium" });
+
+        const followUp = String((fetchMock.mock.calls[2] as [ string, RequestInit ])[1].body);
+        expect(followUp).toContain("https://triliumnotes.org");
+        // A result without `searchProvider` shows the magnifier, as other built-in searches do.
+        expect(followUp).not.toContain("searchProvider");
     });
 });
 
